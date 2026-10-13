@@ -11,8 +11,12 @@ pub fn socket_path() -> PathBuf {
     base.join("ftm").join("ftmd.sock")
 }
 
+/// `$XDG_CONFIG_HOME/ftm`, else `~/.config/ftm` on both platforms.
 pub fn config_dir() -> PathBuf {
-    dirs::home_dir().unwrap_or_default().join(".config").join("ftm")
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"))
+        .join("ftm")
 }
 
 pub fn repo_config_path(repo_name: &str) -> PathBuf {

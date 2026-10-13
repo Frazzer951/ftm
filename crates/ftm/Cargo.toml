@@ -7,6 +7,7 @@ repository.workspace = true
 version.workspace = true
 
 [dependencies]
+base64 = "0.23.1"
 clap = { version = "4.6.7", features = ["derive", "env"] }
 eyre = "0.6.14"
 ftm-core = { version = "0.1.0", path = "../ftm-core" }

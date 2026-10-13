@@ -39,6 +39,10 @@ pub enum Request {
         cols: u16,
         rows: u16,
     },
+    /// The pane's buffered raw output, as `Response::Output`.
+    Capture {
+        pane: PaneId,
+    },
     Subscribe,
 }
 
@@ -57,12 +61,26 @@ pub struct SpawnRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum Response {
-    Pong { version: String },
-    Workspaces { workspaces: Vec<Workspace> },
-    Spawned { workspace: Workspace },
-    Pane { pane: PaneId },
+    Pong {
+        version: String,
+    },
+    Workspaces {
+        workspaces: Vec<Workspace>,
+    },
+    Spawned {
+        workspace: Workspace,
+    },
+    Pane {
+        pane: PaneId,
+    },
+    /// `data` is base64.
+    Output {
+        data: String,
+    },
     Ok,
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

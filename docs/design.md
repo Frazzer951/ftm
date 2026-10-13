@@ -29,7 +29,7 @@ Every PTY the daemon starts gets:
 | `FTM_PANE_ID` | the pane itself |
 | `FTM_NAME` | the workspace name (`claude -n`) |
 
-Inherited `CLAUDECODE`, `CLAUDE_CODE_*` and `SUPACODE_*` are stripped, so an agent started from inside another agent is not treated as nested Claude Code. Panes run `$SHELL -l`; an agent's first pane runs `$SHELL -l -i -c '<setup; >claude -n "$FTM_NAME" ${FTM_BRIEF:+"$FTM_BRIEF"}; exec "$SHELL" -l'`, with the brief passed in the environment rather than interpolated. Each pane keeps the last 1 MiB of raw output; `Subscribe` replays it, then streams live.
+Inherited `CLAUDECODE`, `CLAUDE_CODE_*` and `SUPACODE_*` are stripped, so an agent started from inside another agent is not treated as nested Claude Code. Panes run `$SHELL -l`; an agent's first pane runs `$SHELL -l -i -c '<setup; >claude -n "$FTM_NAME" ${FTM_BRIEF:+"$FTM_BRIEF"}; exec "$SHELL" -l'`, with the brief passed in the environment rather than interpolated. `FTM_AGENT_CMD` (read by ftmd, default `claude`) replaces `claude` in that script, e.g. `claude --model haiku` or the fake agent the tests use; it is shell syntax, so it may carry quoted flags. Each pane keeps the last 1 MiB of raw output; `Subscribe` replays it, then streams live.
 
 `ftm spawn` run inside a workspace defaults `--parent` to `$FTM_WORKSPACE_ID`. That is the whole leader/worker mechanism: no registration step, no config.
 
@@ -44,13 +44,15 @@ ftm spawn terminal|agent [--path P] [--name N] [--worktree BRANCH [--base REF] [
                          [--brief FILE] [--parent ID | --detached]
 ftm status working|needs-input|idle|done      # id from $FTM_WORKSPACE_ID
 ftm close [--remove-worktree]
+ftm capture <pane|workspace> [--raw]          # buffered output, escapes stripped unless --raw
+ftm send <pane|workspace> <text> [--enter]    # type into a pane; a workspace id means its first pane
 ```
 
-Planned: `ftm attach`, `ftm send` (type into a pane), `ftm gc` (remove worktrees whose PR merged), `ftm tab`/`ftm split`.
+Planned: `ftm attach`, `ftm gc` (remove worktrees whose PR merged), `ftm tab`/`ftm split`.
 
 ## Worktree creation
 
-Per-repo config at `~/.config/ftm/repos/<repo>.toml`, plain files the app never holds in memory:
+Per-repo config at `~/.config/ftm/repos/<repo>.toml` (`$XDG_CONFIG_HOME/ftm/...` when set), plain files the app never holds in memory:
 
 ```toml
 base = "origin/main"
@@ -66,7 +68,12 @@ Steps:
 4. Always: copy gitignored paths matching `copy_ignored`. Copying all ignored files would drag in `.venv`, `node_modules`, `target/`.
 5. Run `setup` in the first pane, then start `claude` (or the shell). Setup runs inline before the agent starts, so nothing has to wait on a sentinel file.
 
-Worktrees live under `~/.local/share/ftm/worktrees/<repo>/<branch>` (configurable).
+Worktrees live under `~/.local/share/ftm/worktrees/<repo>/<branch>` (`$XDG_DATA_HOME/ftm/worktrees` when set). `--remove-worktree` never forces: it fails on a dirty worktree, deletes the branch only if merged (`git branch -d`), and prunes empty `prefix/` directories.
+
+## Testing
+
+- `cargo test` runs `crates/ftmd/tests/agents.rs`: ftmd on a private socket with temp `HOME`/`XDG_*` and `FTM_AGENT_CMD` set to a fake agent that drives the real `ftm` CLI (nesting, `--detached`, status, worktree copy + setup, close/reparent/kill, worktree removal).
+- `scripts/agent-smoke.sh` is an opt-in live check with real Claude (Haiku): an isolated ftmd, a leader agent that spawns a child, and assertions on its results file, `ftm ls --json` and `ftm capture`. It costs a little usage, so it is not part of `cargo test`. Hook-driven status checks get added with milestone 5.
 
 ## Claude Code integration
 

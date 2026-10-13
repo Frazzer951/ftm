@@ -3,7 +3,7 @@ use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use eyre::{Result, WrapErr, bail, eyre};
 use ftm_core::model::{Kind, Layout, PaneId, SplitDir, Status, Tab, TabId, Workspace, WorkspaceId, Worktree};
 use ftm_core::protocol::{Event, Request, Response, SpawnRequest};
-use ftm_core::{ENV_NAME, ENV_PANE_ID, ENV_SOCKET, ENV_WORKSPACE_ID};
+use ftm_core::{ENV_AGENT_CMD, ENV_NAME, ENV_PANE_ID, ENV_SOCKET, ENV_WORKSPACE_ID};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
@@ -156,8 +156,10 @@ fn shell() -> String {
 fn script(startup: Startup) -> Option<String> {
     let setup = startup.setup.map(|s| format!("{s}; ")).unwrap_or_default();
     if startup.agent {
+        let agent = std::env::var(ENV_AGENT_CMD).ok().filter(|c| !c.trim().is_empty());
+        let agent = agent.as_deref().unwrap_or("claude");
         Some(format!(
-            r#"{setup}claude -n "$FTM_NAME" ${{FTM_BRIEF:+"$FTM_BRIEF"}}; exec "$SHELL" -l"#
+            r#"{setup}{agent} -n "$FTM_NAME" ${{FTM_BRIEF:+"$FTM_BRIEF"}}; exec "$SHELL" -l"#
         ))
     } else if startup.setup.is_some() {
         Some(format!(r#"{setup}exec "$SHELL" -l"#))
@@ -247,6 +249,14 @@ fn signal_groups(groups: &[libc::pid_t], signal: libc::c_int) {
     }
 }
 
+/// Terminates every pane before ftmd exits. Their processes would get SIGHUP from the closing ttys anyway, but an
+/// agent ignores that.
+pub fn shutdown(shared: &Shared) {
+    let panes: Vec<Pane> = lock(shared).panes.drain().map(|(_, pane)| pane).collect();
+    let reaping: Vec<_> = panes.into_iter().map(reap).collect();
+    reaping.into_iter().for_each(|h| drop(h.join()));
+}
+
 /// Snapshot taken under the lock, so replaying it and then reading `rx` neither drops nor repeats output.
 pub fn subscribe(shared: &Shared) -> (broadcast::Receiver<Event>, Vec<Event>) {
     let state = lock(shared);
@@ -286,6 +296,9 @@ pub fn handle(shared: &Shared, request: Request) -> Response {
             Ok(Response::Ok)
         },
         Request::Input { pane, data } => input(shared, pane, &data),
+        Request::Capture { pane } => lock(shared).pane(pane).map(|p| Response::Output {
+            data: B64.encode(&p.buffer),
+        }),
         Request::Resize { pane, cols, rows } => lock(shared)
             .pane(pane)
             .and_then(|p| {

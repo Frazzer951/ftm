@@ -49,6 +49,7 @@ async fn main() -> Result<()> {
         }
     }
     let _ = std::fs::remove_file(&socket);
+    tokio::task::spawn_blocking(move || state::shutdown(&state)).await?;
     Ok(())
 }
 

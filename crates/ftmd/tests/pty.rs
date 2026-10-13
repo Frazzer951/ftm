@@ -1,118 +1,16 @@
-use base64::{Engine, engine::general_purpose::STANDARD as B64};
-use ftm_core::model::{Kind, Layout, PaneId, SplitDir, Workspace};
+mod common;
+
+use common::{Conn, alive, git, start_daemon, temp_root, wait_for, wait_for_output, wait_until};
+use ftm_core::model::{Kind, Layout, SplitDir};
 use ftm_core::protocol::{Event, Request, Response, SpawnRequest};
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
-use std::time::{Duration, Instant};
-
-struct Daemon {
-    child: Child,
-    socket: PathBuf,
-}
-
-impl Drop for Daemon {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        let _ = std::fs::remove_file(&self.socket);
-    }
-}
-
-/// macOS caps socket paths at ~104 bytes, so this stays in /tmp rather than the (long) per-user temp dir.
-fn start_daemon(name: &str, data_home: &Path) -> Daemon {
-    let socket = PathBuf::from(format!("/tmp/ftmd-{}-{name}.sock", std::process::id()));
-    let _ = std::fs::remove_file(&socket);
-    let child = Command::new(env!("CARGO_BIN_EXE_ftmd"))
-        .env("FTM_SOCKET", &socket)
-        .env("SHELL", "/bin/sh")
-        .env("XDG_DATA_HOME", data_home)
-        .spawn()
-        .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while UnixStream::connect(&socket).is_err() {
-        assert!(Instant::now() < deadline, "ftmd did not start");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    Daemon { child, socket }
-}
-
-struct Conn {
-    write: UnixStream,
-    read: BufReader<UnixStream>,
-}
-
-impl Conn {
-    fn open(socket: &Path) -> Self {
-        let write = UnixStream::connect(socket).unwrap();
-        write.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-        let read = BufReader::new(write.try_clone().unwrap());
-        Conn { write, read }
-    }
-
-    fn line<T: serde::de::DeserializeOwned>(&mut self) -> T {
-        let mut line = String::new();
-        self.read.read_line(&mut line).unwrap();
-        serde_json::from_str(&line).unwrap_or_else(|e| panic!("{e}: {line}"))
-    }
-
-    fn send(&mut self, request: &Request) -> Response {
-        let mut out = serde_json::to_vec(request).unwrap();
-        out.push(b'\n');
-        self.write.write_all(&out).unwrap();
-        match self.line() {
-            Response::Error { message } => panic!("{message}"),
-            r => r,
-        }
-    }
-
-    fn type_in(&mut self, pane: PaneId, text: &str) {
-        self.send(&Request::Input {
-            pane,
-            data: B64.encode(text),
-        });
-    }
-
-    fn list(&mut self) -> Vec<Workspace> {
-        match self.send(&Request::List) {
-            Response::Workspaces { workspaces } => workspaces,
-            r => panic!("{r:?}"),
-        }
-    }
-}
-
-/// Reads events until `pane`'s accumulated output contains `needle`.
-fn wait_for_output(events: &mut Conn, pane: PaneId, needle: &str) -> String {
-    let mut seen = String::new();
-    loop {
-        if let Event::Output { pane: p, data, reset } = events.line() {
-            if p != pane {
-                continue;
-            }
-            if reset {
-                seen.clear();
-            }
-            seen.push_str(&String::from_utf8_lossy(&B64.decode(data).unwrap()));
-            if seen.contains(needle) {
-                return seen;
-            }
-        }
-    }
-}
-
-fn wait_until(conn: &mut Conn, what: &str, ok: impl Fn(&[Workspace]) -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !ok(&conn.list()) {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
+use std::time::Duration;
 
 #[test]
 fn pty_streams_and_accepts_input() {
-    let dir = std::env::temp_dir().canonicalize().unwrap();
-    let daemon = start_daemon("pty", &dir);
+    let dir = temp_root("pty");
+    let daemon = start_daemon("pty", |c| {
+        c.env("XDG_DATA_HOME", &dir);
+    });
     let mut req = Conn::open(&daemon.socket);
 
     let Response::Spawned { workspace } = req.send(&Request::Spawn(SpawnRequest {
@@ -177,26 +75,12 @@ fn pty_streams_and_accepts_input() {
     assert!(req.list().is_empty());
 }
 
-fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
-    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
-    String::from_utf8_lossy(&out.stdout).into_owned()
-}
-
-fn alive(pid: i32) -> bool {
-    unsafe { libc::kill(pid, 0) == 0 }
-}
-
 /// An agent runs as the foreground job of an interactive shell, in its own process group, and Claude Code ignores
 /// SIGHUP. Closing with `remove_worktree` must still stop it before deleting the worktree, then drop the merged branch
 /// and the empty `prefix/` directory.
 #[test]
 fn close_kills_foreground_job_and_removes_worktree() {
-    let root = std::env::temp_dir()
-        .canonicalize()
-        .unwrap()
-        .join(format!("ftmd-wt-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = temp_root("wt");
     let repo = root.join("repo");
     std::fs::create_dir_all(&repo).unwrap();
     git(&repo, &["init", "-q", "-b", "main"]);
@@ -204,7 +88,9 @@ fn close_kills_foreground_job_and_removes_worktree() {
     git(&repo, &["add", "f"]);
     git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"]);
 
-    let daemon = start_daemon("wt", &root.join("data"));
+    let daemon = start_daemon("wt", |c| {
+        c.env("XDG_DATA_HOME", root.join("data"));
+    });
     let mut req = Conn::open(&daemon.socket);
     let Response::Spawned { workspace } = req.send(&Request::Spawn(SpawnRequest {
         kind: Kind::Terminal,
@@ -235,11 +121,9 @@ fn close_kills_foreground_job_and_removes_worktree() {
         id: workspace.id,
         remove_worktree: true,
     });
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while alive(pid) {
-        assert!(Instant::now() < deadline, "foreground job {pid} survived close");
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_for(&format!("foreground job {pid} to die"), Duration::from_secs(10), || {
+        !alive(pid)
+    });
     assert!(!wt.exists());
     assert!(!root.join("data/ftm/worktrees/repo/chore").exists());
     assert!(git(&repo, &["branch", "--list", "chore/wt"]).is_empty());

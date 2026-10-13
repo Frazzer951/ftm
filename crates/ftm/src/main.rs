@@ -1,10 +1,12 @@
 mod client;
 
+use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use clap::{Parser, Subcommand, ValueEnum};
 use eyre::{Result, WrapErr, bail};
 use ftm_core::ENV_WORKSPACE_ID;
-use ftm_core::model::{Kind, Status, Workspace, WorkspaceId};
+use ftm_core::model::{Kind, PaneId, Status, Workspace, WorkspaceId};
 use ftm_core::protocol::{Request, Response, SpawnRequest};
+use std::io::Write;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -63,6 +65,22 @@ enum Command {
         id: WorkspaceId,
         #[arg(long)]
         remove_worktree: bool,
+    },
+    /// Print a pane's buffered output (last 1 MiB), with escape sequences stripped unless --raw
+    Capture {
+        /// Pane id, or a workspace id for the first pane of its first tab
+        target: PaneId,
+        #[arg(long)]
+        raw: bool,
+    },
+    /// Type text into a pane
+    Send {
+        /// Pane id, or a workspace id for the first pane of its first tab
+        target: PaneId,
+        text: String,
+        /// Press Enter (CR) after the text
+        #[arg(long)]
+        enter: bool,
     },
 }
 
@@ -126,6 +144,29 @@ fn main() -> Result<()> {
             },
         },
         Command::Close { id, remove_worktree } => Request::Close { id, remove_worktree },
+        Command::Capture { target, raw } => {
+            let Response::Output { data } = client::send(&Request::Capture {
+                pane: resolve_pane(target)?,
+            })?
+            else {
+                bail!("unexpected response from ftmd");
+            };
+            let bytes = B64.decode(data)?;
+            let mut out = std::io::stdout().lock();
+            if raw {
+                out.write_all(&bytes)?;
+            } else {
+                out.write_all(strip_escapes(&bytes).as_bytes())?;
+            }
+            return Ok(());
+        },
+        Command::Send { target, text, enter } => {
+            let text = if enter { text + "\r" } else { text };
+            Request::Input {
+                pane: resolve_pane(target)?,
+                data: B64.encode(text),
+            }
+        },
     };
 
     match client::send(&request)? {
@@ -134,6 +175,60 @@ fn main() -> Result<()> {
         _ => {},
     }
     Ok(())
+}
+
+fn resolve_pane(target: PaneId) -> Result<PaneId> {
+    let Response::Workspaces { workspaces } = client::send(&Request::List)? else {
+        bail!("unexpected response from ftmd");
+    };
+    match workspaces.iter().find(|w| w.id == target) {
+        Some(ws) => match ws.tabs.first() {
+            Some(tab) => Ok(tab.layout.panes()[0]),
+            None => bail!("workspace {target} has no panes"),
+        },
+        None => Ok(target),
+    }
+}
+
+/// Drops CSI, OSC and other escape sequences plus carriage returns, leaving the text a terminal would have printed.
+fn strip_escapes(bytes: &[u8]) -> String {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            0x1b => {
+                i += 1;
+                match bytes.get(i) {
+                    Some(b'[') => {
+                        i += 1;
+                        while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
+                            i += 1;
+                        }
+                    },
+                    Some(b']' | b'P' | b'X' | b'^' | b'_') => {
+                        i += 1;
+                        while i < bytes.len() && bytes[i] != 0x07 && !(bytes[i] == 0x1b && bytes.get(i + 1) == Some(&b'\\')) {
+                            i += 1;
+                        }
+                        if bytes.get(i) == Some(&0x1b) {
+                            i += 1;
+                        }
+                    },
+                    Some(b'(' | b')' | b'*' | b'+' | b'#' | b'%') => i += 1,
+                    _ => {},
+                }
+                i += 1;
+            },
+            b'\r' => i += 1,
+            b => {
+                if b == b'\n' || b == b'\t' || b >= 0x20 {
+                    out.push(b);
+                }
+                i += 1;
+            },
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn list(json: bool) -> Result<()> {
@@ -167,5 +262,16 @@ fn print_tree(ws: &Workspace, all: &[Workspace], depth: usize) {
     );
     for child in all.iter().filter(|c| c.parent == Some(ws.id)) {
         print_tree(child, all, depth + 1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_escapes;
+
+    #[test]
+    fn strips_escape_sequences() {
+        let raw = b"\x1b[1;32mClaude\x1b[0m Code\r\n\x1b]0;title\x07ok\x1b]8;;http://x\x1b\\link\x1b(B\x1b=done\x08";
+        assert_eq!(strip_escapes(raw), "Claude Code\noklinkdone");
     }
 }
