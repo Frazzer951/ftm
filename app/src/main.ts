@@ -175,17 +175,6 @@ async function applySettings() {
   requestAnimationFrame(fitVisible);
 }
 
-/// Whether the browser renders `family` with its own glyphs rather than a fallback, by comparing text widths.
-function fontInstalled(family: string): boolean {
-  const ctx = document.createElement("canvas").getContext("2d")!;
-  const sample = "mmmmmmmmmmiiiiiWW=>!=";
-  return ["monospace", "serif"].some((fallback) => {
-    ctx.font = `20px ${fallback}`;
-    const base = ctx.measureText(sample).width;
-    ctx.font = `20px "${family}", ${fallback}`;
-    return ctx.measureText(sample).width !== base;
-  });
-}
 
 interface FontFamily {
   name: string;
@@ -218,8 +207,13 @@ function setupSettingsDialog() {
     p.style.fontVariantLigatures = field("ligatures").checked ? "normal" : "none";
     p.style.fontFeatureSettings = field("ligatures").checked ? '"calt" 1, "liga" 1' : '"calt" 0, "liga" 0';
     $("line-height-value").textContent = Number(field("line_height").value).toFixed(2);
-    const f = chosen();
-    $("font-hint").textContent = f && !isStack(f) && !fontInstalled(f) ? `"${f}" does not look installed; a fallback will be used.` : "";
+    // Only a custom stack can name a font that is not installed: picks come from list_fonts. Its first family is
+    // checked against that list, since WebKit's own font checks are unreliable for system fonts.
+    const first = chosen().split(",")[0].trim().replace(/^["']|["']$/g, "");
+    const generic = /^(monospace|serif|sans-serif|ui-monospace|system-ui|cursive|fantasy)$/i.test(first);
+    const known = fonts.some((f) => f.name.toLowerCase() === first.toLowerCase());
+    $("font-hint").textContent =
+      customMode && first && !generic && fonts.length && !known ? `"${first}" is not an installed font; the next one in the stack will be used.` : "";
   };
 
   const renderList = () => {
@@ -303,6 +297,7 @@ function setupSettingsDialog() {
     fontList
       .then((list) => {
         fonts = list;
+        preview();
         // A saved family that is not monospace (or not found) would otherwise be hidden.
         if (!customMode && !list.some((f) => f.name === family && f.monospace)) showAll.checked = true;
         renderList();
