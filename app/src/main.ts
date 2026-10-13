@@ -4,6 +4,7 @@ import { homeDir } from "@tauri-apps/api/path";
 import { open } from "@tauri-apps/plugin-dialog";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { FitAddon } from "@xterm/addon-fit";
+import { LigaturesAddon } from "@xterm/addon-ligatures";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
@@ -36,6 +37,7 @@ type FtmEvent =
 interface PaneView {
   term: Terminal;
   fit: FitAddon;
+  ligatures?: LigaturesAddon;
   el: HTMLElement;
   cols: number;
   rows: number;
@@ -84,8 +86,9 @@ function view(pane: Id): PaneView {
   el.className = "term";
   $("parking").appendChild(el);
   const term = new Terminal({
-    fontFamily: 'Menlo, "DejaVu Sans Mono", monospace',
-    fontSize: 13,
+    fontFamily: cssFamily(settings.font_family),
+    fontSize: settings.font_size,
+    lineHeight: settings.line_height,
     scrollback: 10000,
     theme: { background: "#16181d" },
   });
@@ -102,9 +105,102 @@ function view(pane: Id): PaneView {
   term.onData((d) => send({ op: "input", pane, data: encode(d) }));
   term.onBinary((d) => send({ op: "input", pane, data: btoa(d) }));
   term.textarea?.addEventListener("focus", () => setFocus(pane));
-  const v = { term, fit, el, cols: 0, rows: 0 };
+  const v: PaneView = { term, fit, el, cols: 0, rows: 0 };
+  setLigatures(v);
   views.set(pane, v);
   return v;
+}
+
+interface TerminalSettings {
+  font_family: string;
+  font_size: number;
+  ligatures: boolean;
+  line_height: number;
+}
+
+let settings: TerminalSettings = {
+  font_family: 'Menlo, "DejaVu Sans Mono", monospace',
+  font_size: 13,
+  ligatures: false,
+  line_height: 1,
+};
+
+/// A bare family name gets quoted and a monospace fallback; a CSS list is used as written.
+const cssFamily = (family: string) => (/[,"']/.test(family) ? family : `"${family.trim()}", Menlo, monospace`);
+
+/// WebKit has no font access API, so the addon cannot read the font's own ligature table; it joins a list of common
+/// sequences (=>, !=, ->, === ...) instead, and the WebGL renderer then draws each joined run with the font's glyphs.
+function setLigatures(v: PaneView) {
+  if (settings.ligatures && !v.ligatures) {
+    v.ligatures = new LigaturesAddon();
+    v.term.loadAddon(v.ligatures);
+  } else if (!settings.ligatures && v.ligatures) {
+    v.ligatures.dispose();
+    v.ligatures = undefined;
+  }
+}
+
+async function applySettings() {
+  await document.fonts.load(`${settings.font_size}px ${cssFamily(settings.font_family)}`).catch(() => {});
+  for (const v of views.values()) {
+    v.term.options.fontFamily = cssFamily(settings.font_family);
+    v.term.options.fontSize = settings.font_size;
+    v.term.options.lineHeight = settings.line_height;
+    setLigatures(v);
+    v.term.clearTextureAtlas();
+    v.cols = 0;
+  }
+  requestAnimationFrame(fitVisible);
+}
+
+/// Whether the browser renders `family` with its own glyphs rather than a fallback, by comparing text widths.
+function fontInstalled(family: string): boolean {
+  const ctx = document.createElement("canvas").getContext("2d")!;
+  const sample = "mmmmmmmmmmiiiiiWW=>!=";
+  return ["monospace", "serif"].some((fallback) => {
+    ctx.font = `20px ${fallback}`;
+    const base = ctx.measureText(sample).width;
+    ctx.font = `20px "${family}", ${fallback}`;
+    return ctx.measureText(sample).width !== base;
+  });
+}
+
+function setupSettingsDialog() {
+  const dialog = $<HTMLDialogElement>("settings");
+  const form = $<HTMLFormElement>("settings-form");
+  const field = (name: string) => form.elements.namedItem(name) as HTMLInputElement;
+  const hint = () => {
+    const family = field("font_family").value.trim();
+    const bare = family && !/[,"']/.test(family);
+    $("font-hint").textContent = bare && !fontInstalled(family) ? `"${family}" does not look installed; a fallback will be used.` : "";
+  };
+  field("font_family").oninput = hint;
+  $("open-settings").onclick = () => {
+    field("font_family").value = settings.font_family;
+    field("font_size").value = String(settings.font_size);
+    field("line_height").value = String(settings.line_height);
+    field("ligatures").checked = settings.ligatures;
+    $("settings-error").textContent = "";
+    hint();
+    dialog.showModal();
+  };
+  $("save-settings").onclick = async (e) => {
+    e.preventDefault();
+    const next: TerminalSettings = {
+      font_family: field("font_family").value.trim() || settings.font_family,
+      font_size: Number(field("font_size").value) || settings.font_size,
+      line_height: Number(field("line_height").value) || settings.line_height,
+      ligatures: field("ligatures").checked,
+    };
+    try {
+      await invoke("save_settings", { settings: { terminal: next } });
+      settings = next;
+      dialog.close();
+      await applySettings();
+    } catch (err) {
+      $("settings-error").textContent = String(err);
+    }
+  };
 }
 
 function selectedWorkspace(): Workspace | undefined {
@@ -586,6 +682,13 @@ window.addEventListener("focus", () => refreshAllGit().catch(console.error));
 setInterval(() => refreshAllGit().catch(console.error), 10_000);
 new ResizeObserver(() => requestAnimationFrame(fitVisible)).observe($("panes"));
 setupSpawnDialog();
+setupSettingsDialog();
+invoke<{ terminal: TerminalSettings }>("get_settings")
+  .then((loaded) => {
+    settings = loaded.terminal;
+    return applySettings();
+  })
+  .catch(console.error);
 render();
 
 listen<FtmEvent>("ftm-event", ({ payload }) => {

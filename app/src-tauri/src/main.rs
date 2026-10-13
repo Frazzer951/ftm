@@ -2,6 +2,8 @@
 
 mod daemon;
 
+use ftm_core::config::Settings;
+use ftm_core::paths;
 use ftm_core::protocol::{Request, Response};
 use std::path::Path;
 use std::process::Command;
@@ -104,6 +106,16 @@ fn git_info(path: String) -> Option<GitInfo> {
 }
 
 #[tauri::command]
+fn get_settings() -> Result<Settings, String> {
+    Settings::load(&paths::settings_path()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_settings(settings: Settings) -> Result<(), String> {
+    settings.save(&paths::settings_path()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn git_root(path: String) -> Option<String> {
     let out = Command::new("git")
         .arg("-C")
@@ -180,6 +192,8 @@ fn main() {
             subscribe,
             git_root,
             git_info,
+            get_settings,
+            save_settings,
             ensure_on_screen
         ])
         .run(tauri::generate_context!())

@@ -7,7 +7,10 @@
   </head>
   <body>
     <aside id="sidebar">
-      <header><span>Workspaces</span><button id="add" title="New workspace">+</button></header>
+      <header>
+        <span>Workspaces</span>
+        <span class="actions"><button id="open-settings" title="Settings">⚙</button><button id="add" title="New workspace">+</button></span>
+      </header>
       <ul id="workspaces"></ul>
     </aside>
     <main>
@@ -32,6 +35,30 @@
         <div class="row">
           <button value="cancel" formnovalidate>Cancel</button>
           <button id="create" value="create">Create</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="settings">
+      <form method="dialog" id="settings-form">
+        <h3>Settings</h3>
+        <label>Font family <input name="font_family" list="font-suggestions" /></label>
+        <datalist id="font-suggestions">
+          <option value="FiraCode Nerd Font Mono"></option>
+          <option value="FiraCode Nerd Font"></option>
+          <option value="Fira Code"></option>
+          <option value="JetBrains Mono"></option>
+          <option value="Menlo"></option>
+          <option value="SF Mono"></option>
+          <option value="DejaVu Sans Mono"></option>
+        </datalist>
+        <p id="font-hint" class="hint"></p>
+        <label>Font size <input name="font_size" type="number" min="6" max="40" step="0.5" /></label>
+        <label>Line height <input name="line_height" type="number" min="0.8" max="2" step="0.05" /></label>
+        <label><input type="checkbox" name="ligatures" /> Ligatures (=&gt; != -&gt; === and the like)</label>
+        <p id="settings-error"></p>
+        <div class="row">
+          <button value="cancel" formnovalidate>Cancel</button>
+          <button id="save-settings" value="save">Save</button>
         </div>
       </form>
     </dialog>

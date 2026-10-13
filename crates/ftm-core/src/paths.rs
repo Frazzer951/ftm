@@ -19,6 +19,11 @@ pub fn config_dir() -> PathBuf {
         .join("ftm")
 }
 
+/// App settings: `config.toml` in the config dir.
+pub fn settings_path() -> PathBuf {
+    config_dir().join("config.toml")
+}
+
 pub fn repo_config_path(repo_name: &str) -> PathBuf {
     config_dir().join("repos").join(format!("{repo_name}.toml"))
 }

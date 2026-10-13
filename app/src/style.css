@@ -58,7 +58,7 @@ main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 dialog { background: #20232a; color: inherit; border: 1px solid #3a3f4a; border-radius: 6px; width: 380px; }
 dialog form { display: flex; flex-direction: column; gap: 8px; }
 dialog h3 { margin: 0 0 4px; }
-dialog input:not([type]) { width: 100%; background: #16181d; color: inherit; border: 1px solid #3a3f4a; border-radius: 4px; padding: 4px; }
+dialog input:not([type]), dialog input[list] { width: 100%; background: #16181d; color: inherit; border: 1px solid #3a3f4a; border-radius: 4px; padding: 4px; }
 dialog fieldset { border: 1px solid #3a3f4a; border-radius: 4px; display: flex; flex-direction: column; gap: 6px; }
 .row { display: flex; gap: 8px; align-items: center; }
 #folder { color: #7f8796; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -68,3 +68,7 @@ dialog fieldset { border: 1px solid #3a3f4a; border-radius: 4px; display: flex; 
 #menu { position: fixed; z-index: 10; display: flex; flex-direction: column; min-width: 120px; padding: 4px; background: #20232a; border: 1px solid #3a3f4a; border-radius: 6px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4); }
 #menu button { text-align: left; background: none; border: none; padding: 4px 8px; }
 #menu button:hover { background: #2b3140; }
+#sidebar header .actions { display: flex; gap: 4px; }
+dialog input[type="number"] { width: 100%; background: #16181d; color: inherit; border: 1px solid #3a3f4a; border-radius: 4px; padding: 4px; }
+.hint { color: #c9a74b; margin: 0; min-height: 1em; font-size: 12px; }
+#settings-error { color: #ff6b6b; margin: 0; min-height: 1em; }
