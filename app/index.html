@@ -70,6 +70,18 @@
           </div>
         </div>
         <label><input type="checkbox" name="ligatures" /> Ligatures (=&gt; != -&gt; === and the like)</label>
+        <div class="field">
+          <span>Theme <span id="theme-count" class="count"></span></span>
+          <div class="row">
+            <input type="search" id="theme-search" placeholder="Search themes" autocomplete="off" />
+            <label class="inline"><input type="checkbox" id="theme-follow" /> Match system appearance</label>
+          </div>
+          <div id="theme-slots" class="row" hidden>
+            <button type="button" data-slot="dark">Dark: <b id="theme-dark"></b></button>
+            <button type="button" data-slot="light">Light: <b id="theme-light"></b></button>
+          </div>
+          <div id="theme-list" role="listbox"><p class="hint">Loading themes…</p></div>
+        </div>
         <div id="font-preview" title="Preview">Sphinx of black quartz 0O1lI {}[]<br />=&gt; != -&gt; === &lt;= &gt;= :: !== /* */ &lt;!-- www</div>
         <p id="settings-error"></p>
         <div class="row">

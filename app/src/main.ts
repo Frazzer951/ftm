@@ -344,7 +344,97 @@ function setupSettingsDialog() {
     };
   });
 
+  // Theme: a draft that previews live, saved with the rest or reverted on cancel.
+  let draft: ThemeSettings = { ...themeSettings };
+  let slot: "dark" | "light" = "dark";
+  let saved = false;
+  let themeList: (ThemeColors & { source: string })[] = [];
+  const themeSearch = $<HTMLInputElement>("theme-search");
+  const follow = $<HTMLInputElement>("theme-follow");
+  const target = () => (draft.follow_system ? draft[slot] : draft.name);
+  const renderThemes = () => {
+    $("theme-slots").hidden = !draft.follow_system;
+    $("theme-dark").textContent = draft.dark;
+    $("theme-light").textContent = draft.light;
+    document.querySelectorAll<HTMLButtonElement>("#theme-slots button").forEach((b) => b.classList.toggle("active", b.dataset.slot === slot));
+    const query = themeSearch.value.trim().toLowerCase();
+    const shown = themeList.filter((t) => !query || t.name.toLowerCase().includes(query));
+    $("theme-count").textContent = themeList.length ? `${shown.length} of ${themeList.length}` : "";
+    const items: HTMLElement[] = [];
+    const labels: Record<string, string> = { builtin: "Built-in", user: "Yours (~/.config/ftm/themes)", system: "From other apps" };
+    let group = "";
+    for (const t of shown) {
+      if (t.source !== group) {
+        group = t.source;
+        const g = document.createElement("div");
+        g.className = "group";
+        g.textContent = labels[group] ?? group;
+        items.push(g);
+      }
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = t.name === target() ? "chosen" : "";
+      b.style.background = t.background;
+      b.style.color = t.foreground;
+      const name = document.createElement("span");
+      name.className = "theme-name";
+      name.textContent = t.name;
+      const swatches = document.createElement("span");
+      swatches.className = "swatches";
+      for (const c of t.palette.slice(0, 8)) {
+        const i = document.createElement("i");
+        i.style.background = c;
+        swatches.append(i);
+      }
+      b.append(name, swatches);
+      b.onclick = () => {
+        if (draft.follow_system) draft[slot] = t.name;
+        else draft.name = t.name;
+        applyTheme(t);
+        renderThemes();
+      };
+      items.push(b);
+    }
+    if (!items.length) {
+      const none = document.createElement("p");
+      none.className = "hint";
+      none.textContent = themeList.length ? "No matching themes" : "Loading themes…";
+      items.push(none);
+    }
+    $("theme-list").replaceChildren(...items);
+  };
+  themeSearch.oninput = renderThemes;
+  follow.onchange = () => {
+    draft.follow_system = follow.checked;
+    slot = systemDark.matches ? "dark" : "light";
+    applyThemeNamed(wantedTheme(draft)).catch(console.error);
+    renderThemes();
+  };
+  document.querySelectorAll<HTMLButtonElement>("#theme-slots button").forEach((b) => {
+    b.onclick = () => {
+      slot = b.dataset.slot as "dark" | "light";
+      applyThemeNamed(draft[slot]).catch(console.error);
+      renderThemes();
+    };
+  });
+  dialog.addEventListener("close", () => {
+    if (!saved) applyThemeNamed(wantedTheme(themeSettings)).catch(console.error);
+  });
+
   $("open-settings").onclick = () => {
+    saved = false;
+    draft = { ...themeSettings };
+    slot = systemDark.matches ? "dark" : "light";
+    follow.checked = draft.follow_system;
+    themeSearch.value = "";
+    renderThemes();
+    loadThemes()
+      .then((list) => {
+        themeList = list;
+        renderThemes();
+        $("theme-list").querySelector(".chosen")?.scrollIntoView({ block: "center" });
+      })
+      .catch((err) => console.error("listing themes", err));
     family = settings.font_family;
     customMode = isStack(family);
     custom.hidden = !customMode;
@@ -380,8 +470,10 @@ function setupSettingsDialog() {
       ligatures: field("ligatures").checked,
     };
     try {
-      await invoke("save_settings", { settings: { terminal: next, theme: themeSettings } });
+      await invoke("save_settings", { settings: { terminal: next, theme: draft } });
       settings = next;
+      themeSettings = { ...draft };
+      saved = true;
       dialog.close();
       await applySettings();
     } catch (err) {
