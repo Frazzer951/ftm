@@ -1,11 +1,15 @@
+mod frame;
+mod holder;
 mod hooks;
 mod state;
 mod worktree;
 
+use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use eyre::{Result, WrapErr};
+use ftm_core::model::PaneId;
 use ftm_core::{
     paths,
-    protocol::{Request, Response},
+    protocol::{Event, Request, Response},
 };
 use serde::Serialize;
 use state::{Shared, State};
@@ -15,8 +19,18 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::broadcast::error::RecvError;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("pty-holder") {
+        return holder::run(&args[2..]);
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(daemon())
+}
+
+async fn daemon() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     let socket = std::path::absolute(paths::socket_path())?;
@@ -37,6 +51,8 @@ async fn main() -> Result<()> {
         None
     });
     let state = State::new(socket.clone(), claude_settings);
+    let loading = state.clone();
+    tokio::task::spawn_blocking(move || state::load(&loading)).await??;
     let mut terminate = signal(SignalKind::terminate())?;
     loop {
         tokio::select! {
@@ -53,8 +69,8 @@ async fn main() -> Result<()> {
             _ = terminate.recv() => break,
         }
     }
+    // Panes live on in their holders; the next ftmd reconnects to them.
     let _ = std::fs::remove_file(&socket);
-    tokio::task::spawn_blocking(move || state::shutdown(&state)).await?;
     Ok(())
 }
 
@@ -74,6 +90,9 @@ async fn serve(stream: UnixStream, state: Shared) -> Result<()> {
             write_line(&mut write, &Response::Ok).await?;
             return stream_events(&mut write, &state).await;
         }
+        if let Request::Attach { pane } = request {
+            return stream_pane(&mut write, &state, pane).await;
+        }
         let shared = state.clone();
         let response = tokio::task::spawn_blocking(move || state::handle(&shared, request)).await?;
         write_line(&mut write, &response).await?;
@@ -91,6 +110,39 @@ async fn stream_events(write: &mut OwnedWriteHalf, state: &Shared) -> Result<()>
         loop {
             match rx.recv().await {
                 Ok(event) => write_line(write, &event).await?,
+                Err(RecvError::Lagged(_)) => break,
+                Err(RecvError::Closed) => return Ok(()),
+            }
+        }
+    }
+}
+
+async fn stream_pane(write: &mut OwnedWriteHalf, state: &Shared, pane: PaneId) -> Result<()> {
+    let mut first = true;
+    loop {
+        let (mut rx, screen) = match state::attach(state, pane) {
+            Ok(attached) => attached,
+            Err(e) if first => {
+                let message = format!("{e:#}");
+                return write_line(write, &Response::Error { message }).await;
+            },
+            Err(_) => return Ok(()),
+        };
+        if first {
+            write_line(write, &Response::Ok).await?;
+            first = false;
+        }
+        let redraw = Event::Output {
+            pane,
+            data: B64.encode(screen),
+            reset: true,
+        };
+        write_line(write, &redraw).await?;
+        loop {
+            match rx.recv().await {
+                Ok(event @ Event::Output { pane: p, .. }) if p == pane => write_line(write, &event).await?,
+                Ok(Event::Workspaces { workspaces }) if !state::pane_alive(&workspaces, pane) => return Ok(()),
+                Ok(_) => {},
                 Err(RecvError::Lagged(_)) => break,
                 Err(RecvError::Closed) => return Ok(()),
             }

@@ -46,6 +46,11 @@ pub enum Request {
         raw: bool,
     },
     Subscribe,
+    /// For `ftm attach`: after `Ok`, the connection carries only `Event::Output` for this pane, starting with a redraw
+    /// of its current screen (`reset` set), and ends when the pane does.
+    Attach {
+        pane: PaneId,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

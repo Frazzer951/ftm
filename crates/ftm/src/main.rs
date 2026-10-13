@@ -1,3 +1,4 @@
+mod attach;
 mod client;
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
@@ -72,6 +73,11 @@ enum Command {
         target: PaneId,
         #[arg(long)]
         raw: bool,
+    },
+    /// Attach this terminal to a pane; detach with Ctrl+] then d
+    Attach {
+        /// Pane id, or a workspace id for the first pane of its first tab
+        target: PaneId,
     },
     /// Type text into a pane
     Send {
@@ -152,6 +158,7 @@ fn main() -> Result<()> {
             std::io::stdout().lock().write_all(&B64.decode(data)?)?;
             return Ok(());
         },
+        Command::Attach { target } => return attach::run(resolve_pane(target)?),
         Command::Send { target, text, enter } => {
             let text = if enter { text + "\r" } else { text };
             Request::Input {

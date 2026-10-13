@@ -1,14 +1,17 @@
+use crate::frame::{self, Frame};
 use crate::worktree;
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use eyre::{Result, WrapErr, bail, eyre};
 use ftm_core::model::{Kind, Layout, PaneId, SplitDir, Status, Tab, TabId, Workspace, WorkspaceId, Worktree};
 use ftm_core::protocol::{Event, Request, Response, SpawnRequest};
-use ftm_core::{ENV_AGENT_CMD, ENV_NAME, ENV_PANE_ID, ENV_SOCKET, ENV_WORKSPACE_ID};
-use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use ftm_core::{ENV_AGENT_CMD, ENV_NAME, ENV_PANE_ID, ENV_SOCKET, ENV_WORKSPACE_ID, paths};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
-use std::io::{Read, Write};
+use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::process::Stdio;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
@@ -24,18 +27,26 @@ pub struct State {
     panes: HashMap<PaneId, Pane>,
     events: broadcast::Sender<Event>,
     socket: PathBuf,
+    holders: PathBuf,
+    state_file: PathBuf,
     /// Hook settings every agent gets via `--settings`, from `hooks::write`.
     claude_settings: Option<PathBuf>,
 }
 
+/// A pane's PTY and processes live in its holder (`ftmd pty-holder`), so they survive ftmd restarts; ftmd keeps a
+/// connection to it plus its own copy of the output.
 struct Pane {
     workspace: WorkspaceId,
-    master: Box<dyn MasterPty + Send>,
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    child: Box<dyn Child + Send + Sync>,
+    holder: Arc<Mutex<UnixStream>>,
+    holder_socket: PathBuf,
     buffer: Vec<u8>,
     /// Headless emulator fed the same output, so the current screen and scrollback can be read back as text.
     screen: vt100::Parser,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Saved {
+    workspaces: Vec<Workspace>,
 }
 
 /// What the first command in a pane runs before handing over to a login shell.
@@ -52,6 +63,8 @@ impl State {
             workspaces: BTreeMap::new(),
             panes: HashMap::new(),
             events: broadcast::channel(1024).0,
+            holders: paths::holders_dir(&socket),
+            state_file: paths::state_file(&socket),
             socket,
             claude_settings,
         }))
@@ -61,8 +74,29 @@ impl State {
         self.workspaces.values().cloned().collect()
     }
 
+    /// Every change goes through here, so it is also where the tree is saved.
     fn emit_workspaces(&self) {
         let _ = self.events.send(Event::Workspaces { workspaces: self.list() });
+        if let Err(e) = self.save() {
+            tracing::warn!("saving {}: {e:#}", self.state_file.display());
+        }
+    }
+
+    /// An empty tree leaves no file behind, so throwaway daemons (tests, smoke runs) clean up after themselves.
+    fn save(&self) -> Result<()> {
+        if self.workspaces.is_empty() {
+            match std::fs::remove_file(&self.state_file) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+                _ => return Ok(()),
+            }
+        }
+        if let Some(dir) = self.state_file.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let tmp = self.state_file.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec_pretty(&Saved { workspaces: self.list() })?)?;
+        std::fs::rename(&tmp, &self.state_file)?;
+        Ok(())
     }
 
     fn workspace_mut(&mut self, id: WorkspaceId) -> Result<&mut Workspace> {
@@ -100,64 +134,154 @@ impl State {
             .ok_or_else(|| eyre!("no workspace {workspace}"))?;
         let id = PaneId::new_v4();
         let shell = shell();
+        std::fs::create_dir_all(&self.holders).wrap_err_with(|| format!("creating {}", self.holders.display()))?;
+        let holder_socket = self.holders.join(format!("{id}.sock"));
 
-        let mut cmd = CommandBuilder::new(&shell);
+        let mut cmd = std::process::Command::new(std::env::current_exe().wrap_err("locating ftmd")?);
+        cmd.arg("pty-holder")
+            .arg(&holder_socket)
+            .args(["24", "80"])
+            .arg(&ws.cwd)
+            .arg(&shell);
         match startup.and_then(script) {
             Some(script) => cmd.args(["-l", "-i", "-c", &script]),
             None => cmd.arg("-l"),
-        }
-        cmd.cwd(&ws.cwd);
+        };
         for (key, _) in std::env::vars_os() {
             let key = key.to_string_lossy();
             if key == "CLAUDECODE" || key == "FTM_BRIEF" || key.starts_with("CLAUDE_CODE_") || key.starts_with("SUPACODE_") {
                 cmd.env_remove(key.as_ref());
             }
         }
-        cmd.env("SHELL", &shell);
-        cmd.env("TERM", "xterm-256color");
-        cmd.env("COLORTERM", "truecolor");
-        cmd.env(ENV_SOCKET, &self.socket);
-        cmd.env(ENV_WORKSPACE_ID, workspace.to_string());
-        cmd.env(ENV_PANE_ID, id.to_string());
-        cmd.env(ENV_NAME, &ws.name);
+        cmd.env("SHELL", &shell)
+            .env("TERM", "xterm-256color")
+            .env("COLORTERM", "truecolor")
+            .env(ENV_SOCKET, &self.socket)
+            .env(ENV_WORKSPACE_ID, workspace.to_string())
+            .env(ENV_PANE_ID, id.to_string())
+            .env(ENV_NAME, &ws.name);
         if let Some(brief) = startup.and_then(|s| s.brief) {
             cmd.env("FTM_BRIEF", brief);
         }
         if let Some(settings) = &self.claude_settings {
             cmd.env("FTM_CLAUDE_SETTINGS", settings);
         }
+        cmd.stdin(Stdio::null()).stdout(Stdio::null());
+        // Its own session, so nothing aimed at ftmd (a signal to its process group, its terminal closing) reaches it.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        let mut holder = cmd.spawn().wrap_err("starting pane holder")?;
 
-        let pair = native_pty_system()
-            .openpty(PtySize {
-                rows: 24,
-                cols: 80,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| eyre!("opening pty: {e}"))?;
-        let child = pair.slave.spawn_command(cmd).map_err(|e| eyre!("starting {shell}: {e}"))?;
-        drop(pair.slave);
-        let reader = pair.master.try_clone_reader().map_err(|e| eyre!("{e}"))?;
-        let writer = pair.master.take_writer().map_err(|e| eyre!("{e}"))?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let stream = loop {
+            if let Ok(stream) = UnixStream::connect(&holder_socket) {
+                break stream;
+            }
+            if let Ok(Some(status)) = holder.try_wait() {
+                bail!("pane holder exited at startup ({status})");
+            }
+            if Instant::now() > deadline {
+                let _ = holder.kill();
+                bail!("pane holder did not come up on {}", holder_socket.display());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        std::thread::spawn(move || holder.wait());
+        self.attach_holder(shared, workspace, id, holder_socket, stream)?;
+        Ok(id)
+    }
 
+    fn attach_holder(
+        &mut self,
+        shared: &Shared,
+        workspace: WorkspaceId,
+        id: PaneId,
+        holder_socket: PathBuf,
+        stream: UnixStream,
+    ) -> Result<()> {
+        let mut read = stream.try_clone()?;
+        read.set_read_timeout(Some(Duration::from_secs(5)))?;
+        let Some(Frame::Hello { version, rows, cols }) = frame::read(&mut read)? else {
+            bail!("pane holder did not say hello");
+        };
+        if version != frame::VERSION {
+            bail!("pane holder speaks version {version}, ftmd {}", frame::VERSION);
+        }
+        read.set_read_timeout(None)?;
         self.panes.insert(
             id,
             Pane {
                 workspace,
-                master: pair.master,
-                writer: Arc::new(Mutex::new(writer)),
-                child,
+                holder: Arc::new(Mutex::new(stream)),
+                holder_socket,
                 buffer: Vec::new(),
-                screen: vt100::Parser::new(24, 80, SCROLLBACK),
+                screen: vt100::Parser::new(rows, cols, SCROLLBACK),
             },
         );
         let shared = shared.clone();
         std::thread::Builder::new()
             .name(format!("pane-{id}"))
-            .spawn(move || read_loop(shared, id, reader))
+            .spawn(move || read_loop(shared, id, read))
             .wrap_err("starting pane reader")?;
-        Ok(id)
+        Ok(())
     }
+
+    fn send_to_holder(&self, pane: PaneId, frame: &Frame) -> Result<()> {
+        let holder = self.pane(pane)?.holder.clone();
+        let mut holder = holder.lock().unwrap_or_else(PoisonError::into_inner);
+        frame::write(&mut *holder, frame).wrap_err("writing to pane holder")
+    }
+}
+
+/// Restores the saved tree, reconnecting each pane to its holder; a pane whose holder is gone (it exited, or the
+/// machine rebooted) is dropped from its layout. Workspaces stay even when that leaves them without tabs.
+pub fn load(shared: &Shared) -> Result<()> {
+    let mut state = lock(shared);
+    let saved: Saved = match std::fs::read(&state.state_file) {
+        Ok(bytes) => serde_json::from_slice(&bytes).wrap_err_with(|| format!("parsing {}", state.state_file.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    for ws in saved.workspaces {
+        state.workspaces.insert(ws.id, ws);
+    }
+    let ids: Vec<WorkspaceId> = state.workspaces.keys().copied().collect();
+    for ws in state.workspaces.values_mut() {
+        if ws.parent.is_some_and(|p| !ids.contains(&p)) {
+            ws.parent = None;
+        }
+    }
+    let panes: Vec<(WorkspaceId, PaneId)> = state
+        .workspaces
+        .values()
+        .flat_map(|w| w.tabs.iter().flat_map(|t| t.layout.panes()).map(|p| (w.id, p)))
+        .collect();
+    let (mut kept, mut dropped) = (0, 0);
+    for (ws, pane) in panes {
+        let holder_socket = state.holders.join(format!("{pane}.sock"));
+        let attached = UnixStream::connect(&holder_socket)
+            .map_err(eyre::Report::from)
+            .and_then(|stream| state.attach_holder(shared, ws, pane, holder_socket.clone(), stream));
+        match attached {
+            Ok(()) => kept += 1,
+            Err(e) => {
+                tracing::info!("dropping pane {pane}: {e:#}");
+                let _ = std::fs::remove_file(&holder_socket);
+                state.detach(ws, pane);
+                dropped += 1;
+            },
+        }
+    }
+    tracing::info!(
+        "restored {} workspaces, {kept} panes ({dropped} gone)",
+        state.workspaces.len()
+    );
+    state.emit_workspaces();
+    Ok(())
 }
 
 fn shell() -> String {
@@ -186,27 +310,22 @@ fn lock(shared: &Shared) -> MutexGuard<'_, State> {
     shared.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn read_loop(shared: Shared, id: PaneId, mut reader: Box<dyn Read + Send>) {
-    let mut buf = vec![0u8; 64 << 10];
-    loop {
-        let n = match reader.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => break,
-        };
+/// The first `Output` after (re)connecting is the holder's whole buffer, which rebuilds the screen after a restart.
+/// The holder going away means the pane's processes are gone.
+fn read_loop(shared: Shared, id: PaneId, mut holder: UnixStream) {
+    while let Ok(Some(frame)) = frame::read(&mut holder) {
+        let Frame::Output(bytes) = frame else { continue };
         let mut state = lock(&shared);
-        // A closed pane keeps being drained until its processes are gone, so none of them block writing to the tty.
-        let Some(pane) = state.panes.get_mut(&id) else { continue };
-        pane.buffer.extend_from_slice(&buf[..n]);
-        pane.screen.process(&buf[..n]);
+        let Some(pane) = state.panes.get_mut(&id) else { return };
+        pane.buffer.extend_from_slice(&bytes);
+        pane.screen.process(&bytes);
         if pane.buffer.len() > BUFFER_CAP + BUFFER_SLACK {
             let excess = pane.buffer.len() - BUFFER_CAP;
             pane.buffer.drain(..excess);
         }
         let _ = state.events.send(Event::Output {
             pane: id,
-            data: B64.encode(&buf[..n]),
+            data: B64.encode(&bytes),
             reset: false,
         });
     }
@@ -222,68 +341,22 @@ fn close_pane(shared: &Shared, id: PaneId) {
         state.emit_workspaces();
         pane
     };
-    reap(pane);
+    drop(reap(pane));
 }
 
-/// Terminations still running; `shutdown` waits for them so exiting never abandons a half-killed agent.
-static REAPING: (Mutex<usize>, Condvar) = (Mutex::new(0), Condvar::new());
-
-/// Killing waits on the child, so it runs off the lock and off the request path.
+/// Asks the holder to kill everything on the pane's terminal (it does the SIGHUP, then SIGKILL after 2s), and
+/// returns a handle that finishes once the holder is gone, i.e. no process of the pane is left.
 fn reap(pane: Pane) -> std::thread::JoinHandle<()> {
-    *REAPING.0.lock().unwrap_or_else(PoisonError::into_inner) += 1;
-    std::thread::spawn(move || {
-        terminate(pane);
-        *REAPING.0.lock().unwrap_or_else(PoisonError::into_inner) -= 1;
-        REAPING.1.notify_all();
-    })
-}
-
-/// Hangs up the shell's process group and the terminal's foreground group, then SIGKILLs whatever is left. An agent
-/// started by an interactive shell runs in its own group, so signalling the shell alone (portable-pty's `kill`) leaves
-/// it running.
-fn terminate(mut pane: Pane) {
-    let mut groups: Vec<libc::pid_t> = pane.child.process_id().map(|pid| pid as libc::pid_t).into_iter().collect();
-    if let Some(fg) = pane.master.process_group_leader()
-        && fg > 0
-        && !groups.contains(&fg)
     {
-        groups.push(fg);
+        let mut holder = pane.holder.lock().unwrap_or_else(PoisonError::into_inner);
+        let _ = frame::write(&mut *holder, &Frame::Kill);
     }
-    signal_groups(&groups, libc::SIGHUP);
-    let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        let _ = pane.child.try_wait();
-        if !groups.iter().any(|&g| unsafe { libc::kill(-g, 0) } == 0) {
-            break;
+    std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while pane.holder_socket.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
         }
-        if Instant::now() > deadline {
-            signal_groups(&groups, libc::SIGKILL);
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let _ = pane.child.wait();
-    drop(pane.master);
-}
-
-fn signal_groups(groups: &[libc::pid_t], signal: libc::c_int) {
-    for &group in groups {
-        unsafe { libc::kill(-group, signal) };
-    }
-}
-
-/// Terminates every pane, and waits for terminations already under way, before ftmd exits. Their processes would get SIGHUP from the closing ttys anyway, but an
-/// agent ignores that.
-pub fn shutdown(shared: &Shared) {
-    let panes: Vec<Pane> = lock(shared).panes.drain().map(|(_, pane)| pane).collect();
-    panes.into_iter().for_each(|pane| drop(reap(pane)));
-    let count = REAPING.0.lock().unwrap_or_else(PoisonError::into_inner);
-    drop(
-        REAPING
-            .1
-            .wait_while(count, |n| *n > 0)
-            .unwrap_or_else(PoisonError::into_inner),
-    );
+    })
 }
 
 /// Snapshot taken under the lock, so replaying it and then reading `rx` neither drops nor repeats output.
@@ -299,6 +372,20 @@ pub fn subscribe(shared: &Shared) -> (broadcast::Receiver<Event>, Vec<Event>) {
         reset: true,
     }));
     (rx, replay)
+}
+
+/// For `ftm attach`: the pane's current screen as escape sequences that redraw it, taken under the lock like
+/// `subscribe`.
+pub fn attach(shared: &Shared, pane: PaneId) -> Result<(broadcast::Receiver<Event>, Vec<u8>)> {
+    let state = lock(shared);
+    let p = state.pane(pane)?;
+    let mut screen = b"\x1b[H\x1b[2J".to_vec();
+    screen.extend(p.screen.screen().state_formatted());
+    Ok((state.events.subscribe(), screen))
+}
+
+pub fn pane_alive(workspaces: &[Workspace], pane: PaneId) -> bool {
+    workspaces.iter().any(|w| w.tabs.iter().any(|t| t.layout.contains(pane)))
 }
 
 /// Scrollback lines oldest first, then the visible screen, with trailing blanks trimmed.
@@ -345,7 +432,7 @@ pub fn handle(shared: &Shared, request: Request) -> Response {
         Request::Input { pane, data } => input(shared, pane, &data),
         Request::Capture { pane, raw } => capture(shared, pane, raw),
         Request::Resize { pane, cols, rows } => resize(shared, pane, cols, rows),
-        Request::Subscribe => Err(eyre!("subscribe is handled by the connection")),
+        Request::Subscribe | Request::Attach { .. } => Err(eyre!("handled by the connection")),
     };
     result.unwrap_or_else(|e| Response::Error {
         message: format!("{e:#}"),
@@ -485,25 +572,17 @@ fn capture(shared: &Shared, pane: PaneId, raw: bool) -> Result<Response> {
 
 fn resize(shared: &Shared, pane: PaneId, cols: u16, rows: u16) -> Result<Response> {
     let mut state = lock(shared);
-    let pane = state.pane_mut(pane)?;
-    pane.screen.screen_mut().set_size(rows, cols);
-    pane.master
-        .resize(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|e| eyre!("resizing: {e}"))?;
+    state.pane_mut(pane)?.screen.screen_mut().set_size(rows, cols);
+    state.send_to_holder(pane, &Frame::Resize { rows, cols })?;
     Ok(Response::Ok)
 }
 
+/// Written outside the state lock: a pane that is not reading its input must not stall every other request.
 fn input(shared: &Shared, pane: PaneId, data: &str) -> Result<Response> {
     let bytes = B64.decode(data).wrap_err("input is not base64")?;
-    let writer = lock(shared).pane(pane)?.writer.clone();
-    let mut writer = writer.lock().unwrap_or_else(PoisonError::into_inner);
-    writer.write_all(&bytes)?;
-    writer.flush()?;
+    let holder = lock(shared).pane(pane)?.holder.clone();
+    let mut holder = holder.lock().unwrap_or_else(PoisonError::into_inner);
+    frame::write(&mut *holder, &Frame::Input(bytes)).wrap_err("writing to pane holder")?;
     Ok(Response::Ok)
 }
 

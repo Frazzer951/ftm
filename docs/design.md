@@ -18,7 +18,7 @@ ftmd (daemon)     owns PTYs, worktrees, workspace tree, Unix socket; keeps scrol
    └── ftm (CLI)  used by Claude skills, hooks, and scripts
 ```
 
-The daemon owns the PTYs so agents survive the UI quitting or restarting, and workspace IDs stay stable across UI restarts.
+Sessions survive both the app quitting and ftmd restarting or being upgraded: each pane's PTY lives in a small holder process (see PTY persistence), and workspace IDs stay stable across restarts.
 
 Every PTY the daemon starts gets:
 
@@ -46,9 +46,10 @@ ftm status working|needs-input|idle|done      # id from $FTM_WORKSPACE_ID
 ftm close [--remove-worktree]
 ftm capture <pane|workspace> [--raw]          # screen + scrollback as text; --raw: last 1 MiB of output bytes
 ftm send <pane|workspace> <text> [--enter]    # type into a pane; a workspace id means its first pane
+ftm attach <pane|workspace>                   # this terminal shows the pane; Ctrl+] then d detaches
 ```
 
-Planned: `ftm attach`, `ftm gc` (remove worktrees whose PR merged), `ftm tab`/`ftm split`.
+Planned: `ftm gc` (remove worktrees whose PR merged), `ftm tab`/`ftm split`.
 
 ## Worktree creation
 
@@ -110,17 +111,20 @@ The daemon/CLI are independent of this choice; the app is just another socket cl
 
 ## PTY persistence
 
-The daemon runs each pane's PTY (`portable-pty`) and feeds its output through a headless terminal emulator (`alacritty_terminal` or `vt100`) so a reconnecting UI can be sent a full screen snapshot plus scrollback, then the live stream. This is the same model as tmux/zellij, and it means TUIs like Claude Code repaint correctly after the UI restarts.
+Each pane runs under a holder: `ftmd pty-holder`, the same binary in a hidden mode, started in its own session so nothing aimed at ftmd (a signal to its process group, its terminal closing) reaches it. The holder owns the PTY master and the pane's process tree, keeps the last 1 MiB of output, and serves one ftmd at a time on `<ftmd socket>.d/<pane>.sock` with length-prefixed frames (`crates/ftmd/src/frame.rs`): `Hello{version, rows, cols}` then the whole buffer then live output to ftmd; `Input`, `Resize` and `Kill` back. A new connection replaces the old one, which is how a restarted ftmd takes over. On `Kill` the holder hangs up the shell's process group and the terminal's foreground group (an agent run by an interactive shell has its own group and ignores SIGHUP), SIGKILLs what is left after 2s, and exits once the terminal is empty, removing its socket; ftmd waits for that before `--remove-worktree` deletes anything.
+
+ftmd keeps its own copy of each pane's output and feeds it through a headless `vt100` emulator, so `ftm capture` reads the screen and scrollback as text, `ftm attach` starts with a redraw of the current screen, and `Subscribe` replays raw output to the app. It saves the workspace tree (workspaces, tabs, layouts, statuses) to `$XDG_STATE_HOME/ftm/<socket path>.json` (`~/.local/state/ftm/...`) on every change, keyed by socket so a dev or test daemon never picks up another daemon's panes, and removes the file when the tree is empty. On start it reloads the tree, reconnects to each pane's holder and rebuilds its screen from the holder's buffer. A pane whose holder is gone (its processes exited while ftmd was down, or the machine rebooted) is dropped from its layout; the workspace stays, possibly without tabs. Nothing is restarted after a reboot. Stopping ftmd (SIGTERM) leaves every pane running; closing a pane or workspace is what kills it.
+
+The app is just a client: quitting it changes nothing, and on launch it starts ftmd if needed, then restores its window geometry (`tauri-plugin-window-state`) and the selected workspace and tabs (`localStorage`).
 
 ## Milestones
 
-1. **Daemon + CLI** (scaffolded): workspace tree, parent from env, status. Next: persist the tree to disk.
+1. **Daemon + CLI**: workspace tree, parent from env, status, tree saved to disk.
 2. **Worktrees**: repo config, worktree creation with the copy steps, setup script, `ftm gc`.
-3. **PTYs**: daemon-owned PTYs with headless terminal state, `ftm attach` as a minimal terminal client.
+3. **PTYs**: per-pane holders that survive ftmd restarts, headless terminal state, `ftm attach` as a minimal terminal client.
 4. **App**: sidebar, `+` flow, tabs, splits, status dots, notifications.
 5. **Claude integration**: hooks, port the sonarx spawn/shutdown skills, retire Supacode.
 
 ## Open questions
 
 - Should closing a leader close its children, or reparent them to the top level?
-- Keep a per-workspace layout (tabs/splits) on disk so it restores after a reboot, not just a UI restart?

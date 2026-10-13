@@ -43,6 +43,8 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getEleme
 
 let workspaces: Workspace[] = [];
 let selected: Id | null = null;
+/// Restored from the last run once the daemon's tree arrives; ftmd keeps the sessions, this keeps where you were.
+let restoredUi = false;
 let focused: Id | null = null;
 let pendingFocus: Id | null = null;
 let shownLayout = "";
@@ -129,9 +131,34 @@ function onWorkspaces(list: Workspace[]) {
       views.delete(id);
     }
   }
+  if (!restoredUi) {
+    restoredUi = true;
+    restoreUi(list);
+  }
   if (!list.some((w) => w.id === selected)) selected = list[0]?.id ?? null;
   claimPendingFocus();
   render();
+}
+
+const UI_KEY = "ftm.ui";
+
+function saveUi() {
+  try {
+    localStorage.setItem(UI_KEY, JSON.stringify({ selected, activeTab: [...activeTab] }));
+  } catch {
+    // Storage is a convenience; losing it only loses the selection.
+  }
+}
+
+function restoreUi(list: Workspace[]) {
+  try {
+    const saved = JSON.parse(localStorage.getItem(UI_KEY) ?? "null");
+    if (!saved) return;
+    if (list.some((w) => w.id === saved.selected)) selected = saved.selected;
+    for (const [ws, tab] of saved.activeTab ?? []) activeTab.set(ws, tab);
+  } catch {
+    // Ignore a corrupt or missing entry.
+  }
 }
 
 /// A new tab or split's pane can show up in the tree before or after its request returns; whichever is second focuses it.
@@ -150,6 +177,7 @@ function claimPendingFocus() {
 }
 
 function render() {
+  saveUi();
   renderSidebar();
   renderTabs();
   renderPanes();

@@ -4,6 +4,7 @@
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use ftm_core::model::{PaneId, Workspace};
 use ftm_core::protocol::{Event, Request, Response};
+use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -13,36 +14,95 @@ use std::time::{Duration, Instant};
 pub struct Daemon {
     child: Child,
     pub socket: PathBuf,
+    envs: Vec<(OsString, Option<OsString>)>,
+    state_home: PathBuf,
+}
+
+impl Daemon {
+    fn spawn(envs: &[(OsString, Option<OsString>)], socket: &Path) -> Child {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ftmd"));
+        for (key, value) in envs {
+            match value {
+                Some(v) => cmd.env(key, v),
+                None => cmd.env_remove(key),
+            };
+        }
+        let child = cmd.spawn().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while UnixStream::connect(socket).is_err() {
+            assert!(Instant::now() < deadline, "ftmd did not start");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        child
+    }
+
+    /// SIGTERM: ftmd exits and leaves the panes to their holders.
+    pub fn stop(&mut self) {
+        unsafe { libc::kill(self.child.id() as i32, libc::SIGTERM) };
+        let _ = self.child.wait();
+    }
+
+    /// Stops ftmd and starts a new one with the same environment, which reconnects to the panes.
+    pub fn restart(&mut self) {
+        self.stop();
+        self.child = Self::spawn(&self.envs, &self.socket);
+    }
+
+    pub fn holders(&self) -> PathBuf {
+        ftm_core::paths::holders_dir(&self.socket)
+    }
 }
 
 impl Drop for Daemon {
-    /// SIGTERM, so ftmd terminates its panes before exiting; SIGKILL would leave HUP-ignoring jobs behind.
+    /// Closing every workspace is what kills panes now (stopping ftmd leaves them running), so do that first and
+    /// wait for the holders to go.
     fn drop(&mut self) {
-        unsafe { libc::kill(self.child.id() as i32, libc::SIGTERM) };
-        let _ = self.child.wait();
+        if let Ok(stream) = UnixStream::connect(&self.socket) {
+            let mut conn = Conn::from_stream(stream);
+            if let Some(Response::Workspaces { workspaces }) = conn.try_send(&Request::List) {
+                for ws in workspaces {
+                    conn.try_send(&Request::Close {
+                        id: ws.id,
+                        remove_worktree: false,
+                    });
+                }
+            }
+        }
+        let holders = self.holders();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while std::fs::read_dir(&holders).is_ok_and(|mut d| d.next().is_some()) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        self.stop();
         let _ = std::fs::remove_file(&self.socket);
+        let _ = std::fs::remove_dir_all(&holders);
+        let _ = std::fs::remove_dir_all(&self.state_home);
     }
 }
 
 /// macOS caps socket paths at ~104 bytes, so this stays in /tmp rather than the (long) per-user temp dir.
-/// Panes run `/bin/sh`, and nothing FTM-related leaks in from the environment the tests run in (which may itself be
-/// an FTM pane); `configure` adds the rest.
+/// Panes run `/bin/sh`, nothing FTM-related leaks in from the environment the tests run in (which may itself be an
+/// FTM pane), and the saved tree goes to a private state dir; `configure` adds the rest.
 pub fn start_daemon(name: &str, configure: impl FnOnce(&mut Command)) -> Daemon {
     let socket = PathBuf::from(format!("/tmp/ftmd-{}-{name}.sock", std::process::id()));
     let _ = std::fs::remove_file(&socket);
+    let state_home = temp_root(&format!("{name}-state"));
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ftmd"));
-    cmd.env("FTM_SOCKET", &socket).env("SHELL", "/bin/sh");
+    cmd.env("FTM_SOCKET", &socket)
+        .env("SHELL", "/bin/sh")
+        .env("XDG_STATE_HOME", &state_home);
     for key in ["FTM_WORKSPACE_ID", "FTM_PANE_ID", "FTM_NAME", "FTM_BRIEF", "FTM_AGENT_CMD"] {
         cmd.env_remove(key);
     }
     configure(&mut cmd);
-    let child = cmd.spawn().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while UnixStream::connect(&socket).is_err() {
-        assert!(Instant::now() < deadline, "ftmd did not start");
-        std::thread::sleep(Duration::from_millis(20));
+    let envs: Vec<_> = cmd.get_envs().map(|(k, v)| (k.to_owned(), v.map(|v| v.to_owned()))).collect();
+    let child = Daemon::spawn(&envs, &socket);
+    Daemon {
+        child,
+        socket,
+        envs,
+        state_home,
     }
-    Daemon { child, socket }
 }
 
 pub struct Conn {
@@ -52,10 +112,23 @@ pub struct Conn {
 
 impl Conn {
     pub fn open(socket: &Path) -> Self {
-        let write = UnixStream::connect(socket).unwrap();
+        Self::from_stream(UnixStream::connect(socket).unwrap())
+    }
+
+    fn from_stream(write: UnixStream) -> Self {
         write.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
         let read = BufReader::new(write.try_clone().unwrap());
         Conn { write, read }
+    }
+
+    /// Never panics, for cleanup.
+    pub fn try_send(&mut self, request: &Request) -> Option<Response> {
+        let mut out = serde_json::to_vec(request).ok()?;
+        out.push(b'\n');
+        self.write.write_all(&out).ok()?;
+        let mut line = String::new();
+        self.read.read_line(&mut line).ok()?;
+        serde_json::from_str(&line).ok()
     }
 
     pub fn line<T: serde::de::DeserializeOwned>(&mut self) -> T {
@@ -137,10 +210,21 @@ pub fn temp_root(name: &str) -> PathBuf {
     root
 }
 
-pub fn wait_for(what: &str, timeout: Duration, ok: impl Fn() -> bool) {
+pub fn wait_for(what: &str, timeout: Duration, mut ok: impl FnMut() -> bool) {
     let deadline = Instant::now() + timeout;
     while !ok() {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// `ftm` is another package, so its binary is not a `CARGO_BIN_EXE_*` here; build it into the same target dir.
+pub fn ftm_bin() -> PathBuf {
+    let status = Command::new(env!("CARGO"))
+        .args(["build", "--quiet", "-p", "ftm", "--bin", "ftm"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .status()
+        .unwrap();
+    assert!(status.success(), "building ftm");
+    Path::new(env!("CARGO_BIN_EXE_ftmd")).with_file_name("ftm")
 }

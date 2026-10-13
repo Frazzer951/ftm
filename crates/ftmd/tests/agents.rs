@@ -2,12 +2,12 @@
 
 mod common;
 
-use common::{Conn, alive, git, start_daemon, temp_root, wait_for};
+use common::{Conn, alive, ftm_bin, git, start_daemon, temp_root, wait_for};
 use ftm_core::model::{Kind, Status, Workspace, WorkspaceId};
 use ftm_core::protocol::Request;
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
@@ -39,17 +39,6 @@ exec sleep 600
 "#;
 
 const BRIEF: &str = "Fix \"the bug\" in $(whoami)'s code;\nthen `stop`.";
-
-/// `ftm` is another package, so its binary is not a `CARGO_BIN_EXE_*` here; build it into the same target dir.
-fn ftm_bin() -> PathBuf {
-    let status = Command::new(env!("CARGO"))
-        .args(["build", "--quiet", "-p", "ftm", "--bin", "ftm"])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .status()
-        .unwrap();
-    assert!(status.success(), "building ftm");
-    Path::new(env!("CARGO_BIN_EXE_ftmd")).with_file_name("ftm")
-}
 
 fn ftm(bin: &Path, socket: &Path, args: &[&str]) -> String {
     let out = Command::new(bin)
