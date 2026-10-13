@@ -36,6 +36,29 @@ impl RepoConfig {
 pub struct Settings {
     pub terminal: TerminalSettings,
     pub theme: ThemeSettings,
+    pub sounds: SoundSettings,
+}
+
+/// Sounds the app plays on status changes, by name from its sound list; an empty name plays nothing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SoundSettings {
+    /// An agent started waiting on you.
+    pub needs_input: String,
+    /// An agent finished its turn while you were not looking at it.
+    pub completed: String,
+    /// 0 to 1.
+    pub volume: f32,
+}
+
+impl Default for SoundSettings {
+    fn default() -> Self {
+        SoundSettings {
+            needs_input: "Nudge".into(),
+            completed: "Chime".into(),
+            volume: 0.7,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -149,10 +172,13 @@ mod tests {
             dark: "Nord".into(),
             light: "Supacode Light".into(),
         };
+        assert_eq!(settings.sounds.completed, "Chime");
+        settings.sounds.needs_input = String::new();
         settings.save(&path).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("future = \"keep\"") && text.contains("[other]"), "{text}");
         assert!(text.contains("[theme]") && text.contains("follow_system = true"), "{text}");
+        assert!(text.contains("needs_input = \"\""), "{text}");
         assert_eq!(Settings::load(&path).unwrap(), settings);
         let _ = std::fs::remove_dir_all(&dir);
     }

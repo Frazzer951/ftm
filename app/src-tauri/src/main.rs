@@ -2,6 +2,7 @@
 
 mod daemon;
 mod fonts;
+mod sounds;
 mod themes;
 
 use ftm_core::config::Settings;
@@ -132,6 +133,20 @@ async fn list_themes() -> Vec<ftm_core::theme::ThemeEntry> {
 }
 
 #[tauri::command]
+async fn list_sounds() -> Vec<sounds::SoundEntry> {
+    tauri::async_runtime::spawn_blocking(sounds::all).await.unwrap_or_default()
+}
+
+/// Raw bytes, which arrive in the webview as an `ArrayBuffer`.
+#[tauri::command]
+async fn sound_data(name: String) -> Result<tauri::ipc::Response, String> {
+    tauri::async_runtime::spawn_blocking(move || sounds::data(&name))
+        .await
+        .map_err(|e| e.to_string())?
+        .map(tauri::ipc::Response::new)
+}
+
+#[tauri::command]
 fn get_settings() -> Result<Settings, String> {
     Settings::load(&paths::settings_path()).map_err(|e| e.to_string())
 }
@@ -235,6 +250,8 @@ fn main() {
             save_settings,
             list_fonts,
             list_themes,
+            list_sounds,
+            sound_data,
             log,
             ensure_on_screen
         ])
