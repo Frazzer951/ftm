@@ -67,6 +67,16 @@ enum Command {
         #[arg(long)]
         remove_worktree: bool,
     },
+    /// Set the workspace's displayed name (its FTM_NAME and agent session name stay as spawned); "" or --clear
+    /// goes back to the spawn name
+    Rename {
+        #[arg(required_unless_present = "clear")]
+        name: Option<String>,
+        #[arg(long, conflicts_with = "name")]
+        clear: bool,
+        #[arg(long, env = ENV_WORKSPACE_ID)]
+        id: Option<WorkspaceId>,
+    },
     /// Print a pane's screen and scrollback as text, or with --raw its buffered output bytes (last 1 MiB)
     Capture {
         /// Pane id, or a workspace id for the first pane of its first tab
@@ -150,6 +160,11 @@ fn main() -> Result<()> {
             },
         },
         Command::Close { id, remove_worktree } => Request::Close { id, remove_worktree },
+        Command::Rename { name, id, .. } => Request::Rename {
+            id: id
+                .ok_or_else(|| eyre::eyre!("no workspace: pass --id or run inside an FTM workspace (${ENV_WORKSPACE_ID})"))?,
+            name: name.unwrap_or_default(),
+        },
         Command::Capture { target, raw } => {
             let pane = resolve_pane(target)?;
             let Response::Output { data } = client::send(&Request::Capture { pane, raw })? else {
@@ -211,7 +226,10 @@ fn print_tree(ws: &Workspace, all: &[Workspace], depth: usize) {
     println!(
         "{:indent$}{} {:?} {:?} {}  {}",
         "",
-        ws.name,
+        match &ws.title {
+            Some(title) if *title != ws.name => format!("{title} ({})", ws.name),
+            _ => ws.name.clone(),
+        },
         ws.kind,
         ws.status,
         location,

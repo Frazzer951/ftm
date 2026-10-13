@@ -61,3 +61,8 @@ dialog fieldset { border: 1px solid #3a3f4a; border-radius: 4px; display: flex; 
 .row { display: flex; gap: 8px; align-items: center; }
 #folder { color: #7f8796; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #spawn-error { color: #ff6b6b; margin: 0; min-height: 1em; }
+.ws input.rename { flex: 1; min-width: 0; font: inherit; color: inherit; background: #16181d; border: 1px solid #3d5a8a; border-radius: 3px; padding: 0 3px; }
+.ws input.rename.invalid { border-color: #ff6b6b; }
+#menu { position: fixed; z-index: 10; display: flex; flex-direction: column; min-width: 120px; padding: 4px; background: #20232a; border: 1px solid #3a3f4a; border-radius: 6px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4); }
+#menu button { text-align: left; background: none; border: none; padding: 4px 8px; }
+#menu button:hover { background: #2b3140; }

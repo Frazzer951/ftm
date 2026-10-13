@@ -4,7 +4,7 @@ mod common;
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use common::{Conn, alive, ftm_bin, start_daemon, temp_root, wait_for, wait_for_output};
-use ftm_core::model::{Kind, PaneId, SplitDir, Status, Workspace};
+use ftm_core::model::{Kind, PaneId, SplitDir, Status, Workspace, WorkspaceId};
 use ftm_core::protocol::{Event, Request, Response, SpawnRequest};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::io::{Read, Write};
@@ -225,5 +225,66 @@ fn attach_streams_a_pane_and_detaches() {
     req.type_in(pane, "echo after-detach\n");
     wait_for("pane to keep running", Duration::from_secs(10), || {
         capture(&mut req, pane).contains("after-detach")
+    });
+}
+
+#[test]
+fn rename_broadcasts_and_survives_restart() {
+    let dir = temp_root("rename");
+    let mut daemon = start_daemon("rename", |_| {});
+    let mut req = Conn::open(&daemon.socket);
+    let ws = spawn_terminal(&mut req, &dir, "spawned");
+    let mut events = Conn::open(&daemon.socket);
+    events.send(&Request::Subscribe);
+
+    assert!(matches!(
+        req.send(&Request::Rename {
+            id: ws.id,
+            name: "  my task  ".into(),
+        }),
+        Response::Ok
+    ));
+    let renamed = loop {
+        if let Event::Workspaces { workspaces } = events.line() {
+            let w = workspaces.into_iter().find(|w| w.id == ws.id).unwrap();
+            if w.title.is_some() {
+                break w;
+            }
+        }
+    };
+    assert_eq!(renamed.title.as_deref(), Some("my task"));
+    assert_eq!(renamed.name, "spawned");
+
+    for blank in [" ", "\t\n"] {
+        let rejected = req.try_send(&Request::Rename {
+            id: ws.id,
+            name: blank.into(),
+        });
+        assert!(matches!(rejected, Some(Response::Error { .. })), "{blank:?}: {rejected:?}");
+    }
+    let missing = req.try_send(&Request::Rename {
+        id: WorkspaceId::new_v4(),
+        name: "x".into(),
+    });
+    assert!(matches!(missing, Some(Response::Error { .. })));
+    drop((req, events));
+
+    daemon.restart();
+    let mut req = Conn::open(&daemon.socket);
+    let title = |req: &mut Conn| req.list().into_iter().find(|w| w.id == ws.id).unwrap().title;
+    assert_eq!(title(&mut req).as_deref(), Some("my task"));
+
+    // An empty name goes back to the spawn name, and the new pane still gets it as FTM_NAME.
+    req.send(&Request::Rename {
+        id: ws.id,
+        name: String::new(),
+    });
+    assert_eq!(title(&mut req), None);
+    let Response::Pane { pane } = req.send(&Request::NewTab { workspace: ws.id }) else {
+        panic!()
+    };
+    req.type_in(pane, "echo name-$FTM_NAME-end\n");
+    wait_for("FTM_NAME in a new tab", Duration::from_secs(10), || {
+        capture(&mut req, pane).contains("name-spawned-end")
     });
 }

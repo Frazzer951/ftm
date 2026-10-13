@@ -123,7 +123,11 @@ pub struct Tab {
 pub struct Workspace {
     pub id: WorkspaceId,
     pub parent: Option<WorkspaceId>,
+    /// Fixed at spawn: every pane gets it as `FTM_NAME`, and an agent's Claude session is named after it.
     pub name: String,
+    /// Set by `Rename`; shown in place of `name`.
+    #[serde(default)]
+    pub title: Option<String>,
     pub kind: Kind,
     pub cwd: PathBuf,
     pub worktree: Option<Worktree>,

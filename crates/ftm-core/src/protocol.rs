@@ -19,6 +19,12 @@ pub enum Request {
         id: WorkspaceId,
         remove_worktree: bool,
     },
+    /// Changes the workspace's displayed title; its `name` (and `FTM_NAME`) stay as spawned. An empty `name` clears the
+    /// title; one that is only whitespace is rejected.
+    Rename {
+        id: WorkspaceId,
+        name: String,
+    },
     NewTab {
         workspace: WorkspaceId,
     },

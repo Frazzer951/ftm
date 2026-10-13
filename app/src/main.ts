@@ -20,6 +20,7 @@ interface Workspace {
   id: Id;
   parent: Id | null;
   name: string;
+  title: string | null;
   kind: "terminal" | "agent";
   cwd: string;
   worktree: { repo: string; branch: string } | null;
@@ -48,6 +49,8 @@ let restoredUi = false;
 let focused: Id | null = null;
 let pendingFocus: Id | null = null;
 let shownLayout = "";
+/// The workspace whose name is being edited; the sidebar is not rebuilt meanwhile, so the input survives tree updates.
+let editing: Id | null = null;
 const activeTab = new Map<Id, Id>();
 const views = new Map<Id, PaneView>();
 
@@ -183,7 +186,11 @@ function render() {
   renderPanes();
 }
 
+const displayName = (ws: Workspace) => ws.title ?? ws.name;
+
 function renderSidebar() {
+  if (editing && workspaces.some((w) => w.id === editing)) return;
+  editing = null;
   const ids = new Set(workspaces.map((w) => w.id));
   const build = (parent: Id | null): HTMLUListElement => {
     const ul = document.createElement("ul");
@@ -192,13 +199,18 @@ function renderSidebar() {
       const li = document.createElement("li");
       const row = document.createElement("div");
       row.className = "ws" + (ws.id === selected ? " selected" : "");
-      row.title = ws.cwd;
+      row.dataset.id = ws.id;
+      row.title = ws.title ? `${ws.name} · ${ws.cwd}` : ws.cwd;
       const dot = document.createElement("span");
       dot.className = ws.kind === "agent" ? `dot ${ws.status}` : "dot none";
       dot.title = ws.kind === "agent" ? ws.status.replace("_", " ") : "";
       const name = document.createElement("span");
       name.className = "name";
-      name.textContent = (ws.kind === "agent" ? "✻ " : "") + ws.name;
+      name.textContent = (ws.kind === "agent" ? "✻ " : "") + displayName(ws);
+      name.ondblclick = (e) => {
+        e.stopPropagation();
+        startRename(ws.id);
+      };
       const branch = document.createElement("span");
       branch.className = "branch";
       branch.textContent = ws.worktree?.branch ?? "";
@@ -224,6 +236,10 @@ function renderSidebar() {
         selected = ws.id;
         render();
       };
+      row.oncontextmenu = (e) => {
+        e.preventDefault();
+        showMenu(e.clientX, e.clientY, [["Rename", () => startRename(ws.id)]]);
+      };
       li.append(row);
       if (workspaces.some((w) => w.parent === ws.id)) li.append(build(ws.id));
       ul.append(li);
@@ -231,6 +247,70 @@ function renderSidebar() {
     return ul;
   };
   $("workspaces").replaceChildren(...build(null).children);
+}
+
+function startRename(id: Id) {
+  closeMenu();
+  const ws = workspaces.find((w) => w.id === id);
+  const label = document.querySelector(`.ws[data-id="${id}"] .name`);
+  if (!ws || !label || editing) return;
+  editing = id;
+  const input = document.createElement("input");
+  input.className = "rename";
+  input.value = displayName(ws);
+  let done = false;
+  const finish = () => {
+    done = true;
+    editing = null;
+    render();
+  };
+  const save = async () => {
+    if (done) return;
+    done = true;
+    const value = input.value.trim();
+    if (value === displayName(ws)) return finish();
+    try {
+      await request({ op: "rename", id: ws.id, name: value });
+      finish();
+    } catch (err) {
+      done = false;
+      input.classList.add("invalid");
+      input.title = String(err);
+    }
+  };
+  input.onkeydown = (e) => {
+    e.stopPropagation();
+    if (e.key === "Enter") save();
+    else if (e.key === "Escape" && !done) finish();
+    else input.classList.remove("invalid");
+  };
+  input.onblur = save;
+  for (const ev of ["click", "dblclick", "mousedown", "contextmenu"] as const) input.addEventListener(ev, (e) => e.stopPropagation());
+  label.replaceWith(input);
+  input.focus();
+  input.select();
+}
+
+function showMenu(x: number, y: number, items: [string, () => void][]) {
+  closeMenu();
+  const menu = document.createElement("div");
+  menu.id = "menu";
+  for (const [label, action] of items) {
+    const item = document.createElement("button");
+    item.textContent = label;
+    item.onclick = () => {
+      closeMenu();
+      action();
+    };
+    menu.append(item);
+  }
+  document.body.append(menu);
+  menu.style.left = `${Math.min(x, innerWidth - menu.offsetWidth - 4)}px`;
+  menu.style.top = `${Math.min(y, innerHeight - menu.offsetHeight - 4)}px`;
+}
+
+function closeMenu() {
+  document.getElementById("menu")?.remove();
 }
 
 function descendantsNeedingInput(id: Id): number {
@@ -250,7 +330,7 @@ async function notifyNeedsInput(list: Workspace[], initial: boolean) {
   let granted = await isPermissionGranted();
   if (!granted) granted = (await requestPermission()) === "granted";
   if (!granted) return;
-  for (const w of fresh) sendNotification({ title: w.name, body: "needs input" });
+  for (const w of fresh) sendNotification({ title: displayName(w), body: "needs input" });
 }
 
 function renderTabs() {
@@ -298,7 +378,7 @@ function renderPanes() {
   setFocus(focused);
   requestAnimationFrame(() => {
     fitVisible();
-    views.get(focused!)?.term.focus();
+    if (!editing) views.get(focused!)?.term.focus();
   });
 }
 
@@ -369,6 +449,8 @@ function closePane() {
 
 /// Cmd+T/D/Shift+D/W on macOS; Ctrl+Shift+T/D/E/W on Linux (Ctrl+Shift+D can't also carry a second Shift).
 function shortcut(e: KeyboardEvent) {
+  if (e.key === "Escape") closeMenu();
+  if (editing) return;
   const mod = isMac ? e.metaKey && !e.ctrlKey && !e.altKey : e.ctrlKey && e.shiftKey && !e.metaKey && !e.altKey;
   if (!mod) return;
   const key = e.key.toLowerCase();
@@ -454,6 +536,10 @@ function setupSpawnDialog() {
 
 invoke("ensure_on_screen").catch(console.error);
 window.addEventListener("keydown", shortcut, true);
+window.addEventListener("mousedown", (e) => {
+  if (!(e.target as HTMLElement).closest("#menu")) closeMenu();
+});
+window.addEventListener("blur", closeMenu);
 new ResizeObserver(() => requestAnimationFrame(fitVisible)).observe($("panes"));
 setupSpawnDialog();
 render();

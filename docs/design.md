@@ -27,9 +27,9 @@ Every PTY the daemon starts gets:
 | `FTM_SOCKET` | daemon socket path |
 | `FTM_WORKSPACE_ID` | the workspace this pane belongs to |
 | `FTM_PANE_ID` | the pane itself |
-| `FTM_NAME` | the workspace name (`claude -n`) |
+| `FTM_NAME` | the workspace's spawn name (`claude -n`); a later rename does not change it |
 
-Inherited `CLAUDECODE`, `CLAUDE_CODE_*` and `SUPACODE_*` are stripped, so an agent started from inside another agent is not treated as nested Claude Code. Panes run `$SHELL -l`; an agent's first pane runs `$SHELL -l -i -c '<setup; >claude -n "$FTM_NAME" ${FTM_BRIEF:+"$FTM_BRIEF"}; exec "$SHELL" -l'`, with the brief passed in the environment rather than interpolated. `FTM_AGENT_CMD` (read by ftmd, default `claude`) replaces `claude` in that script, e.g. `claude --model haiku` or the fake agent the tests use; it is shell syntax, so it may carry quoted flags. Each pane keeps the last 1 MiB of raw output; `Subscribe` replays it, then streams live.
+Inherited `CLAUDECODE`, `CLAUDE_CODE_*` and `SUPACODE_*` are stripped, so an agent started from inside another agent is not treated as nested Claude Code. Panes run `$SHELL -l`; an agent's first pane runs `$SHELL -l -i -c '<setup; >claude -n "$FTM_NAME" --append-system-prompt '<rename hint>' ${FTM_BRIEF:+"$FTM_BRIEF"}; exec "$SHELL" -l'`, with the brief passed in the environment rather than interpolated. The appended system prompt asks the agent to run `ftm rename "<3-5 word task>"` once it understands its task. `FTM_AGENT_CMD` (read by ftmd, default `claude`) replaces `claude` in that script, e.g. `claude --model haiku` or the fake agent the tests use; it is shell syntax, so it may carry quoted flags. Each pane keeps the last 1 MiB of raw output; `Subscribe` replays it, then streams live.
 
 `ftm spawn` run inside a workspace defaults `--parent` to `$FTM_WORKSPACE_ID`. That is the whole leader/worker mechanism: no registration step, no config.
 
@@ -44,6 +44,7 @@ ftm spawn terminal|agent [--path P] [--name N] [--worktree BRANCH [--base REF] [
                          [--brief FILE] [--parent ID | --detached]
 ftm status working|needs-input|idle|done      # id from $FTM_WORKSPACE_ID
 ftm close [--remove-worktree]
+ftm rename NAME | --clear                     # display title only; "" also clears
 ftm capture <pane|workspace> [--raw]          # screen + scrollback as text; --raw: last 1 MiB of output bytes
 ftm send <pane|workspace> <text> [--enter]    # type into a pane; a workspace id means its first pane
 ftm attach <pane|workspace>                   # this terminal shows the pane; Ctrl+] then d detaches
@@ -95,7 +96,7 @@ The 60s `idle_prompt` notification is deliberately not mapped, so a finished age
 
 ## UI
 
-Sidebar with a `+` button: pick terminal or agent, pick a folder; if it is a git repo, optionally tick "worktree" and enter a branch (plus "copy my changes"). Rows nest by parent and show status, branch, and PR link. Each workspace has tabs; each tab splits into panes.
+Sidebar with a `+` button: pick terminal or agent, pick a folder; if it is a git repo, optionally tick "worktree" and enter a branch (plus "copy my changes"). Rows nest by parent and show status, branch, and PR link. Right-click a row (or double-click its name) to rename it inline: Enter saves, Esc cancels, an empty name goes back to the spawn name. A rename sets the workspace's `title`, which is shown instead of `name`; `name` stays as spawned because it is `FTM_NAME` for every pane opened later and the agent's Claude session name (the `SendMessage` address). `ftm ls` prints `title (name)` when they differ. Each workspace has tabs; each tab splits into panes.
 
 Must run on macOS and Linux as a standalone desktop app (never inside a browser).
 

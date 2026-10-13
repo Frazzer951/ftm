@@ -32,6 +32,7 @@ if [ "$FTM_NAME" = leader ]; then
   ftm spawn agent --name child > "$out.child" 2>&1 || exit 1
   ftm spawn terminal --detached --name loose > "$out.detached" 2>&1 || exit 1
   ftm status working > "$out.status" 2>&1 || exit 1
+  ftm rename "  fix the bug  " > "$out.rename" 2>&1 || exit 1
 fi
 trap '' HUP
 touch "$out.ready"
@@ -138,7 +139,7 @@ fn agents_nest_report_status_and_clean_up() {
     .parse()
     .unwrap();
     let report = || {
-        ["child", "detached", "status"]
+        ["child", "detached", "status", "rename"]
             .map(|f| std::fs::read_to_string(out.join(format!("leader.{f}"))).unwrap_or_default())
             .join(" | ")
     };
@@ -154,8 +155,11 @@ fn agents_nest_report_status_and_clean_up() {
     assert_eq!(wt, root.join("data/ftm/worktrees/agentrepo/feat/leader"));
     assert_eq!(leader_ws.worktree.as_ref().unwrap().branch, "feat/leader");
 
-    // Name, brief and FTM_* env reach the agent; the repo setup ran before it.
-    assert_eq!(argv(&out, "leader"), ["-n", "leader", BRIEF]);
+    // Name, the FTM system prompt, brief and FTM_* env reach the agent; the repo setup ran before it.
+    let leader_argv = argv(&out, "leader");
+    assert_eq!(leader_argv[..3], ["-n", "leader", "--append-system-prompt"]);
+    assert!(leader_argv[3].contains("ftm rename"), "{}", leader_argv[3]);
+    assert_eq!(leader_argv[4..], [BRIEF]);
     let lv = vars(&out, "leader");
     assert_eq!(lv["FTM_NAME"], "leader");
     assert_eq!(lv["FTM_WORKSPACE_ID"], leader.to_string());
@@ -180,7 +184,12 @@ fn agents_nest_report_status_and_clean_up() {
     assert_eq!(by_id(loose).kind, Kind::Terminal);
     assert_eq!(leader_ws.status, Status::Working);
     assert_eq!(child_ws.status, Status::Starting);
-    assert_eq!(argv(&out, "child"), ["-n", "child"]);
+    assert_eq!(argv(&out, "child")[..3], ["-n", "child", "--append-system-prompt"]);
+
+    // `ftm rename` inside the agent retitles its own workspace; the spawn name stays for FTM_NAME and `claude -n`.
+    assert_eq!(leader_ws.title.as_deref(), Some("fix the bug"));
+    assert_eq!(leader_ws.name, "leader");
+    assert!(ftm(&bin, &socket, &["ls"]).contains("fix the bug (leader)"));
     let cv = vars(&out, "child");
     assert_eq!(cv["FTM_WORKSPACE_ID"], child.to_string());
 

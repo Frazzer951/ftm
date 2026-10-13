@@ -291,13 +291,18 @@ fn shell() -> String {
         .unwrap_or_else(|| if cfg!(target_os = "macos") { "/bin/zsh" } else { "/bin/bash" }.to_string())
 }
 
+/// Single-quoted into the agent's command line, so it must not contain `'`.
+const AGENT_PROMPT: &str = "You are running inside FTM, a terminal manager. Once you understand your task, run \
+`ftm rename \"<3-5 word task summary>\"` to label your workspace in its sidebar, and run it again if the task changes \
+substantially.";
+
 fn script(startup: Startup) -> Option<String> {
     let setup = startup.setup.map(|s| format!("{s}; ")).unwrap_or_default();
     if startup.agent {
         let agent = std::env::var(ENV_AGENT_CMD).ok().filter(|c| !c.trim().is_empty());
         let agent = agent.as_deref().unwrap_or("claude");
         Some(format!(
-            r#"{setup}{agent} ${{FTM_CLAUDE_SETTINGS:+--settings}} ${{FTM_CLAUDE_SETTINGS:+"$FTM_CLAUDE_SETTINGS"}} -n "$FTM_NAME" ${{FTM_BRIEF:+"$FTM_BRIEF"}}; exec "$SHELL" -l"#
+            r#"{setup}{agent} ${{FTM_CLAUDE_SETTINGS:+--settings}} ${{FTM_CLAUDE_SETTINGS:+"$FTM_CLAUDE_SETTINGS"}} -n "$FTM_NAME" --append-system-prompt '{AGENT_PROMPT}' ${{FTM_BRIEF:+"$FTM_BRIEF"}}; exec "$SHELL" -l"#
         ))
     } else if startup.setup.is_some() {
         Some(format!(r#"{setup}exec "$SHELL" -l"#))
@@ -423,6 +428,7 @@ pub fn handle(shared: &Shared, request: Request) -> Response {
             })
         },
         Request::Close { id, remove_worktree } => close(shared, id, remove_worktree),
+        Request::Rename { id, name } => rename(shared, id, &name),
         Request::NewTab { workspace } => new_tab(shared, workspace),
         Request::Split { pane, dir } => split(shared, pane, dir),
         Request::ClosePane { pane } => {
@@ -478,6 +484,7 @@ fn spawn(shared: &Shared, req: SpawnRequest) -> Result<Response> {
             id,
             parent: req.parent,
             name,
+            title: None,
             kind: req.kind,
             cwd,
             worktree,
@@ -531,6 +538,18 @@ fn close(shared: &Shared, id: WorkspaceId, remove_worktree: bool) -> Result<Resp
         reaping.into_iter().for_each(|h| drop(h.join()));
         worktree::remove(&wt.repo, &ws.cwd, &wt.branch)?;
     }
+    Ok(Response::Ok)
+}
+
+fn rename(shared: &Shared, id: WorkspaceId, name: &str) -> Result<Response> {
+    let title = match name.trim() {
+        "" if !name.is_empty() => bail!("name is blank"),
+        "" => None,
+        trimmed => Some(trimmed.to_string()),
+    };
+    let mut state = lock(shared);
+    state.workspace_mut(id)?.title = title;
+    state.emit_workspaces();
     Ok(Response::Ok)
 }
 
@@ -611,10 +630,11 @@ mod tests {
                 (
                     Some("/tmp/s.json"),
                     Some("a \"b\" $(c)"),
-                    "[--settings][/tmp/s.json][-n][n][a \"b\" $(c)]",
+                    "[--settings][/tmp/s.json][-n][n][--append-system-prompt][P][a \"b\" $(c)]",
                 ),
-                (None, None, "[-n][n]"),
+                (None, None, "[-n][n][--append-system-prompt][P]"),
             ] {
+                let want = want.replace("[P]", &format!("[{AGENT_PROMPT}]"));
                 let mut cmd = std::process::Command::new(shell);
                 cmd.args(["-c", line]).env("FTM_NAME", "n");
                 cmd.env_remove("FTM_CLAUDE_SETTINGS").env_remove("FTM_BRIEF");
@@ -622,6 +642,7 @@ mod tests {
                 brief.map(|b| cmd.env("FTM_BRIEF", b));
                 let out = cmd.output().unwrap();
                 assert_eq!(String::from_utf8_lossy(&out.stdout), want, "{shell}");
+                assert!(!AGENT_PROMPT.contains('\''));
             }
         }
     }
