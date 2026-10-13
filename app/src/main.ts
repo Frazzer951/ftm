@@ -769,15 +769,32 @@ function setupSpawnDialog() {
     $("git").hidden = !root;
   };
 
+  /// One-click picks from the folders ftmd remembers, most recently used first.
+  const showRecent = () => {
+    $("recent").replaceChildren(
+      ...folders.slice(0, 10).map((f) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "recent" + (f.path === folder ? " chosen" : "");
+        b.textContent = tilde(f.path);
+        b.title = f.path;
+        b.onclick = () => choose(f.path).then(showRecent).catch(console.error);
+        return b;
+      }),
+    );
+  };
+
   openSpawn = (preset = {}) => {
     form.reset();
     folder = null;
     $("folder").textContent = "none";
     $("git").hidden = true;
     error.textContent = "";
+    showRecent();
     if (preset.folder) {
       choose(preset.folder)
         .then(() => {
+          showRecent();
           (form.elements.namedItem("worktree") as HTMLInputElement).checked = !!preset.worktree;
           if (preset.worktree) (form.elements.namedItem("branch") as HTMLInputElement).focus();
         })
@@ -790,6 +807,7 @@ function setupSpawnDialog() {
   $("pick").onclick = async () => {
     const dir = await open({ directory: true, defaultPath: folder ?? undefined });
     if (typeof dir === "string") await choose(dir);
+    showRecent();
   };
 
   create.onclick = async (e) => {

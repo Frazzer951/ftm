@@ -77,3 +77,8 @@ dialog fieldset { border: 1px solid #3a3f4a; border-radius: 4px; display: flex; 
 dialog input[type="number"] { width: 100%; background: #16181d; color: inherit; border: 1px solid #3a3f4a; border-radius: 4px; padding: 4px; }
 .hint { color: #c9a74b; margin: 0; min-height: 1em; font-size: 12px; }
 #settings-error { color: #ff6b6b; margin: 0; min-height: 1em; }
+#recent { display: flex; flex-direction: column; gap: 2px; max-height: 220px; overflow-y: auto; }
+#recent:empty { display: none; }
+#recent .recent { text-align: left; background: none; border: 1px solid transparent; padding: 3px 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #c4c9d2; }
+#recent .recent:hover { background: #2b3140; }
+#recent .recent.chosen { border-color: #3d5a8a; background: #23293a; }

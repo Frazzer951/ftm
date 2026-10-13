@@ -23,7 +23,8 @@
         <h3>New workspace</h3>
         <label><input type="radio" name="kind" value="terminal" checked /> Terminal</label>
         <label><input type="radio" name="kind" value="agent" /> Agent</label>
-        <div class="row"><button type="button" id="pick">Folder…</button><span id="folder">none</span></div>
+        <div class="row"><button type="button" id="pick">Browse…</button><span id="folder">none</span></div>
+        <div id="recent"></div>
         <label>Name <input name="name" placeholder="auto from task (agents), else folder or branch" /></label>
         <fieldset id="git" hidden>
           <label><input type="checkbox" name="worktree" /> New worktree</label>
