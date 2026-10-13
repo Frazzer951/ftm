@@ -1,7 +1,7 @@
 mod client;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use eyre::{Result, bail};
+use eyre::{Result, WrapErr, bail};
 use ftm_core::ENV_WORKSPACE_ID;
 use ftm_core::model::{Kind, Status, Workspace, WorkspaceId};
 use ftm_core::protocol::{Request, Response, SpawnRequest};
@@ -96,7 +96,7 @@ fn main() -> Result<()> {
             detached,
         } => {
             let cwd = match path {
-                Some(p) => std::path::absolute(p)?,
+                Some(p) => std::fs::canonicalize(&p).wrap_err_with(|| format!("{}", p.display()))?,
                 None => std::env::current_dir()?,
             };
             if brief.is_some() && matches!(kind, KindArg::Terminal) {
