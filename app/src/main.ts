@@ -50,6 +50,15 @@ interface PaneView {
 }
 
 const isMac = navigator.userAgent.includes("Mac");
+
+const report = (message: string) => invoke("log", { message }).catch(() => {});
+const consoleError = console.error.bind(console);
+console.error = (...args: unknown[]) => {
+  consoleError(...args);
+  report(args.map((a) => (a instanceof Error ? `${a.message}\n${a.stack}` : String(a))).join(" "));
+};
+window.addEventListener("error", (e) => report(`${e.message} at ${e.filename}:${e.lineno}`));
+window.addEventListener("unhandledrejection", (e) => report(`unhandled rejection: ${e.reason?.stack ?? e.reason}`));
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
 let workspaces: Workspace[] = [];
@@ -140,8 +149,13 @@ const cssFamily = (family: string) => (/[,"']/.test(family) ? family : `"${famil
 /// sequences (=>, !=, ->, === ...) instead, and the WebGL renderer then draws each joined run with the font's glyphs.
 function setLigatures(v: PaneView) {
   if (settings.ligatures && !v.ligatures) {
-    v.ligatures = new LigaturesAddon();
-    v.term.loadAddon(v.ligatures);
+    try {
+      const addon = new LigaturesAddon();
+      v.term.loadAddon(addon);
+      v.ligatures = addon;
+    } catch (e) {
+      console.error("ligatures unavailable", e);
+    }
   } else if (!settings.ligatures && v.ligatures) {
     v.ligatures.dispose();
     v.ligatures = undefined;

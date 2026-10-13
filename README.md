@@ -24,8 +24,10 @@ holder process) and runs the app with `tauri dev`. Ctrl+C stops the app; ftmd an
 after pulling or changing code. Panes started by an older build keep running that build's holder until they close; see
 [PTY persistence](docs/design.md#pty-persistence).
 
-`FTM_BACKGROUND=1 scripts/dev.sh` (or any launch with `FTM_BACKGROUND=1`) opens the window without activating the app
-or taking focus, for scripted launches; on macOS the app then runs as an accessory, without a Dock icon.
+`FTM_BACKGROUND=1` (for scripted launches) never takes focus: on macOS the app launches with the Prohibited activation
+policy, which the system cannot activate, then becomes an accessory without a Dock icon. Known limit: on macOS its window
+then stays hidden, so it is no use for screenshots; any launch that shows a window can take focus. Frontend errors are
+printed to the terminal running the app as `[frontend] ...`.
 
 ## Try the CLI
 

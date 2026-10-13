@@ -162,28 +162,41 @@ fn menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     Menu::with_items(app, &[&app_menu, &edit, &window])
 }
 
+fn main_window(app: &AppHandle, focused: bool) -> tauri::Result<()> {
+    tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
+        .title("FTM")
+        .inner_size(1280.0, 820.0)
+        .focused(focused)
+        .build()
+        .map(drop)
+}
+
+/// Frontend errors, so they show up in the terminal running the app.
+#[tauri::command]
+fn log(message: String) {
+    eprintln!("[frontend] {message}");
+}
+
 fn main() {
+    // FTM_BACKGROUND=1 (for scripted launches): never take focus from whatever the user is doing.
+    let background = std::env::var("FTM_BACKGROUND").is_ok_and(|v| v == "1");
     let builder = tauri::Builder::default();
     #[cfg(target_os = "macos")]
-    let builder = builder.menu(menu);
+    let builder = builder.menu(menu).activate_ignoring_other_apps(!background);
     builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(daemon::Client::start())
         .manage(daemon::Events::default())
-        .setup(|app| {
-            // FTM_BACKGROUND=1 (for scripted launches): never take focus from whatever the user is doing.
-            let background = std::env::var("FTM_BACKGROUND").is_ok_and(|v| v == "1");
+        .setup(move |app| {
+            // Launch finishes by activating the app (tao calls activate); a Prohibited app cannot be activated, so
+            // start as one and become an ordinary accessory once launched (see Ready below).
             #[cfg(target_os = "macos")]
             if background {
-                app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+                app.set_activation_policy(tauri::ActivationPolicy::Prohibited);
             }
-            tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
-                .title("FTM")
-                .inner_size(1280.0, 820.0)
-                .focused(!background)
-                .build()?;
+            main_window(app.handle(), !background)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -194,10 +207,23 @@ fn main() {
             git_info,
             get_settings,
             save_settings,
+            log,
             ensure_on_screen
         ])
-        .run(tauri::generate_context!())
-        .expect("running FTM");
+        .build(tauri::generate_context!())
+        .expect("building FTM")
+        .run(move |_app, event| {
+            #[cfg(target_os = "macos")]
+            if background && matches!(event, tauri::RunEvent::Ready) {
+                let _ = _app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+                use tauri::Manager;
+                if let Some(window) = _app.get_webview_window("main") {
+                    let _ = window.show();
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (background, event);
+        });
 }
 
 #[cfg(test)]
