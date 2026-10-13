@@ -33,7 +33,8 @@ export function readable(color: string, bg: string, toward: string, min = 2.5): 
 }
 
 /// The app chrome's CSS variables for a theme: sidebar a little darker than the terminal, muted text blended from the
-/// foreground, accent from blue (palette 4), status dots from green/red/grey/blue, each nudged until readable.
+/// foreground, accent from blue (palette 4), status dots from green/red/grey/blue, plus yellow for a finished turn not yet
+/// looked at, each nudged until readable.
 export function chromeColors(bg: string, fg: string, p: string[]): { vars: Record<string, string>; dark: boolean } {
   const dark = luminance(bg) < 0.4;
   const sidebar = mix(bg, "#000000", dark ? 0.18 : 0.05);
@@ -57,6 +58,7 @@ export function chromeColors(bg: string, fg: string, p: string[]): { vars: Recor
     "--status-needs-input": readable(p[1], sidebar, fg),
     "--status-idle": readable(p[8], sidebar, fg, 2),
     "--status-done": readable(p[8], sidebar, fg, 2),
+    "--status-unseen": readable(p[3], sidebar, fg),
   };
   return { vars, dark };
 }

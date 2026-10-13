@@ -9,6 +9,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { chromeColors } from "./colors";
+import { loadSounds, play, type SoundEntry, type SoundSettings } from "./sounds";
 import "./style.css";
 
 type Id = string;
@@ -30,6 +31,7 @@ interface Workspace {
   cwd: string;
   worktree: { repo: string; branch: string } | null;
   status: string;
+  unseen: boolean;
   tabs: Tab[];
 }
 interface Folder {
@@ -246,6 +248,11 @@ interface FontFamily {
 
 let fontList: Promise<FontFamily[]> | null = null;
 
+let soundSettings: SoundSettings = { needs_input: "Nudge", completed: "Chime", volume: 0.7 };
+
+const playSound = (name: string, volume = soundSettings.volume) =>
+  play(name, volume).catch((err) => console.error(`playing ${name}`, err));
+
 /// A searchable list of installed families (monospace first, the rest behind "Show all fonts"), each drawn in its own
 /// font, with "Custom…" for a CSS font stack, and a preview line that shows ligatures on or off.
 function setupSettingsDialog() {
@@ -421,6 +428,54 @@ function setupSettingsDialog() {
     if (!saved) applyThemeNamed(wantedTheme(themeSettings)).catch(console.error);
   });
 
+  // Sounds: a draft saved with the rest; picking one plays it.
+  let soundDraft: SoundSettings = { ...soundSettings };
+  let soundList: SoundEntry[] = [];
+  const events = ["needs_input", "completed"] as const;
+  const volume = $<HTMLInputElement>("sound-volume");
+  const renderSounds = () => {
+    const labels: Record<string, string> = { builtin: "Built-in", user: "Yours (~/.config/ftm/sounds)", system: "System" };
+    for (const event of events) {
+      const select = $<HTMLSelectElement>(`sound-${event}`);
+      const option = (value: string, label: string) => {
+        const o = document.createElement("option");
+        o.value = value;
+        o.textContent = label;
+        return o;
+      };
+      const items: HTMLElement[] = [option("", "None")];
+      for (const source of ["builtin", "user", "system"]) {
+        const sounds = soundList.filter((s) => s.source === source);
+        if (!sounds.length) continue;
+        const group = document.createElement("optgroup");
+        group.label = labels[source];
+        group.append(...sounds.map((s) => option(s.name, s.name)));
+        items.push(group);
+      }
+      const current = soundDraft[event];
+      if (current && !soundList.some((s) => s.name.toLowerCase() === current.toLowerCase())) {
+        items.push(option(current, soundList.length ? `${current} (not found)` : current));
+      }
+      select.replaceChildren(...items);
+      select.value = soundList.find((s) => s.name.toLowerCase() === current.toLowerCase())?.name ?? current;
+    }
+    volume.value = String(soundDraft.volume);
+    $("sound-volume-value").textContent = `${Math.round(soundDraft.volume * 100)}%`;
+  };
+  for (const event of events) {
+    $<HTMLSelectElement>(`sound-${event}`).onchange = (e) => {
+      soundDraft[event] = (e.target as HTMLSelectElement).value;
+      playSound(soundDraft[event], soundDraft.volume);
+    };
+  }
+  form.querySelectorAll<HTMLButtonElement>("[data-preview]").forEach((b) => {
+    b.onclick = () => playSound(soundDraft[b.dataset.preview as (typeof events)[number]], soundDraft.volume);
+  });
+  volume.oninput = () => {
+    soundDraft.volume = Number(volume.value);
+    $("sound-volume-value").textContent = `${Math.round(soundDraft.volume * 100)}%`;
+  };
+
   $("open-settings").onclick = () => {
     saved = false;
     draft = { ...themeSettings };
@@ -435,6 +490,14 @@ function setupSettingsDialog() {
         $("theme-list").querySelector(".chosen")?.scrollIntoView({ block: "center" });
       })
       .catch((err) => console.error("listing themes", err));
+    soundDraft = { ...soundSettings };
+    renderSounds();
+    loadSounds()
+      .then((list) => {
+        soundList = list;
+        renderSounds();
+      })
+      .catch((err) => console.error("listing sounds", err));
     family = settings.font_family;
     customMode = isStack(family);
     custom.hidden = !customMode;
@@ -470,9 +533,10 @@ function setupSettingsDialog() {
       ligatures: field("ligatures").checked,
     };
     try {
-      await invoke("save_settings", { settings: { terminal: next, theme: draft } });
+      await invoke("save_settings", { settings: { terminal: next, theme: draft, sounds: soundDraft } });
       settings = next;
       themeSettings = { ...draft };
+      soundSettings = { ...soundDraft };
       saved = true;
       dialog.close();
       await applySettings();
@@ -500,7 +564,7 @@ function setFocus(pane: Id) {
 let seenTree = false;
 
 function onWorkspaces(list: Workspace[]) {
-  notifyNeedsInput(list, !seenTree).catch(console.error);
+  onStatusChanges(list, !seenTree);
   seenTree = true;
   workspaces = list;
   const live = new Set(list.flatMap((w) => w.tabs.flatMap((t) => panesOf(t.layout))));
@@ -557,8 +621,22 @@ function claimPendingFocus() {
   }
 }
 
+/// Looking at a workspace (selected, window focused) clears its finished-but-unseen mark.
+const seenPending = new Set<Id>();
+function markSelectedSeen() {
+  for (const id of seenPending) if (!workspaces.some((w) => w.id === id && w.unseen)) seenPending.delete(id);
+  const ws = selectedWorkspace();
+  if (!ws?.unseen || !document.hasFocus() || seenPending.has(ws.id)) return;
+  seenPending.add(ws.id);
+  request({ op: "mark_seen", id: ws.id }).catch((err) => {
+    seenPending.delete(ws.id);
+    console.error(err);
+  });
+}
+
 function render() {
   saveUi();
+  markSelectedSeen();
   renderSidebar();
   renderTabs();
   renderPanes();
@@ -646,8 +724,8 @@ function workspaceRow(ws: Workspace): HTMLElement {
   row.dataset.id = ws.id;
   row.title = [displayName(ws) === ws.name ? ws.name : `${displayName(ws)} (${ws.name})`, ws.kind, ws.cwd].join("\n");
   const dot = document.createElement("span");
-  dot.className = ws.kind === "agent" ? `dot ${ws.status}` : "dot none";
-  dot.title = ws.kind === "agent" ? ws.status.replace("_", " ") : "";
+  dot.className = ws.kind !== "agent" ? "dot none" : ws.unseen ? "dot unseen" : `dot ${ws.status}`;
+  dot.title = ws.kind !== "agent" ? "" : ws.unseen ? "done, unseen" : ws.status.replace("_", " ");
   const text = document.createElement("div");
   text.className = "text";
   const name = document.createElement("span");
@@ -873,13 +951,30 @@ function descendantsNeedingInput(id: Id): number {
 }
 
 const lastStatus = new Map<Id, string>();
+const lastUnseen = new Set<Id>();
 
-/// One desktop notification per transition into needs_input; the first tree after startup only records statuses.
-async function notifyNeedsInput(list: Workspace[], initial: boolean) {
-  const fresh = list.filter((w) => w.kind === "agent" && w.status === "needs_input" && lastStatus.get(w.id) !== "needs_input");
+/// A transition into needs_input plays its sound and sends a desktop notification. A turn finishing (ftmd marking the
+/// workspace unseen) plays the other sound, unless it is the workspace on screen: render() then marks it seen at once.
+/// The first tree after startup only records state.
+function onStatusChanges(list: Workspace[], initial: boolean) {
+  const waiting = list.filter((w) => w.kind === "agent" && w.status === "needs_input" && lastStatus.get(w.id) !== "needs_input");
+  const finished = list.filter((w) => w.unseen && !lastUnseen.has(w.id));
   lastStatus.clear();
-  for (const w of list) lastStatus.set(w.id, w.status);
-  if (initial || fresh.length === 0) return;
+  lastUnseen.clear();
+  for (const w of list) {
+    lastStatus.set(w.id, w.status);
+    if (w.unseen) lastUnseen.add(w.id);
+  }
+  if (initial) return;
+  if (waiting.length) {
+    playSound(soundSettings.needs_input);
+    notifyNeedsInput(waiting).catch(console.error);
+  } else if (finished.some((w) => w.id !== selected || !document.hasFocus())) {
+    playSound(soundSettings.completed);
+  }
+}
+
+async function notifyNeedsInput(fresh: Workspace[]) {
   let granted = await isPermissionGranted();
   if (!granted) granted = (await requestPermission()) === "granted";
   if (!granted) return;
@@ -1125,15 +1220,19 @@ window.addEventListener("mousedown", (e) => {
   if (!(e.target as HTMLElement).closest("#menu")) closeMenu();
 });
 window.addEventListener("blur", closeMenu);
-window.addEventListener("focus", () => refreshAllGit().catch(console.error));
+window.addEventListener("focus", () => {
+  markSelectedSeen();
+  refreshAllGit().catch(console.error);
+});
 setInterval(() => refreshAllGit().catch(console.error), 10_000);
 new ResizeObserver(() => requestAnimationFrame(fitVisible)).observe($("panes"));
 setupSpawnDialog();
 setupSettingsDialog();
-invoke<{ terminal: TerminalSettings; theme: ThemeSettings }>("get_settings")
+invoke<{ terminal: TerminalSettings; theme: ThemeSettings; sounds: SoundSettings }>("get_settings")
   .then((loaded) => {
     settings = loaded.terminal;
     themeSettings = loaded.theme;
+    soundSettings = loaded.sounds;
     applyThemeNamed(wantedTheme(themeSettings)).catch(console.error);
     return applySettings();
   })

@@ -82,6 +82,24 @@
           </div>
           <div id="theme-list" role="listbox"><p class="hint">Loading themes…</p></div>
         </div>
+        <div class="field">
+          <span>Sounds</span>
+          <div class="sound-row">
+            <label for="sound-needs_input">Needs input</label>
+            <select id="sound-needs_input"></select>
+            <button type="button" data-preview="needs_input" title="Play">▶</button>
+          </div>
+          <div class="sound-row">
+            <label for="sound-completed">Agent finished</label>
+            <select id="sound-completed"></select>
+            <button type="button" data-preview="completed" title="Play">▶</button>
+          </div>
+          <div class="sound-row">
+            <label for="sound-volume">Volume</label>
+            <input id="sound-volume" type="range" min="0" max="1" step="0.05" />
+            <output id="sound-volume-value"></output>
+          </div>
+        </div>
         <div id="font-preview" title="Preview">Sphinx of black quartz 0O1lI {}[]<br />=&gt; != -&gt; === &lt;= &gt;= :: !== /* */ &lt;!-- www</div>
         <p id="settings-error"></p>
         <div class="row">
