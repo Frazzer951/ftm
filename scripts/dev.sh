@@ -26,7 +26,12 @@ export FTM_SOCKET=$SOCKET
 
 echo "==> building"
 cargo build --manifest-path "$REPO/Cargo.toml" -p ftmd -p ftm -p ftm-app
-[ -d "$REPO/app/node_modules" ] || (cd "$REPO/app" && npm install)
+# npm records what it installed in node_modules/.package-lock.json; reinstall when the manifest or lockfile is newer.
+stamp="$REPO/app/node_modules/.package-lock.json"
+if [ ! -f "$stamp" ] || [ "$REPO/app/package.json" -nt "$stamp" ] || [ "$REPO/app/package-lock.json" -nt "$stamp" ]; then
+  echo "==> installing app dependencies"
+  (cd "$REPO/app" && npm install --no-audit --no-fund) && touch "$stamp"
+fi
 
 echo "==> stopping the running app"
 pkill -x ftm-app 2>/dev/null || true
