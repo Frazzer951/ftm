@@ -66,6 +66,43 @@ fn ensure_on_screen(window: tauri::WebviewWindow) -> Result<(), String> {
     window.set_position(tauri::PhysicalPosition::new(x, y)).map_err(err)
 }
 
+#[derive(serde::Serialize)]
+struct GitInfo {
+    root: String,
+    /// The main repository's folder name, also inside a linked worktree (whose own root is named after the worktree).
+    repo: String,
+    branch: String,
+}
+
+/// Repo root, repo name and current branch (`HEAD` when detached) of `path`, or `None` outside a git repo.
+#[tauri::command]
+fn git_info(path: String) -> Option<GitInfo> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(Path::new(&path))
+        .args(["rev-parse", "--show-toplevel", "--git-common-dir", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut lines = text.lines();
+    let (root, common, branch) = (lines.next()?, lines.next()?, lines.next()?);
+    let common = Path::new(&path).join(common);
+    let repo_dir = if common.file_name().is_some_and(|n| n == ".git") {
+        common.parent()?
+    } else {
+        &common
+    };
+    let repo = repo_dir.canonicalize().ok()?.file_name()?.to_string_lossy().into_owned();
+    Some(GitInfo {
+        root: root.to_string(),
+        repo,
+        branch: branch.to_string(),
+    })
+}
+
 #[tauri::command]
 fn git_root(path: String) -> Option<String> {
     let out = Command::new("git")
@@ -123,7 +160,28 @@ fn main() {
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(daemon::Client::start())
         .manage(daemon::Events::default())
-        .invoke_handler(tauri::generate_handler![request, send, subscribe, git_root, ensure_on_screen])
+        .setup(|app| {
+            // FTM_BACKGROUND=1 (for scripted launches): never take focus from whatever the user is doing.
+            let background = std::env::var("FTM_BACKGROUND").is_ok_and(|v| v == "1");
+            #[cfg(target_os = "macos")]
+            if background {
+                app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            }
+            tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
+                .title("FTM")
+                .inner_size(1280.0, 820.0)
+                .focused(!background)
+                .build()?;
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            request,
+            send,
+            subscribe,
+            git_root,
+            git_info,
+            ensure_on_screen
+        ])
         .run(tauri::generate_context!())
         .expect("running FTM");
 }

@@ -125,14 +125,28 @@ pub struct Workspace {
     pub parent: Option<WorkspaceId>,
     /// Fixed at spawn: every pane gets it as `FTM_NAME`, and an agent's Claude session is named after it.
     pub name: String,
-    /// Set by `Rename`; shown in place of `name`.
+    /// Set by `Rename`; shown in place of `name` and `auto_title`.
     #[serde(default)]
     pub title: Option<String>,
+    /// The terminal title the agent sets (Claude Code puts a short task summary there), minus its status glyph;
+    /// shown in place of `name` until a rename.
+    #[serde(default)]
+    pub auto_title: Option<String>,
+    /// The pane the agent was started in, whose terminal title becomes `auto_title`.
+    #[serde(default)]
+    pub agent_pane: Option<PaneId>,
     pub kind: Kind,
     pub cwd: PathBuf,
     pub worktree: Option<Worktree>,
     pub status: Status,
     pub tabs: Vec<Tab>,
+}
+
+impl Workspace {
+    /// What a UI shows: a rename, else the agent's own title, else the spawn name.
+    pub fn display_name(&self) -> &str {
+        self.title.as_deref().or(self.auto_title.as_deref()).unwrap_or(&self.name)
+    }
 }
 
 #[cfg(test)]

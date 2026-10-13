@@ -11,7 +11,7 @@
     "beforeBuildCommand": "npm run build"
   },
   "app": {
-    "windows": [{ "title": "FTM", "width": 1280, "height": 820 }],
+    "windows": [],
     "security": { "csp": null }
   },
   "bundle": {

@@ -41,7 +41,24 @@ struct Pane {
     holder_socket: PathBuf,
     buffer: Vec<u8>,
     /// Headless emulator fed the same output, so the current screen and scrollback can be read back as text.
-    screen: vt100::Parser,
+    screen: vt100::Parser<TitleWatch>,
+}
+
+/// Collects the terminal titles (OSC 0/2) a pane sets, in order, until read.
+#[derive(Default)]
+struct TitleWatch(Vec<String>);
+
+impl vt100::Callbacks for TitleWatch {
+    fn set_window_title(&mut self, _: &mut vt100::Screen, title: &[u8]) {
+        self.0.push(String::from_utf8_lossy(title).into_owned());
+    }
+}
+
+/// Claude Code titles its terminal "<status glyph> <task summary>", with a spinner frame as the glyph while it works
+/// and plain "Claude Code" before it has a task. Keep the summary only, so the name does not flicker.
+fn task_title(raw: &str) -> Option<String> {
+    let title = raw.trim_start_matches(|c: char| !c.is_alphanumeric()).trim();
+    (!title.is_empty() && title != "Claude Code").then(|| title.chars().take(80).collect())
 }
 
 #[derive(Serialize, Deserialize)]
@@ -53,6 +70,9 @@ struct Saved {
 #[derive(Clone, Copy)]
 struct Startup<'a> {
     agent: bool,
+    /// Spawned with an explicit name: the agent runs as `claude -n <name>`, a stable `SendMessage` address. Without
+    /// one it gets no `-n`, so Claude titles its terminal with its task and the workspace takes that as `auto_title`.
+    named: bool,
     setup: Option<&'a str>,
     brief: Option<&'a str>,
 }
@@ -159,7 +179,8 @@ impl State {
             .env(ENV_SOCKET, &self.socket)
             .env(ENV_WORKSPACE_ID, workspace.to_string())
             .env(ENV_PANE_ID, id.to_string())
-            .env(ENV_NAME, &ws.name);
+            .env(ENV_NAME, &ws.name)
+            .env("FTM_BIN", crate::hooks::ftm_binary());
         if let Some(brief) = startup.and_then(|s| s.brief) {
             cmd.env("FTM_BRIEF", brief);
         }
@@ -219,7 +240,7 @@ impl State {
                 holder: Arc::new(Mutex::new(stream)),
                 holder_socket,
                 buffer: Vec::new(),
-                screen: vt100::Parser::new(rows, cols, SCROLLBACK),
+                screen: vt100::Parser::new_with_callbacks(rows, cols, SCROLLBACK, TitleWatch::default()),
             },
         );
         let shared = shared.clone();
@@ -291,18 +312,14 @@ fn shell() -> String {
         .unwrap_or_else(|| if cfg!(target_os = "macos") { "/bin/zsh" } else { "/bin/bash" }.to_string())
 }
 
-/// Single-quoted into the agent's command line, so it must not contain `'`.
-const AGENT_PROMPT: &str = "You are running inside FTM, a terminal manager. Once you understand your task, run \
-`ftm rename \"<3-5 word task summary>\"` to label your workspace in its sidebar, and run it again if the task changes \
-substantially.";
-
 fn script(startup: Startup) -> Option<String> {
     let setup = startup.setup.map(|s| format!("{s}; ")).unwrap_or_default();
     if startup.agent {
         let agent = std::env::var(ENV_AGENT_CMD).ok().filter(|c| !c.trim().is_empty());
         let agent = agent.as_deref().unwrap_or("claude");
+        let name = if startup.named { r#" -n "$FTM_NAME""# } else { "" };
         Some(format!(
-            r#"{setup}{agent} ${{FTM_CLAUDE_SETTINGS:+--settings}} ${{FTM_CLAUDE_SETTINGS:+"$FTM_CLAUDE_SETTINGS"}} -n "$FTM_NAME" --append-system-prompt '{AGENT_PROMPT}' ${{FTM_BRIEF:+"$FTM_BRIEF"}}; exec "$SHELL" -l"#
+            r#"{setup}{agent} ${{FTM_CLAUDE_SETTINGS:+--settings}} ${{FTM_CLAUDE_SETTINGS:+"$FTM_CLAUDE_SETTINGS"}}{name} ${{FTM_BRIEF:+"$FTM_BRIEF"}}; exec "$SHELL" -l"#
         ))
     } else if startup.setup.is_some() {
         Some(format!(r#"{setup}exec "$SHELL" -l"#))
@@ -324,6 +341,7 @@ fn read_loop(shared: Shared, id: PaneId, mut holder: UnixStream) {
         let Some(pane) = state.panes.get_mut(&id) else { return };
         pane.buffer.extend_from_slice(&bytes);
         pane.screen.process(&bytes);
+        let (workspace, titles) = (pane.workspace, std::mem::take(&mut pane.screen.callbacks_mut().0));
         if pane.buffer.len() > BUFFER_CAP + BUFFER_SLACK {
             let excess = pane.buffer.len() - BUFFER_CAP;
             pane.buffer.drain(..excess);
@@ -333,6 +351,15 @@ fn read_loop(shared: Shared, id: PaneId, mut holder: UnixStream) {
             data: B64.encode(&bytes),
             reset: false,
         });
+        // The last task-like title in this chunk wins; placeholders and the bare name in between do not count.
+        if let Some(ws) = state.workspaces.get_mut(&workspace)
+            && ws.agent_pane == Some(id)
+            && let Some(title) = titles.iter().rev().filter_map(|t| task_title(t)).find(|t| *t != ws.name)
+            && ws.auto_title.as_deref() != Some(&title)
+        {
+            ws.auto_title = Some(title);
+            state.emit_workspaces();
+        }
     }
     close_pane(&shared, id);
 }
@@ -394,7 +421,7 @@ pub fn pane_alive(workspaces: &[Workspace], pane: PaneId) -> bool {
 }
 
 /// Scrollback lines oldest first, then the visible screen, with trailing blanks trimmed.
-fn screen_text(parser: &mut vt100::Parser) -> String {
+fn screen_text(parser: &mut vt100::Parser<TitleWatch>) -> String {
     let screen = parser.screen_mut();
     let cols = screen.size().1;
     screen.set_scrollback(usize::MAX);
@@ -469,6 +496,7 @@ fn spawn(shared: &Shared, req: SpawnRequest) -> Result<Response> {
     let id = WorkspaceId::new_v4();
     let name = req
         .name
+        .clone()
         .or_else(|| worktree.as_ref().map(|w| w.branch.clone()))
         .or_else(|| cwd.file_name().map(|n| n.to_string_lossy().into_owned()))
         .unwrap_or_else(|| id.to_string());
@@ -485,6 +513,8 @@ fn spawn(shared: &Shared, req: SpawnRequest) -> Result<Response> {
             parent: req.parent,
             name,
             title: None,
+            auto_title: None,
+            agent_pane: None,
             kind: req.kind,
             cwd,
             worktree,
@@ -492,8 +522,10 @@ fn spawn(shared: &Shared, req: SpawnRequest) -> Result<Response> {
             tabs: Vec::new(),
         },
     );
+    let named = req.name.is_some();
     let startup = Startup {
         agent: req.kind == Kind::Agent,
+        named,
         setup: setup.as_deref(),
         brief: req.brief.as_deref(),
     };
@@ -509,6 +541,9 @@ fn spawn(shared: &Shared, req: SpawnRequest) -> Result<Response> {
         id: TabId::new_v4(),
         layout: Layout::Pane { id: pane },
     });
+    if ws.kind == Kind::Agent && !named {
+        ws.agent_pane = Some(pane);
+    }
     let workspace = ws.clone();
     state.emit_workspaces();
     Ok(Response::Spawned { workspace })
@@ -610,13 +645,30 @@ mod tests {
     use super::*;
     use std::path::Path;
 
+    #[test]
+    fn task_title_drops_the_status_glyph() {
+        assert_eq!(task_title("✳ Fix the bounds").as_deref(), Some("Fix the bounds"));
+        assert_eq!(task_title("⠂ Fix the bounds ").as_deref(), Some("Fix the bounds"));
+        assert_eq!(task_title("✳ Claude Code"), None);
+        assert_eq!(task_title(" ✳ "), None);
+    }
+
     /// zsh does not word-split unquoted expansions, so each optional argument has to be its own expansion.
     #[test]
     fn agent_script_passes_the_same_argv_in_sh_and_zsh() {
         // SAFETY: no other test in this binary reads FTM_AGENT_CMD.
         unsafe { std::env::set_var(ENV_AGENT_CMD, "printf '[%s]'") };
+        let unnamed = script(Startup {
+            agent: true,
+            named: false,
+            setup: None,
+            brief: None,
+        })
+        .unwrap();
+        assert!(!unnamed.contains(" -n "));
         let line = script(Startup {
             agent: true,
+            named: true,
             setup: None,
             brief: None,
         })
@@ -630,11 +682,10 @@ mod tests {
                 (
                     Some("/tmp/s.json"),
                     Some("a \"b\" $(c)"),
-                    "[--settings][/tmp/s.json][-n][n][--append-system-prompt][P][a \"b\" $(c)]",
+                    "[--settings][/tmp/s.json][-n][n][a \"b\" $(c)]",
                 ),
-                (None, None, "[-n][n][--append-system-prompt][P]"),
+                (None, None, "[-n][n]"),
             ] {
-                let want = want.replace("[P]", &format!("[{AGENT_PROMPT}]"));
                 let mut cmd = std::process::Command::new(shell);
                 cmd.args(["-c", line]).env("FTM_NAME", "n");
                 cmd.env_remove("FTM_CLAUDE_SETTINGS").env_remove("FTM_BRIEF");
@@ -642,7 +693,6 @@ mod tests {
                 brief.map(|b| cmd.env("FTM_BRIEF", b));
                 let out = cmd.output().unwrap();
                 assert_eq!(String::from_utf8_lossy(&out.stdout), want, "{shell}");
-                assert!(!AGENT_PROMPT.contains('\''));
             }
         }
     }

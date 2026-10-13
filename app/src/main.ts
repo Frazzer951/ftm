@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { homeDir } from "@tauri-apps/api/path";
 import { open } from "@tauri-apps/plugin-dialog";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { FitAddon } from "@xterm/addon-fit";
@@ -21,6 +22,7 @@ interface Workspace {
   parent: Id | null;
   name: string;
   title: string | null;
+  auto_title: string | null;
   kind: "terminal" | "agent";
   cwd: string;
   worktree: { repo: string; branch: string } | null;
@@ -138,6 +140,7 @@ function onWorkspaces(list: Workspace[]) {
     restoredUi = true;
     restoreUi(list);
   }
+  refreshGit(list.map((w) => w.cwd).filter((cwd) => !gitInfo.has(cwd))).catch(console.error);
   if (!list.some((w) => w.id === selected)) selected = list[0]?.id ?? null;
   claimPendingFocus();
   render();
@@ -186,7 +189,7 @@ function render() {
   renderPanes();
 }
 
-const displayName = (ws: Workspace) => ws.title ?? ws.name;
+const displayName = (ws: Workspace) => ws.title ?? ws.auto_title ?? ws.name;
 
 function renderSidebar() {
   if (editing && workspaces.some((w) => w.id === editing)) return;
@@ -200,20 +203,23 @@ function renderSidebar() {
       const row = document.createElement("div");
       row.className = "ws" + (ws.id === selected ? " selected" : "");
       row.dataset.id = ws.id;
-      row.title = ws.title ? `${ws.name} · ${ws.cwd}` : ws.cwd;
+      row.title = [displayName(ws) === ws.name ? ws.name : `${displayName(ws)} (${ws.name})`, ws.kind, ws.cwd].join("\n");
       const dot = document.createElement("span");
       dot.className = ws.kind === "agent" ? `dot ${ws.status}` : "dot none";
       dot.title = ws.kind === "agent" ? ws.status.replace("_", " ") : "";
+      const text = document.createElement("div");
+      text.className = "text";
       const name = document.createElement("span");
       name.className = "name";
-      name.textContent = (ws.kind === "agent" ? "✻ " : "") + displayName(ws);
+      name.textContent = displayName(ws);
       name.ondblclick = (e) => {
         e.stopPropagation();
         startRename(ws.id);
       };
-      const branch = document.createElement("span");
-      branch.className = "branch";
-      branch.textContent = ws.worktree?.branch ?? "";
+      const sub = document.createElement("span");
+      sub.className = "sub";
+      sub.textContent = location(ws);
+      text.append(name, sub);
       const close = document.createElement("button");
       close.className = "close";
       close.textContent = "×";
@@ -222,7 +228,7 @@ function renderSidebar() {
         e.stopPropagation();
         request({ op: "close", id: ws.id, remove_worktree: false }).catch(console.error);
       };
-      row.append(dot, name, branch);
+      row.append(dot, text);
       const waiting = descendantsNeedingInput(ws.id);
       if (waiting > 0) {
         const badge = document.createElement("span");
@@ -247,6 +253,42 @@ function renderSidebar() {
     return ul;
   };
   $("workspaces").replaceChildren(...build(null).children);
+}
+
+let home = "";
+homeDir().then((h) => (home = h.replace(/\/$/, ""))).catch(() => {});
+
+const tilde = (path: string) => (home && (path === home || path.startsWith(home + "/")) ? "~" + path.slice(home.length) : path);
+const basename = (path: string) => path.replace(/\/$/, "").split("/").pop() || path;
+
+/// Git root and branch per folder, refreshed when the window gains focus and every few seconds; `null` means not a repo.
+type GitInfo = { root: string; repo: string; branch: string };
+const gitInfo = new Map<string, GitInfo | null>();
+
+async function refreshGit(paths: Iterable<string>) {
+  let changed = false;
+  await Promise.all(
+    [...new Set(paths)].map(async (path) => {
+      const info = await invoke<GitInfo | null>("git_info", { path }).catch(() => null);
+      if (JSON.stringify(info) !== JSON.stringify(gitInfo.get(path))) {
+        gitInfo.set(path, info);
+        changed = true;
+      }
+    }),
+  );
+  if (changed) renderSidebar();
+}
+
+const refreshAllGit = () => refreshGit(workspaces.map((w) => w.cwd));
+
+/// Second sidebar line: `repo · branch` in a git repo (`repo/sub · branch` below its root), else the folder.
+function location(ws: Workspace): string {
+  const git = gitInfo.get(ws.cwd);
+  if (ws.worktree) return `${git?.repo ?? basename(ws.worktree.repo)} · ${git?.branch ?? ws.worktree.branch}`;
+  if (!git) return tilde(ws.cwd);
+  const below = ws.cwd.startsWith(git.root + "/") ? ws.cwd.slice(git.root.length) : "";
+  const branch = git.branch === "HEAD" ? "detached" : git.branch;
+  return `${git.repo}${below} · ${branch}`;
 }
 
 function startRename(id: Id) {
@@ -540,6 +582,8 @@ window.addEventListener("mousedown", (e) => {
   if (!(e.target as HTMLElement).closest("#menu")) closeMenu();
 });
 window.addEventListener("blur", closeMenu);
+window.addEventListener("focus", () => refreshAllGit().catch(console.error));
+setInterval(() => refreshAllGit().catch(console.error), 10_000);
 new ResizeObserver(() => requestAnimationFrame(fitVisible)).observe($("panes"));
 setupSpawnDialog();
 render();

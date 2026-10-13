@@ -27,7 +27,10 @@ for arg in "$@"; do printf '%s\0' "$arg" >> "$out.argv"; done
   echo "PWD=$(pwd -P)"
   if [ -e "$FAKE_OUT/setup-ran" ]; then echo "SETUP=yes"; else echo "SETUP=no"; fi
   echo "PID=$$"
+  echo "FTM_BIN=$FTM_BIN"
 } > "$out.vars"
+# Like Claude Code: a placeholder title, "<glyph> <task>", then a title that is just the name (as with -n).
+printf '\033]0;\342\234\263 Claude Code\007\033]2;\342\240\202 Task of %s\007\033]2;\342\234\263 %s\007' "$FTM_NAME" "$FTM_NAME"
 if [ "$FTM_NAME" = leader ]; then
   ftm spawn agent --name child > "$out.child" 2>&1 || exit 1
   ftm spawn terminal --detached --name loose > "$out.detached" 2>&1 || exit 1
@@ -155,11 +158,8 @@ fn agents_nest_report_status_and_clean_up() {
     assert_eq!(wt, root.join("data/ftm/worktrees/agentrepo/feat/leader"));
     assert_eq!(leader_ws.worktree.as_ref().unwrap().branch, "feat/leader");
 
-    // Name, the FTM system prompt, brief and FTM_* env reach the agent; the repo setup ran before it.
-    let leader_argv = argv(&out, "leader");
-    assert_eq!(leader_argv[..3], ["-n", "leader", "--append-system-prompt"]);
-    assert!(leader_argv[3].contains("ftm rename"), "{}", leader_argv[3]);
-    assert_eq!(leader_argv[4..], [BRIEF]);
+    // Name, brief and FTM_* env reach the agent; the repo setup ran before it.
+    assert_eq!(argv(&out, "leader"), ["-n", "leader", BRIEF]);
     let lv = vars(&out, "leader");
     assert_eq!(lv["FTM_NAME"], "leader");
     assert_eq!(lv["FTM_WORKSPACE_ID"], leader.to_string());
@@ -167,6 +167,7 @@ fn agents_nest_report_status_and_clean_up() {
     assert_eq!(lv["FTM_SOCKET"], socket.to_str().unwrap());
     assert_eq!(Path::new(&lv["PWD"]), wt);
     assert_eq!(lv["SETUP"], "yes");
+    assert_eq!(Path::new(&lv["FTM_BIN"]), bin);
 
     // The worktree carries tracked edits, untracked files and the configured ignored files.
     assert_eq!(std::fs::read_to_string(wt.join("f")).unwrap(), "edited\n");
@@ -184,7 +185,29 @@ fn agents_nest_report_status_and_clean_up() {
     assert_eq!(by_id(loose).kind, Kind::Terminal);
     assert_eq!(leader_ws.status, Status::Working);
     assert_eq!(child_ws.status, Status::Starting);
-    assert_eq!(argv(&out, "child")[..3], ["-n", "child", "--append-system-prompt"]);
+    assert_eq!(argv(&out, "child"), ["-n", "child"]);
+
+    // A named agent keeps its name (its SendMessage address) and is not retitled by its terminal. An unnamed one
+    // runs without -n and is named by the task title its terminal gets, minus the status glyph, ignoring the
+    // placeholder and a title that is just its name.
+    assert_eq!(child_ws.auto_title, None);
+    assert_eq!(leader_ws.auto_title, None);
+    let loose_dir = root.join("unnamed-dir");
+    std::fs::create_dir_all(&loose_dir).unwrap();
+    let unnamed: WorkspaceId = ftm(&bin, &socket, &["spawn", "agent", "--path", loose_dir.to_str().unwrap()])
+        .parse()
+        .unwrap();
+    wait_for("unnamed agent to start", Duration::from_secs(20), || {
+        out.join("unnamed-dir.ready").exists()
+    });
+    assert_eq!(argv(&out, "unnamed-dir"), Vec::<String>::new());
+    let titled = |id: WorkspaceId| ls(&bin, &socket).into_iter().find(|w| w.id == id).unwrap();
+    wait_for("auto title", Duration::from_secs(10), || titled(unnamed).auto_title.is_some());
+    let unnamed_ws = titled(unnamed);
+    assert_eq!(unnamed_ws.auto_title.as_deref(), Some("Task of unnamed-dir"));
+    assert_eq!(unnamed_ws.display_name(), "Task of unnamed-dir");
+    assert!(ftm(&bin, &socket, &["ls"]).contains("Task of unnamed-dir (unnamed-dir)"));
+    ftm(&bin, &socket, &["close", "--id", &unnamed.to_string()]);
 
     // `ftm rename` inside the agent retitles its own workspace; the spawn name stays for FTM_NAME and `claude -n`.
     assert_eq!(leader_ws.title.as_deref(), Some("fix the bug"));

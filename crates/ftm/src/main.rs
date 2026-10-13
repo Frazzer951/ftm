@@ -226,8 +226,8 @@ fn print_tree(ws: &Workspace, all: &[Workspace], depth: usize) {
     println!(
         "{:indent$}{} {:?} {:?} {}  {}",
         "",
-        match &ws.title {
-            Some(title) if *title != ws.name => format!("{title} ({})", ws.name),
+        match ws.display_name() {
+            shown if shown != ws.name => format!("{shown} ({})", ws.name),
             _ => ws.name.clone(),
         },
         ws.kind,

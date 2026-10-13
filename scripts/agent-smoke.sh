@@ -4,8 +4,8 @@
 #   scripts/agent-smoke.sh
 #
 # Starts its own ftmd on a private socket, spawns a leader agent whose brief makes it report its FTM_* env, list
-# workspaces and spawn a child agent, then checks the leader's results file, `ftm ls --json` and
-# `ftm capture`. Always closes everything and stops its ftmd.
+# workspaces and spawn a child agent, plus an unnamed agent that must name itself from its task, then checks the
+# leader's results file, `ftm ls --json` and `ftm capture`. Always closes everything and stops its ftmd.
 #
 # Agents run in FTM_SMOKE_DIR (default: this repo's root), which Claude must already trust: if it shows the trust
 # prompt, the script fails and says so. Accept it once by running `claude` in that dir yourself, or point
@@ -77,6 +77,8 @@ You are the leader agent in an automated FTM smoke test. Do these steps in order
 EOF
 
 leader=$(ftm spawn agent --path "$DIR" --name smoke-leader --brief "$RUN/leader-brief.md")
+printf 'In one sentence, explain what the Rust ? operator does. Do not use any tools.\n' >"$RUN/unnamed-brief.md"
+unnamed=$(ftm spawn agent --path "$DIR" --brief "$RUN/unnamed-brief.md" --detached)
 echo "leader $leader; waiting up to ${TIMEOUT}s for it and its child"
 
 # Claude Code clears the screen and scrollback as it redraws, so its startup banner may be gone; the prompt box
@@ -104,8 +106,10 @@ while [ $SECONDS -lt $deadline ]; do
   leader_status=$(field "$leader" "w[0]['status']")
   case " $leader_seen " in *" $leader_status "*) ;; *) leader_seen="$leader_seen $leader_status" ;; esac
   if [ -s "$RUN/results.json" ] && [ -n "$child" ] && [ "$leader_status" = idle ] \
-    && [ "$(field "$child" "w[0]['status']")" = idle ]; then break; fi
+    && [ "$(field "$child" "w[0]['status']")" = idle ] \
+    && [ -n "$(field "$unnamed" "w[0].get('auto_title') or ''")" ]; then break; fi
   blocked "$leader" && break
+  blocked "$unnamed" && break
   [ -n "$child" ] && blocked "$child" && break
   sleep 1
 done
@@ -140,13 +144,20 @@ if [ -n "$child" ]; then
 fi
 case " $leader_seen " in *" working "*) ;; *) fail "hooks never marked the leader working (saw:$leader_seen)" ;; esac
 [ "$(field "$leader" "w[0]['status']")" = idle ] || fail "leader status is $(field "$leader" "w[0]['status']"), want idle (Stop hook)"
+# The unnamed agent ran without -n, so Claude titled its terminal with its task and that named the workspace.
+unnamed_name=$(field "$unnamed" "w[0]['name']")
+unnamed_title=$(field "$unnamed" "w[0].get('auto_title') or ''")
+[ -n "$unnamed_title" ] || fail "the unnamed agent never got a task title (auto_title)"
+[ "$unnamed_title" != "$unnamed_name" ] && [ "$unnamed_title" != "$(basename "$DIR")" ] \
+  || fail "the unnamed agent's auto_title is just its name: $unnamed_title"
+[ "$(field "$leader" "w[0].get('auto_title') or ''")" = "" ] || fail "the named leader got an auto_title"
 claude_ui "$leader" smoke-leader || fail "no Claude prompt box named smoke-leader in the leader's pane"
 
 ftm capture "$leader" >"$RUN/leader-screen.txt" || true
 [ -n "$child" ] && { ftm capture "$child" >"$RUN/child-screen.txt" || true; }
 
 if [ ${#failures[@]} -eq 0 ]; then
-  echo "PASS: leader and child Claude agents ran and nested, hooks drove status (working -> idle), env reported ($((SECONDS))s)"
+  echo "PASS: leader and child Claude agents ran and nested, hooks drove status (working -> idle), unnamed agent named itself \"$unnamed_title\", env reported ($((SECONDS))s)"
 else
   echo "FAIL: ${#failures[@]} check(s) failed"
   exit 1

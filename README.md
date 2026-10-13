@@ -24,6 +24,9 @@ holder process) and runs the app with `tauri dev`. Ctrl+C stops the app; ftmd an
 after pulling or changing code. Panes started by an older build keep running that build's holder until they close; see
 [PTY persistence](docs/design.md#pty-persistence).
 
+`FTM_BACKGROUND=1 scripts/dev.sh` (or any launch with `FTM_BACKGROUND=1`) opens the window without activating the app
+or taking focus, for scripted launches; on macOS the app then runs as an accessory, without a Dock icon.
+
 ## Try the CLI
 
 ```sh

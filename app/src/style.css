@@ -10,15 +10,17 @@ body {
 button { font: inherit; color: inherit; background: #2a2e37; border: 1px solid #3a3f4a; border-radius: 4px; cursor: pointer; }
 button:hover { background: #343944; }
 
-#sidebar { width: 240px; flex: none; border-right: 1px solid #2a2e37; display: flex; flex-direction: column; }
+#sidebar { width: 264px; flex: none; border-right: 1px solid #2a2e37; display: flex; flex-direction: column; }
 #sidebar header { display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; font-weight: 600; }
 #workspaces, #workspaces ul { list-style: none; margin: 0; padding: 0; }
 #workspaces ul { padding-left: 14px; }
-.ws { display: flex; align-items: center; gap: 6px; padding: 4px 10px; cursor: pointer; }
+.ws { display: flex; align-items: center; gap: 8px; padding: 5px 10px; cursor: pointer; }
 .ws:hover { background: #20232a; }
 .ws.selected { background: #2b3140; }
-.ws .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ws .branch { color: #7f8796; font-size: 11px; }
+.ws .text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.ws .name { font-size: 13.5px; font-weight: 500; color: #eef0f4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws .sub { font-size: 11px; color: #858c99; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws.selected .sub { color: #a3aab7; }
 .ws .close { visibility: hidden; padding: 0 5px; }
 .ws:hover .close { visibility: visible; }
 :root {

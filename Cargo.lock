@@ -1184,6 +1184,7 @@ name = "ftm-app"
 version = "0.1.0"
 dependencies = [
  "ftm-core",
+ "serde",
  "serde_json",
  "tauri",
  "tauri-build",
