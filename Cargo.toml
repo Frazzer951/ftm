@@ -1,0 +1,10 @@
+[workspace]
+members = ["crates/ftm-core", "crates/ftm", "crates/ftmd"]
+resolver = "3"
+
+[workspace.package]
+authors = ["Luke Eltiste"]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/Frazzer951/ftm"
+version = "0.1.0"
