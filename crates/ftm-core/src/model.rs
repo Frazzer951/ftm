@@ -135,11 +135,23 @@ pub struct Workspace {
     /// The pane the agent was started in, whose terminal title becomes `auto_title`.
     #[serde(default)]
     pub agent_pane: Option<PaneId>,
+    /// Kept in the sidebar's Pinned section.
+    #[serde(default)]
+    pub pinned: bool,
     pub kind: Kind,
     pub cwd: PathBuf,
     pub worktree: Option<Worktree>,
     pub status: Status,
     pub tabs: Vec<Tab>,
+}
+
+/// A folder opened at the top level (from the app's `+` or `ftm spawn` without a parent), remembered for the sidebar's
+/// Folders section and the recent-folders list.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Folder {
+    pub path: PathBuf,
+    /// Unix seconds of the latest top-level spawn there.
+    pub last_used: u64,
 }
 
 impl Workspace {

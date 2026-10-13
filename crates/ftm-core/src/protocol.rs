@@ -1,7 +1,7 @@
 //! Newline-delimited JSON over the daemon's Unix socket: one `Request` per line in, one `Response` per line out.
 //! After a `Subscribe` request is answered, that connection only carries `Event` lines.
 
-use crate::model::{Kind, PaneId, SplitDir, Status, Workspace, WorkspaceId};
+use crate::model::{Folder, Kind, PaneId, SplitDir, Status, Workspace, WorkspaceId};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -24,6 +24,16 @@ pub enum Request {
     Rename {
         id: WorkspaceId,
         name: String,
+    },
+    Pin {
+        id: WorkspaceId,
+        pinned: bool,
+    },
+    /// Remembered folders, most recently used first, as `Response::Folders`.
+    Folders,
+    /// Forgets a folder; its workspaces are untouched.
+    RemoveFolder {
+        path: PathBuf,
     },
     NewTab {
         workspace: WorkspaceId,
@@ -80,6 +90,9 @@ pub enum Response {
     Workspaces {
         workspaces: Vec<Workspace>,
     },
+    Folders {
+        folders: Vec<Folder>,
+    },
     Spawned {
         workspace: Workspace,
     },
@@ -101,6 +114,8 @@ pub enum Response {
 pub enum Event {
     /// Full tree, sent on subscribe and after every change.
     Workspaces { workspaces: Vec<Workspace> },
+    /// Remembered folders, most recently used first; sent on subscribe and after every change.
+    Folders { folders: Vec<Folder> },
     /// `data` is base64. On subscribe (and after the subscriber falls behind) each live pane's buffered output
     /// arrives with `reset` set: clear the terminal before writing it.
     Output {

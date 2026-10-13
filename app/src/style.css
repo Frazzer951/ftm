@@ -12,8 +12,13 @@ button:hover { background: #343944; }
 
 #sidebar { width: 264px; flex: none; border-right: 1px solid #2a2e37; display: flex; flex-direction: column; }
 #sidebar header { display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; font-weight: 600; }
-#workspaces, #workspaces ul { list-style: none; margin: 0; padding: 0; }
-#workspaces ul { padding-left: 14px; }
+#sections { overflow-y: auto; flex: 1; }
+#sections ul { list-style: none; margin: 0; padding: 0; }
+#sections ul ul { padding-left: 14px; }
+.section-head { display: flex; width: 100%; gap: 6px; align-items: center; background: none; border: none; border-radius: 0; padding: 8px 10px 4px; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: #8a919e; text-align: left; }
+.section-head:hover { background: none; color: #c4c9d2; }
+.section-head .count { margin-left: auto; font-weight: 400; }
+.folder-icon { width: 9px; flex: none; color: #7f8796; font-size: 10px; }
 .ws { display: flex; align-items: center; gap: 8px; padding: 5px 10px; cursor: pointer; }
 .ws:hover { background: #20232a; }
 .ws.selected { background: #2b3140; }

@@ -24,14 +24,20 @@ interface Workspace {
   name: string;
   title: string | null;
   auto_title: string | null;
+  pinned: boolean;
   kind: "terminal" | "agent";
   cwd: string;
   worktree: { repo: string; branch: string } | null;
   status: string;
   tabs: Tab[];
 }
+interface Folder {
+  path: string;
+  last_used: number;
+}
 type FtmEvent =
   | { event: "workspaces"; workspaces: Workspace[] }
+  | { event: "folders"; folders: Folder[] }
   | { event: "output"; pane: Id; data: string; reset: boolean };
 
 interface PaneView {
@@ -47,6 +53,8 @@ const isMac = navigator.userAgent.includes("Mac");
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
 let workspaces: Workspace[] = [];
+/// Most recently used first.
+let folders: Folder[] = [];
 let selected: Id | null = null;
 /// Restored from the last run once the daemon's tree arrives; ftmd keeps the sessions, this keeps where you were.
 let restoredUi = false;
@@ -287,68 +295,204 @@ function render() {
 
 const displayName = (ws: Workspace) => ws.title ?? ws.auto_title ?? ws.name;
 
+const COLLAPSED_KEY = "ftm.collapsed";
+const collapsed = new Set<string>(
+  (() => {
+    try {
+      return JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? "[]");
+    } catch {
+      return [];
+    }
+  })(),
+);
+
+function toggleSection(key: string) {
+  if (!collapsed.delete(key)) collapsed.add(key);
+  try {
+    localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...collapsed]));
+  } catch {
+    // Only the collapsed state is lost.
+  }
+  renderSidebar();
+}
+
+/// Top to bottom: Pinned, Active Terminals, Active Agents, Folders. Children stay under their parent, wherever the
+/// parent is.
 function renderSidebar() {
   if (editing && workspaces.some((w) => w.id === editing)) return;
   editing = null;
   const ids = new Set(workspaces.map((w) => w.id));
-  const build = (parent: Id | null): HTMLUListElement => {
+  const top = workspaces.filter((w) => !w.parent || !ids.has(w.parent));
+  const sections: [string, string, HTMLElement[]][] = [
+    ["pinned", "Pinned", top.filter((w) => w.pinned).map(workspaceTree)],
+    ["terminals", "Active Terminals", top.filter((w) => !w.pinned && w.kind === "terminal").map(workspaceTree)],
+    ["agents", "Active Agents", top.filter((w) => !w.pinned && w.kind === "agent").map(workspaceTree)],
+    [
+      "folders",
+      "Folders",
+      [...folders].sort((a, b) => basename(a.path).localeCompare(basename(b.path))).map(folderRow),
+    ],
+  ];
+  $("sections").replaceChildren(
+    ...sections
+      .filter(([key, , rows]) => rows.length > 0 || key === "folders")
+      .map(([key, title, rows]) => {
+        const section = document.createElement("section");
+        const head = document.createElement("button");
+        head.className = "section-head";
+        head.textContent = `${collapsed.has(key) ? "▸" : "▾"} ${title}`;
+        const count = document.createElement("span");
+        count.className = "count";
+        count.textContent = rows.length ? `${rows.length}` : "";
+        head.append(count);
+        head.onclick = () => toggleSection(key);
+        section.append(head);
+        if (!collapsed.has(key)) {
+          const ul = document.createElement("ul");
+          ul.append(...rows);
+          section.append(ul);
+        }
+        return section;
+      }),
+  );
+}
+
+function workspaceTree(ws: Workspace): HTMLLIElement {
+  const li = document.createElement("li");
+  li.append(workspaceRow(ws));
+  const children = workspaces.filter((w) => w.parent === ws.id);
+  if (children.length) {
     const ul = document.createElement("ul");
-    const children = workspaces.filter((w) => (parent === null ? !w.parent || !ids.has(w.parent) : w.parent === parent));
-    for (const ws of children) {
-      const li = document.createElement("li");
-      const row = document.createElement("div");
-      row.className = "ws" + (ws.id === selected ? " selected" : "");
-      row.dataset.id = ws.id;
-      row.title = [displayName(ws) === ws.name ? ws.name : `${displayName(ws)} (${ws.name})`, ws.kind, ws.cwd].join("\n");
-      const dot = document.createElement("span");
-      dot.className = ws.kind === "agent" ? `dot ${ws.status}` : "dot none";
-      dot.title = ws.kind === "agent" ? ws.status.replace("_", " ") : "";
-      const text = document.createElement("div");
-      text.className = "text";
-      const name = document.createElement("span");
-      name.className = "name";
-      name.textContent = displayName(ws);
-      name.ondblclick = (e) => {
-        e.stopPropagation();
-        startRename(ws.id);
-      };
-      const sub = document.createElement("span");
-      sub.className = "sub";
-      sub.textContent = location(ws);
-      text.append(name, sub);
-      const close = document.createElement("button");
-      close.className = "close";
-      close.textContent = "×";
-      close.title = "Close workspace";
-      close.onclick = (e) => {
-        e.stopPropagation();
-        request({ op: "close", id: ws.id, remove_worktree: false }).catch(console.error);
-      };
-      row.append(dot, text);
-      const waiting = descendantsNeedingInput(ws.id);
-      if (waiting > 0) {
-        const badge = document.createElement("span");
-        badge.className = "badge";
-        badge.textContent = `${waiting}`;
-        badge.title = `${waiting} agent${waiting === 1 ? "" : "s"} below need input`;
-        row.append(badge);
-      }
-      row.append(close);
-      row.onclick = () => {
-        selected = ws.id;
-        render();
-      };
-      row.oncontextmenu = (e) => {
-        e.preventDefault();
-        showMenu(e.clientX, e.clientY, [["Rename", () => startRename(ws.id)]]);
-      };
-      li.append(row);
-      if (workspaces.some((w) => w.parent === ws.id)) li.append(build(ws.id));
-      ul.append(li);
-    }
-    return ul;
+    ul.append(...children.map(workspaceTree));
+    li.append(ul);
+  }
+  return li;
+}
+
+function workspaceRow(ws: Workspace): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "ws" + (ws.id === selected ? " selected" : "");
+  row.dataset.id = ws.id;
+  row.title = [displayName(ws) === ws.name ? ws.name : `${displayName(ws)} (${ws.name})`, ws.kind, ws.cwd].join("\n");
+  const dot = document.createElement("span");
+  dot.className = ws.kind === "agent" ? `dot ${ws.status}` : "dot none";
+  dot.title = ws.kind === "agent" ? ws.status.replace("_", " ") : "";
+  const text = document.createElement("div");
+  text.className = "text";
+  const name = document.createElement("span");
+  name.className = "name";
+  name.textContent = displayName(ws);
+  name.ondblclick = (e) => {
+    e.stopPropagation();
+    startRename(ws.id);
   };
-  $("workspaces").replaceChildren(...build(null).children);
+  const sub = document.createElement("span");
+  sub.className = "sub";
+  sub.textContent = location(ws);
+  text.append(name, sub);
+  row.append(dot, text);
+  const waiting = descendantsNeedingInput(ws.id);
+  if (waiting > 0) {
+    const badge = document.createElement("span");
+    badge.className = "badge";
+    badge.textContent = `${waiting}`;
+    badge.title = `${waiting} agent${waiting === 1 ? "" : "s"} below need input`;
+    row.append(badge);
+  }
+  const close = document.createElement("button");
+  close.className = "close";
+  close.textContent = "×";
+  close.title = "Close workspace";
+  close.onclick = (e) => {
+    e.stopPropagation();
+    closeWorkspace(ws.id);
+  };
+  row.append(close);
+  row.onclick = () => {
+    selected = ws.id;
+    render();
+  };
+  row.oncontextmenu = (e) => {
+    e.preventDefault();
+    const items: [string, () => void][] = [["Rename", () => startRename(ws.id)]];
+    if (!ws.parent || !workspaces.some((w) => w.id === ws.parent)) {
+      items.push([ws.pinned ? "Unpin" : "Pin", () => request({ op: "pin", id: ws.id, pinned: !ws.pinned }).catch(console.error)]);
+    }
+    items.push(["Close", () => closeWorkspace(ws.id)]);
+    showMenu(e.clientX, e.clientY, items);
+  };
+  return row;
+}
+
+function closeWorkspace(id: Id) {
+  request({ op: "close", id, remove_worktree: false }).catch(console.error);
+}
+
+function folderRow(folder: Folder): HTMLLIElement {
+  const li = document.createElement("li");
+  const row = document.createElement("div");
+  row.className = "ws folder";
+  row.title = folder.path;
+  const icon = document.createElement("span");
+  icon.className = "folder-icon";
+  icon.textContent = "▢";
+  const text = document.createElement("div");
+  text.className = "text";
+  const name = document.createElement("span");
+  name.className = "name";
+  name.textContent = basename(folder.path);
+  const sub = document.createElement("span");
+  sub.className = "sub";
+  const git = gitInfo.get(folder.path);
+  sub.textContent = git ? `${git.branch === "HEAD" ? "detached" : git.branch}` : tilde(folder.path);
+  text.append(name, sub);
+  const add = document.createElement("button");
+  add.className = "close";
+  add.textContent = "+";
+  add.title = "New workspace here";
+  const menu = (x: number, y: number) => {
+    const items: [string, () => void][] = [
+      ["Agent", () => spawnAt("agent", folder.path)],
+      ["Terminal", () => spawnAt("terminal", folder.path)],
+    ];
+    if (git) items.push(["Worktree…", () => openSpawn({ folder: folder.path, worktree: true })]);
+    showMenu(x, y, items);
+  };
+  add.onclick = (e) => {
+    e.stopPropagation();
+    const r = add.getBoundingClientRect();
+    menu(r.left, r.bottom);
+  };
+  row.onclick = (e) => menu(e.clientX, e.clientY);
+  row.oncontextmenu = (e) => {
+    e.preventDefault();
+    showMenu(e.clientX, e.clientY, [
+      ["Remove from list", () => request({ op: "remove_folder", path: folder.path }).catch(console.error)],
+    ]);
+  };
+  row.append(icon, text, add);
+  li.append(row);
+  return li;
+}
+
+async function spawnAt(kind: "agent" | "terminal", path: string) {
+  try {
+    const r = await request({
+      op: "spawn",
+      kind,
+      name: null,
+      parent: null,
+      cwd: path,
+      worktree_branch: null,
+      base: null,
+      copy_changes: false,
+      brief: null,
+    });
+    selected = r.workspace.id;
+    render();
+  } catch (err) {
+    console.error(err);
+  }
 }
 
 let home = "";
@@ -375,7 +519,7 @@ async function refreshGit(paths: Iterable<string>) {
   if (changed) renderSidebar();
 }
 
-const refreshAllGit = () => refreshGit(workspaces.map((w) => w.cwd));
+const refreshAllGit = () => refreshGit([...workspaces.map((w) => w.cwd), ...folders.map((f) => f.path)]);
 
 /// Second sidebar line: `repo · branch` in a git repo (`repo/sub · branch` below its root), else the folder.
 function location(ws: Workspace): string {
@@ -608,6 +752,8 @@ function shortcut(e: KeyboardEvent) {
   if (!e.repeat) action();
 }
 
+let openSpawn: (preset?: { folder?: string; worktree?: boolean }) => void = () => {};
+
 function setupSpawnDialog() {
   const dialog = $<HTMLDialogElement>("spawn");
   const form = $<HTMLFormElement>("spawn-form");
@@ -615,23 +761,35 @@ function setupSpawnDialog() {
   const create = $<HTMLButtonElement>("create");
   let folder: string | null = null;
 
-  $("add").onclick = () => {
+  const choose = async (dir: string) => {
+    folder = dir;
+    $("folder").textContent = tilde(dir);
+    $("folder").title = dir;
+    const root = await invoke<string | null>("git_root", { path: dir });
+    $("git").hidden = !root;
+  };
+
+  openSpawn = (preset = {}) => {
     form.reset();
     folder = null;
     $("folder").textContent = "none";
     $("git").hidden = true;
     error.textContent = "";
+    if (preset.folder) {
+      choose(preset.folder)
+        .then(() => {
+          (form.elements.namedItem("worktree") as HTMLInputElement).checked = !!preset.worktree;
+          if (preset.worktree) (form.elements.namedItem("branch") as HTMLInputElement).focus();
+        })
+        .catch(console.error);
+    }
     dialog.showModal();
   };
+  $("add").onclick = () => openSpawn();
 
   $("pick").onclick = async () => {
     const dir = await open({ directory: true, defaultPath: folder ?? undefined });
-    if (typeof dir !== "string") return;
-    folder = dir;
-    $("folder").textContent = dir;
-    $("folder").title = dir;
-    const root = await invoke<string | null>("git_root", { path: dir });
-    $("git").hidden = !root;
+    if (typeof dir === "string") await choose(dir);
   };
 
   create.onclick = async (e) => {
@@ -694,6 +852,10 @@ render();
 listen<FtmEvent>("ftm-event", ({ payload }) => {
   if (payload.event === "workspaces") {
     onWorkspaces(payload.workspaces);
+  } else if (payload.event === "folders") {
+    folders = payload.folders;
+    refreshGit(folders.map((f) => f.path).filter((p) => !gitInfo.has(p))).catch(console.error);
+    renderSidebar();
   } else {
     const v = view(payload.pane);
     if (payload.reset) v.term.reset();

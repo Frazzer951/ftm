@@ -2,7 +2,7 @@ use crate::frame::{self, Frame};
 use crate::worktree;
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use eyre::{Result, WrapErr, bail, eyre};
-use ftm_core::model::{Kind, Layout, PaneId, SplitDir, Status, Tab, TabId, Workspace, WorkspaceId, Worktree};
+use ftm_core::model::{Folder, Kind, Layout, PaneId, SplitDir, Status, Tab, TabId, Workspace, WorkspaceId, Worktree};
 use ftm_core::protocol::{Event, Request, Response, SpawnRequest};
 use ftm_core::{ENV_AGENT_CMD, ENV_NAME, ENV_PANE_ID, ENV_SOCKET, ENV_WORKSPACE_ID, paths};
 use serde::{Deserialize, Serialize};
@@ -24,6 +24,8 @@ const BUFFER_SLACK: usize = 256 << 10;
 
 pub struct State {
     workspaces: BTreeMap<WorkspaceId, Workspace>,
+    /// Most recently used first.
+    folders: Vec<Folder>,
     panes: HashMap<PaneId, Pane>,
     events: broadcast::Sender<Event>,
     socket: PathBuf,
@@ -64,6 +66,8 @@ fn task_title(raw: &str) -> Option<String> {
 #[derive(Serialize, Deserialize)]
 struct Saved {
     workspaces: Vec<Workspace>,
+    #[serde(default)]
+    folders: Vec<Folder>,
 }
 
 /// What the first command in a pane runs before handing over to a login shell.
@@ -81,6 +85,7 @@ impl State {
     pub fn new(socket: PathBuf, claude_settings: Option<PathBuf>) -> Shared {
         Arc::new(Mutex::new(State {
             workspaces: BTreeMap::new(),
+            folders: Vec::new(),
             panes: HashMap::new(),
             events: broadcast::channel(1024).0,
             holders: paths::holders_dir(&socket),
@@ -102,9 +107,28 @@ impl State {
         }
     }
 
+    fn emit_folders(&self) {
+        let _ = self.events.send(Event::Folders {
+            folders: self.folders.clone(),
+        });
+        if let Err(e) = self.save() {
+            tracing::warn!("saving {}: {e:#}", self.state_file.display());
+        }
+    }
+
+    /// Moves `path` to the front of the remembered folders.
+    fn remember_folder(&mut self, path: PathBuf) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        self.folders.retain(|f| f.path != path);
+        self.folders.insert(0, Folder { path, last_used: now });
+        self.emit_folders();
+    }
+
     /// An empty tree leaves no file behind, so throwaway daemons (tests, smoke runs) clean up after themselves.
     fn save(&self) -> Result<()> {
-        if self.workspaces.is_empty() {
+        if self.workspaces.is_empty() && self.folders.is_empty() {
             match std::fs::remove_file(&self.state_file) {
                 Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
                 _ => return Ok(()),
@@ -114,7 +138,11 @@ impl State {
             paths::private_dir(dir, true)?;
         }
         let tmp = self.state_file.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(&Saved { workspaces: self.list() })?)?;
+        let saved = Saved {
+            workspaces: self.list(),
+            folders: self.folders.clone(),
+        };
+        std::fs::write(&tmp, serde_json::to_vec_pretty(&saved)?)?;
         std::fs::rename(&tmp, &self.state_file)?;
         Ok(())
     }
@@ -270,6 +298,7 @@ pub fn load(shared: &Shared) -> Result<()> {
     for ws in saved.workspaces {
         state.workspaces.insert(ws.id, ws);
     }
+    state.folders = saved.folders;
     let ids: Vec<WorkspaceId> = state.workspaces.keys().copied().collect();
     for ws in state.workspaces.values_mut() {
         if ws.parent.is_some_and(|p| !ids.contains(&p)) {
@@ -395,9 +424,14 @@ fn reap(pane: Pane) -> std::thread::JoinHandle<()> {
 pub fn subscribe(shared: &Shared) -> (broadcast::Receiver<Event>, Vec<Event>) {
     let state = lock(shared);
     let rx = state.events.subscribe();
-    let mut replay = vec![Event::Workspaces {
-        workspaces: state.list(),
-    }];
+    let mut replay = vec![
+        Event::Workspaces {
+            workspaces: state.list(),
+        },
+        Event::Folders {
+            folders: state.folders.clone(),
+        },
+    ];
     replay.extend(state.panes.iter().map(|(id, pane)| Event::Output {
         pane: *id,
         data: B64.encode(&pane.buffer),
@@ -456,6 +490,22 @@ pub fn handle(shared: &Shared, request: Request) -> Response {
         },
         Request::Close { id, remove_worktree } => close(shared, id, remove_worktree),
         Request::Rename { id, name } => rename(shared, id, &name),
+        Request::Pin { id, pinned } => {
+            let mut state = lock(shared);
+            state.workspace_mut(id).map(|ws| ws.pinned = pinned).map(|()| {
+                state.emit_workspaces();
+                Response::Ok
+            })
+        },
+        Request::Folders => Ok(Response::Folders {
+            folders: lock(shared).folders.clone(),
+        }),
+        Request::RemoveFolder { path } => {
+            let mut state = lock(shared);
+            state.folders.retain(|f| f.path != path);
+            state.emit_folders();
+            Ok(Response::Ok)
+        },
         Request::NewTab { workspace } => new_tab(shared, workspace),
         Request::Split { pane, dir } => split(shared, pane, dir),
         Request::ClosePane { pane } => {
@@ -515,6 +565,7 @@ fn spawn(shared: &Shared, req: SpawnRequest) -> Result<Response> {
             title: None,
             auto_title: None,
             agent_pane: None,
+            pinned: false,
             kind: req.kind,
             cwd,
             worktree,
@@ -545,6 +596,10 @@ fn spawn(shared: &Shared, req: SpawnRequest) -> Result<Response> {
         ws.agent_pane = Some(pane);
     }
     let workspace = ws.clone();
+    // The folder the user picked, not the worktree made from it.
+    if req.parent.is_none() {
+        state.remember_folder(req.cwd.clone());
+    }
     state.emit_workspaces();
     Ok(Response::Spawned { workspace })
 }

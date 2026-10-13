@@ -288,3 +288,59 @@ fn rename_broadcasts_and_survives_restart() {
         capture(&mut req, pane).contains("name-spawned-end")
     });
 }
+
+fn folders(conn: &mut Conn) -> Vec<std::path::PathBuf> {
+    match conn.send(&Request::Folders) {
+        Response::Folders { folders } => folders.into_iter().map(|f| f.path).collect(),
+        r => panic!("{r:?}"),
+    }
+}
+
+#[test]
+fn folders_and_pins_are_remembered() {
+    let dir = temp_root("folders");
+    let (a, b) = (dir.join("a"), dir.join("b"));
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::create_dir_all(&b).unwrap();
+    let mut daemon = start_daemon("folders", |_| {});
+    let mut req = Conn::open(&daemon.socket);
+    let first = spawn_terminal(&mut req, &a, "first");
+    spawn_terminal(&mut req, &b, "second");
+    // Nested workspaces do not add folders; reopening one moves it to the front.
+    let Response::Spawned { .. } = req.send(&Request::Spawn(SpawnRequest {
+        kind: Kind::Terminal,
+        name: None,
+        parent: Some(first.id),
+        cwd: dir.clone(),
+        worktree_branch: None,
+        base: None,
+        copy_changes: false,
+        brief: None,
+    })) else {
+        panic!()
+    };
+    assert_eq!(folders(&mut req), vec![b.clone(), a.clone()]);
+    spawn_terminal(&mut req, &a, "again");
+    assert_eq!(folders(&mut req), vec![a.clone(), b.clone()]);
+    req.send(&Request::Pin {
+        id: first.id,
+        pinned: true,
+    });
+
+    // Subscribers get the folders with the tree.
+    let mut events = Conn::open(&daemon.socket);
+    events.send(&Request::Subscribe);
+    assert!(matches!(events.line(), Event::Workspaces { .. }));
+    let Event::Folders { folders: seen } = events.line() else {
+        panic!("expected folders")
+    };
+    assert_eq!(seen.len(), 2);
+    drop((req, events));
+
+    daemon.restart();
+    let mut req = Conn::open(&daemon.socket);
+    assert_eq!(folders(&mut req), vec![a.clone(), b.clone()]);
+    assert!(req.list().iter().find(|w| w.id == first.id).unwrap().pinned);
+    req.send(&Request::RemoveFolder { path: a.clone() });
+    assert_eq!(folders(&mut req), vec![b]);
+}
