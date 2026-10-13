@@ -78,6 +78,7 @@ fn main() {
     let builder = builder.menu(menu);
     builder
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(daemon::Client::start())
         .manage(daemon::Events::default())
         .invoke_handler(tauri::generate_handler![request, send, subscribe, git_root])

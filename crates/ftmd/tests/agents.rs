@@ -16,6 +16,7 @@ use std::time::Duration;
 const FAKE_AGENT: &str = r#"#!/bin/sh
 PATH="$FTM_BIN_DIR:$PATH"
 out="$FAKE_OUT/$FTM_NAME"
+if [ "$1" = --settings ]; then printf '%s' "$2" > "$out.settings"; shift 2; fi
 : > "$out.argv"
 for arg in "$@"; do printf '%s\0' "$arg" >> "$out.argv"; done
 {
@@ -193,6 +194,51 @@ fn agents_nest_report_status_and_clean_up() {
     assert_eq!(argv(&out, "child"), ["-n", "child"]);
     let cv = vars(&out, "child");
     assert_eq!(cv["FTM_WORKSPACE_ID"], child.to_string());
+
+    // Each agent gets ftmd's hook settings; running each hook as Claude would drives the leader's status.
+    let settings_path = std::fs::read_to_string(out.join("leader.settings")).unwrap();
+    assert_eq!(std::fs::read_to_string(out.join("child.settings")).unwrap(), settings_path);
+    let settings: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+    for (event, matcher, status) in [
+        ("PermissionRequest", None, Status::NeedsInput),
+        ("PostToolUse", None, Status::Working),
+        ("PreToolUse", Some("AskUserQuestion"), Status::NeedsInput),
+        ("UserPromptSubmit", None, Status::Working),
+        ("Notification", Some("permission_prompt"), Status::NeedsInput),
+        ("Stop", None, Status::Idle),
+        ("SessionEnd", None, Status::Done),
+    ] {
+        let group = settings["hooks"][event]
+            .as_array()
+            .unwrap_or_else(|| panic!("no {event} hook"))
+            .iter()
+            .find(|g| matcher.is_none_or(|m| g["matcher"].as_str().is_some_and(|re| re.split('|').any(|p| p == m))))
+            .unwrap_or_else(|| panic!("no {event} hook for {matcher:?}"));
+        let command = group["hooks"][0]["command"].as_str().unwrap();
+        let ran = Command::new("/bin/sh")
+            .args(["-c", command])
+            .env("FTM_SOCKET", &socket)
+            .env("FTM_WORKSPACE_ID", leader.to_string())
+            .output()
+            .unwrap();
+        assert!(ran.status.success() && ran.stdout.is_empty(), "{event} hook: {ran:?}");
+        let now = ls(&bin, &socket).into_iter().find(|w| w.id == leader).unwrap().status;
+        assert_eq!(now, status, "after {event}");
+    }
+    let idle_prompt = settings["hooks"]["Notification"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|g| g["matcher"].as_str().is_none_or(|m| m.split('|').any(|p| p == "idle_prompt")));
+    assert!(!idle_prompt, "the 60s idle reminder must not mark an agent as needing input");
+    // A hook outside ftm (no workspace) is a silent no-op.
+    let stray = Command::new("/bin/sh")
+        .args(["-c", settings["hooks"]["Stop"][0]["hooks"][0]["command"].as_str().unwrap()])
+        .env("FTM_SOCKET", "/tmp/ftm-nothing-here.sock")
+        .env_remove("FTM_WORKSPACE_ID")
+        .output()
+        .unwrap();
+    assert!(stray.status.success() && stray.stdout.is_empty() && stray.stderr.is_empty());
 
     // Closing the leader stops its HUP-ignoring agent, reparents the child, and removes a clean worktree and its
     // merged branch.

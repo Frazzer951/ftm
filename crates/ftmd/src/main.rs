@@ -1,3 +1,4 @@
+mod hooks;
 mod state;
 mod worktree;
 
@@ -31,7 +32,11 @@ async fn main() -> Result<()> {
     let listener = UnixListener::bind(&socket).wrap_err_with(|| format!("binding {}", socket.display()))?;
     tracing::info!("listening on {}", socket.display());
 
-    let state = State::new(socket.clone());
+    let claude_settings = socket.parent().map(hooks::write).transpose().unwrap_or_else(|e| {
+        tracing::warn!("agents start without status hooks: {e:#}");
+        None
+    });
+    let state = State::new(socket.clone(), claude_settings);
     let mut terminate = signal(SignalKind::terminate())?;
     loop {
         tokio::select! {

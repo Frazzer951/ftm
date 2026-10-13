@@ -4,7 +4,7 @@
 #   scripts/agent-smoke.sh
 #
 # Starts its own ftmd on a private socket, spawns a leader agent whose brief makes it report its FTM_* env, list
-# workspaces, spawn a child agent and set its status, then checks the leader's results file, `ftm ls --json` and
+# workspaces and spawn a child agent, then checks the leader's results file, `ftm ls --json` and
 # `ftm capture`. Always closes everything and stops its ftmd.
 #
 # Agents run in FTM_SMOKE_DIR (default: this repo's root), which Claude must already trust: if it shows the trust
@@ -62,8 +62,8 @@ resolved=$(ftm capture "$term" | grep "^FTM=/" | tail -1 | cut -d= -f2-)
 ftm close --id "$term"
 
 cat >"$RUN/child-brief.md" <<EOF
-You are a child agent in an automated FTM smoke test. Use the Bash tool to run exactly: ftm status idle
-Then stop. Do not ask questions or do anything else.
+You are a child agent in an automated FTM smoke test. Reply with just the word: done
+Do not use any tools, ask questions or do anything else.
 EOF
 cat >"$RUN/leader-brief.md" <<EOF
 You are the leader agent in an automated FTM smoke test. Do these steps in order with the Bash and Write tools, then stop. Do not ask questions or do anything else.
@@ -72,8 +72,7 @@ You are the leader agent in an automated FTM smoke test. Do these steps in order
 2. Run: ftm ls --json
 3. Run: ftm spawn agent --name smoke-child --path $DIR --brief $RUN/child-brief.md
    It prints the new workspace's id.
-4. Run: ftm status working
-5. Use the Write tool to create $RUN/results.json containing only this JSON object, with the real values filled in:
+4. Use the Write tool to create $RUN/results.json containing only this JSON object, with the real values filled in:
    {"FTM_NAME": "...", "FTM_WORKSPACE_ID": "...", "FTM_PANE_ID": "...", "FTM_SOCKET": "...", "ls_ok": true or false (whether step 2 printed a JSON array), "child_id": "the id printed in step 3"}
 EOF
 
@@ -96,15 +95,21 @@ blocked() {
   return 1
 }
 
+# Neither brief mentions `ftm status`: every status change below comes from the hooks ftmd gives each agent.
 child=
+leader_seen=
 deadline=$((SECONDS + TIMEOUT))
 while [ $SECONDS -lt $deadline ]; do
   [ -z "$child" ] && child=$(ws_json | python3 -c "import json,sys; c=[w['id'] for w in json.load(sys.stdin) if w['name']=='smoke-child']; print(c[0] if c else '')")
-  if [ -s "$RUN/results.json" ] && [ -n "$child" ] && [ "$(field "$child" "w[0]['status']")" = idle ]; then break; fi
+  leader_status=$(field "$leader" "w[0]['status']")
+  case " $leader_seen " in *" $leader_status "*) ;; *) leader_seen="$leader_seen $leader_status" ;; esac
+  if [ -s "$RUN/results.json" ] && [ -n "$child" ] && [ "$leader_status" = idle ] \
+    && [ "$(field "$child" "w[0]['status']")" = idle ]; then break; fi
   blocked "$leader" && break
   [ -n "$child" ] && blocked "$child" && break
-  sleep 3
+  sleep 1
 done
+echo "leader statuses seen:$leader_seen"
 
 if [ ${#failures[@]} -eq 0 ]; then
   [ -s "$RUN/results.json" ] || fail "leader never wrote results.json"
@@ -130,17 +135,18 @@ fi
 if [ -n "$child" ]; then
   [ "$(field "$child" "w[0]['parent']")" = "$leader" ] || fail "smoke-child is not nested under the leader"
   [ "$(field "$child" "w[0]['kind']")" = agent ] || fail "smoke-child is not an agent"
-  [ "$(field "$child" "w[0]['status']")" = idle ] || fail "smoke-child status is $(field "$child" "w[0]['status']"), want idle"
+  [ "$(field "$child" "w[0]['status']")" = idle ] || fail "smoke-child status is $(field "$child" "w[0]['status']"), want idle (Stop hook)"
   claude_ui "$child" smoke-child || fail "no Claude prompt box named smoke-child in the child's pane"
 fi
-[ "$(field "$leader" "w[0]['status']")" = working ] || fail "leader status is $(field "$leader" "w[0]['status']"), want working"
+case " $leader_seen " in *" working "*) ;; *) fail "hooks never marked the leader working (saw:$leader_seen)" ;; esac
+[ "$(field "$leader" "w[0]['status']")" = idle ] || fail "leader status is $(field "$leader" "w[0]['status']"), want idle (Stop hook)"
 claude_ui "$leader" smoke-leader || fail "no Claude prompt box named smoke-leader in the leader's pane"
 
 ftm capture "$leader" >"$RUN/leader-screen.txt" || true
 [ -n "$child" ] && { ftm capture "$child" >"$RUN/child-screen.txt" || true; }
 
 if [ ${#failures[@]} -eq 0 ]; then
-  echo "PASS: leader and child Claude agents ran, nested, reported status and env ($((SECONDS))s)"
+  echo "PASS: leader and child Claude agents ran and nested, hooks drove status (working -> idle), env reported ($((SECONDS))s)"
 else
   echo "FAIL: ${#failures[@]} check(s) failed"
   exit 1

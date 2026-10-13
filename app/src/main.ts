@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
+import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
@@ -114,7 +115,11 @@ function setFocus(pane: Id) {
   document.querySelectorAll(".slot").forEach((s) => s.classList.toggle("focused", (s as HTMLElement).dataset.pane === pane));
 }
 
+let seenTree = false;
+
 function onWorkspaces(list: Workspace[]) {
+  notifyNeedsInput(list, !seenTree).catch(console.error);
+  seenTree = true;
   workspaces = list;
   const live = new Set(list.flatMap((w) => w.tabs.flatMap((t) => panesOf(t.layout))));
   for (const [id, v] of views) {
@@ -161,8 +166,8 @@ function renderSidebar() {
       row.className = "ws" + (ws.id === selected ? " selected" : "");
       row.title = ws.cwd;
       const dot = document.createElement("span");
-      dot.className = `dot ${ws.status}`;
-      dot.title = ws.status;
+      dot.className = ws.kind === "agent" ? `dot ${ws.status}` : "dot none";
+      dot.title = ws.kind === "agent" ? ws.status.replace("_", " ") : "";
       const name = document.createElement("span");
       name.className = "name";
       name.textContent = (ws.kind === "agent" ? "✻ " : "") + ws.name;
@@ -177,7 +182,16 @@ function renderSidebar() {
         e.stopPropagation();
         request({ op: "close", id: ws.id, remove_worktree: false }).catch(console.error);
       };
-      row.append(dot, name, branch, close);
+      row.append(dot, name, branch);
+      const waiting = descendantsNeedingInput(ws.id);
+      if (waiting > 0) {
+        const badge = document.createElement("span");
+        badge.className = "badge";
+        badge.textContent = `${waiting}`;
+        badge.title = `${waiting} agent${waiting === 1 ? "" : "s"} below need input`;
+        row.append(badge);
+      }
+      row.append(close);
       row.onclick = () => {
         selected = ws.id;
         render();
@@ -189,6 +203,26 @@ function renderSidebar() {
     return ul;
   };
   $("workspaces").replaceChildren(...build(null).children);
+}
+
+function descendantsNeedingInput(id: Id): number {
+  return workspaces
+    .filter((w) => w.parent === id)
+    .reduce((n, w) => n + (w.kind === "agent" && w.status === "needs_input" ? 1 : 0) + descendantsNeedingInput(w.id), 0);
+}
+
+const lastStatus = new Map<Id, string>();
+
+/// One desktop notification per transition into needs_input; the first tree after startup only records statuses.
+async function notifyNeedsInput(list: Workspace[], initial: boolean) {
+  const fresh = list.filter((w) => w.kind === "agent" && w.status === "needs_input" && lastStatus.get(w.id) !== "needs_input");
+  lastStatus.clear();
+  for (const w of list) lastStatus.set(w.id, w.status);
+  if (initial || fresh.length === 0) return;
+  let granted = await isPermissionGranted();
+  if (!granted) granted = (await requestPermission()) === "granted";
+  if (!granted) return;
+  for (const w of fresh) sendNotification({ title: w.name, body: "needs input" });
 }
 
 function renderTabs() {

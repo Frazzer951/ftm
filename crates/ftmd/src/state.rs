@@ -24,6 +24,8 @@ pub struct State {
     panes: HashMap<PaneId, Pane>,
     events: broadcast::Sender<Event>,
     socket: PathBuf,
+    /// Hook settings every agent gets via `--settings`, from `hooks::write`.
+    claude_settings: Option<PathBuf>,
 }
 
 struct Pane {
@@ -45,12 +47,13 @@ struct Startup<'a> {
 }
 
 impl State {
-    pub fn new(socket: PathBuf) -> Shared {
+    pub fn new(socket: PathBuf, claude_settings: Option<PathBuf>) -> Shared {
         Arc::new(Mutex::new(State {
             workspaces: BTreeMap::new(),
             panes: HashMap::new(),
             events: broadcast::channel(1024).0,
             socket,
+            claude_settings,
         }))
     }
 
@@ -120,6 +123,9 @@ impl State {
         if let Some(brief) = startup.and_then(|s| s.brief) {
             cmd.env("FTM_BRIEF", brief);
         }
+        if let Some(settings) = &self.claude_settings {
+            cmd.env("FTM_CLAUDE_SETTINGS", settings);
+        }
 
         let pair = native_pty_system()
             .openpty(PtySize {
@@ -167,7 +173,7 @@ fn script(startup: Startup) -> Option<String> {
         let agent = std::env::var(ENV_AGENT_CMD).ok().filter(|c| !c.trim().is_empty());
         let agent = agent.as_deref().unwrap_or("claude");
         Some(format!(
-            r#"{setup}{agent} -n "$FTM_NAME" ${{FTM_BRIEF:+"$FTM_BRIEF"}}; exec "$SHELL" -l"#
+            r#"{setup}{agent} ${{FTM_CLAUDE_SETTINGS:+--settings}} ${{FTM_CLAUDE_SETTINGS:+"$FTM_CLAUDE_SETTINGS"}} -n "$FTM_NAME" ${{FTM_BRIEF:+"$FTM_BRIEF"}}; exec "$SHELL" -l"#
         ))
     } else if startup.setup.is_some() {
         Some(format!(r#"{setup}exec "$SHELL" -l"#))
@@ -499,4 +505,45 @@ fn input(shared: &Shared, pane: PaneId, data: &str) -> Result<Response> {
     writer.write_all(&bytes)?;
     writer.flush()?;
     Ok(Response::Ok)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    /// zsh does not word-split unquoted expansions, so each optional argument has to be its own expansion.
+    #[test]
+    fn agent_script_passes_the_same_argv_in_sh_and_zsh() {
+        // SAFETY: no other test in this binary reads FTM_AGENT_CMD.
+        unsafe { std::env::set_var(ENV_AGENT_CMD, "printf '[%s]'") };
+        let line = script(Startup {
+            agent: true,
+            setup: None,
+            brief: None,
+        })
+        .unwrap();
+        let line = line.split("; exec").next().unwrap();
+        for shell in ["/bin/sh", "/bin/bash", "/bin/zsh"]
+            .into_iter()
+            .filter(|s| Path::new(s).exists())
+        {
+            for (settings, brief, want) in [
+                (
+                    Some("/tmp/s.json"),
+                    Some("a \"b\" $(c)"),
+                    "[--settings][/tmp/s.json][-n][n][a \"b\" $(c)]",
+                ),
+                (None, None, "[-n][n]"),
+            ] {
+                let mut cmd = std::process::Command::new(shell);
+                cmd.args(["-c", line]).env("FTM_NAME", "n");
+                cmd.env_remove("FTM_CLAUDE_SETTINGS").env_remove("FTM_BRIEF");
+                settings.map(|s| cmd.env("FTM_CLAUDE_SETTINGS", s));
+                brief.map(|b| cmd.env("FTM_BRIEF", b));
+                let out = cmd.output().unwrap();
+                assert_eq!(String::from_utf8_lossy(&out.stdout), want, "{shell}");
+            }
+        }
+    }
 }

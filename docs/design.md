@@ -77,16 +77,20 @@ Worktrees live under `~/.local/share/ftm/worktrees/<repo>/<branch>` (`$XDG_DATA_
 
 ## Claude Code integration
 
-Hooks in `~/.claude/settings.json`, all no-ops outside FTM because `$FTM_WORKSPACE_ID` is unset:
+ftmd writes hook settings to `claude-settings.json` next to its socket and starts every agent with `claude --settings <that file>`, so the user's own `~/.claude/settings.json` is untouched (hook entries from both apply). Each hook runs `<ftm next to ftmd> status <s> >/dev/null 2>&1 || true` with a 5s timeout: silent (a `UserPromptSubmit` hook's stdout would be fed to Claude), never failing, and a no-op outside FTM.
 
-| Hook | Command |
+| Hook (matcher) | Status |
 |---|---|
-| `UserPromptSubmit` | `ftm status working` |
-| `Notification` | `ftm status needs-input` |
-| `Stop` | `ftm status idle` |
-| `SessionEnd` | `ftm status done` |
+| `UserPromptSubmit`, `PostToolUse` | `working` |
+| `PermissionRequest` (fires as soon as a tool needs approval) | `needs_input` |
+| `PreToolUse` (`AskUserQuestion`) | `needs_input` |
+| `Notification` (`permission_prompt\|elicitation_dialog\|elicitation_url_dialog`) | `needs_input` |
+| `Stop`, `StopFailure` | `idle` |
+| `SessionEnd` | `done` (best effort: a killed session may not send it) |
 
-`needs_input` also raises a desktop notification and badges the parent row. Agents are started with `claude -n <name> "<brief>"`, so `SendMessage` between leader and workers keeps working as today. `sonarx:spawn-repo-agent` and `sonarx:agent-shutdown` switch from `supacode ...` to `ftm spawn` / `ftm close`.
+The 60s `idle_prompt` notification is deliberately not mapped, so a finished agent never turns red. `PostToolUse` rather than `PreToolUse` marks work so it cannot race the `AskUserQuestion` hook, and it clears `needs_input` once a prompt is answered. In the app, agent rows show a dot (starting blue, working green, needs input red, idle grey, done hollow grey; CSS variables `--status-*`); terminals show none.
+
+`needs_input` also raises a desktop notification (agent name, "needs input") and badges every ancestor row with the count of agents below it that need input. Agents are started with `claude -n <name> "<brief>"`, so `SendMessage` between leader and workers keeps working as today. `sonarx:spawn-repo-agent` and `sonarx:agent-shutdown` switch from `supacode ...` to `ftm spawn` / `ftm close`.
 
 ## UI
 

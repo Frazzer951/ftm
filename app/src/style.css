@@ -21,12 +21,21 @@ button:hover { background: #343944; }
 .ws .branch { color: #7f8796; font-size: 11px; }
 .ws .close { visibility: hidden; padding: 0 5px; }
 .ws:hover .close { visibility: visible; }
-.dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: #7f8796; }
-.dot.starting { background: #7f8796; }
-.dot.working { background: #4fa3ff; }
-.dot.needs_input { background: #ffb347; }
-.dot.idle { background: #5ccf7a; }
-.dot.done { background: #444a55; }
+:root {
+  --status-starting: #4fa3ff;
+  --status-working: #3ecf6e;
+  --status-needs-input: #ff4d4f;
+  --status-idle: #8a909c;
+  --status-done: #8a909c;
+}
+.dot { width: 9px; height: 9px; border-radius: 50%; flex: none; box-sizing: border-box; }
+.dot.none { visibility: hidden; }
+.dot.starting { background: var(--status-starting); }
+.dot.working { background: var(--status-working); }
+.dot.needs_input { background: var(--status-needs-input); }
+.dot.idle { background: var(--status-idle); }
+.dot.done { background: transparent; border: 1.5px solid var(--status-done); }
+.badge { flex: none; min-width: 16px; padding: 0 4px; border-radius: 8px; font-size: 10px; line-height: 16px; text-align: center; color: #fff; background: var(--status-needs-input); }
 
 main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 #tabs { display: flex; gap: 2px; padding: 4px; border-bottom: 1px solid #2a2e37; min-height: 32px; }
