@@ -48,6 +48,10 @@ impl Daemon {
         self.child = Self::spawn(&self.envs, &self.socket);
     }
 
+    pub fn state_home(&self) -> &Path {
+        &self.state_home
+    }
+
     pub fn holders(&self) -> PathBuf {
         ftm_core::paths::holders_dir(&self.socket)
     }

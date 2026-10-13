@@ -168,7 +168,7 @@ fn launch() -> Result<(), String> {
     let binary = sibling.filter(|p| p.is_file()).unwrap_or_else(|| PathBuf::from("ftmd"));
     let log_path = paths::socket_path().with_file_name("ftmd.log");
     if let Some(dir) = log_path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        paths::private_dir(dir, paths::socket_dir_is_ours(dir)).map_err(|e| e.to_string())?;
     }
     let log = std::fs::OpenOptions::new()
         .create(true)

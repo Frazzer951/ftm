@@ -8,6 +8,7 @@ use ftm_core::model::{Kind, PaneId, SplitDir, Status, Workspace};
 use ftm_core::protocol::{Event, Request, Response, SpawnRequest};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::io::{Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -76,6 +77,19 @@ fn ftmd_restart_keeps_sessions() {
     wait_for_output(&mut events, pane, "marker-42");
     let tree = serde_json::to_value(req.list()).unwrap();
     drop((req, events));
+
+    // Pane sockets and the saved tree are owner-only; the shared dir the test socket lives in is left alone.
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&daemon.holders()), 0o700);
+    assert_eq!(mode(&daemon.socket), 0o600);
+    let state_dir = std::fs::read_dir(daemon.state_home())
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert_eq!(mode(&state_dir), 0o700);
+    assert_eq!(mode(Path::new("/tmp")) & 0o777, 0o777);
 
     daemon.restart();
     assert!(alive(shell) && alive(holder), "pane processes died with ftmd");

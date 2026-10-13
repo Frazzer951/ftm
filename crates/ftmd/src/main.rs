@@ -13,6 +13,7 @@ use ftm_core::{
 };
 use serde::Serialize;
 use state::{Shared, State};
+use std::os::unix::fs::PermissionsExt;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::{UnixListener, UnixStream};
@@ -35,7 +36,7 @@ async fn daemon() -> Result<()> {
 
     let socket = std::path::absolute(paths::socket_path())?;
     if let Some(dir) = socket.parent() {
-        std::fs::create_dir_all(dir).wrap_err_with(|| format!("creating {}", dir.display()))?;
+        paths::private_dir(dir, paths::socket_dir_is_ours(dir)).wrap_err_with(|| format!("creating {}", dir.display()))?;
     }
     if socket.exists() {
         if UnixStream::connect(&socket).await.is_ok() {
@@ -44,6 +45,7 @@ async fn daemon() -> Result<()> {
         std::fs::remove_file(&socket)?;
     }
     let listener = UnixListener::bind(&socket).wrap_err_with(|| format!("binding {}", socket.display()))?;
+    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
     tracing::info!("listening on {}", socket.display());
 
     let claude_settings = socket.parent().map(hooks::write).transpose().unwrap_or_else(|e| {

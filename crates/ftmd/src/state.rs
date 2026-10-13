@@ -91,7 +91,7 @@ impl State {
             }
         }
         if let Some(dir) = self.state_file.parent() {
-            std::fs::create_dir_all(dir)?;
+            paths::private_dir(dir, true)?;
         }
         let tmp = self.state_file.with_extension("json.tmp");
         std::fs::write(&tmp, serde_json::to_vec_pretty(&Saved { workspaces: self.list() })?)?;
@@ -134,7 +134,7 @@ impl State {
             .ok_or_else(|| eyre!("no workspace {workspace}"))?;
         let id = PaneId::new_v4();
         let shell = shell();
-        std::fs::create_dir_all(&self.holders).wrap_err_with(|| format!("creating {}", self.holders.display()))?;
+        paths::private_dir(&self.holders, true).wrap_err_with(|| format!("creating {}", self.holders.display()))?;
         let holder_socket = self.holders.join(format!("{id}.sock"));
 
         let mut cmd = std::process::Command::new(std::env::current_exe().wrap_err("locating ftmd")?);
