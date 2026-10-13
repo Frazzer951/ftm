@@ -66,7 +66,7 @@ enum Command {
         #[arg(long)]
         remove_worktree: bool,
     },
-    /// Print a pane's buffered output (last 1 MiB), with escape sequences stripped unless --raw
+    /// Print a pane's screen and scrollback as text, or with --raw its buffered output bytes (last 1 MiB)
     Capture {
         /// Pane id, or a workspace id for the first pane of its first tab
         target: PaneId,
@@ -145,19 +145,11 @@ fn main() -> Result<()> {
         },
         Command::Close { id, remove_worktree } => Request::Close { id, remove_worktree },
         Command::Capture { target, raw } => {
-            let Response::Output { data } = client::send(&Request::Capture {
-                pane: resolve_pane(target)?,
-            })?
-            else {
+            let pane = resolve_pane(target)?;
+            let Response::Output { data } = client::send(&Request::Capture { pane, raw })? else {
                 bail!("unexpected response from ftmd");
             };
-            let bytes = B64.decode(data)?;
-            let mut out = std::io::stdout().lock();
-            if raw {
-                out.write_all(&bytes)?;
-            } else {
-                out.write_all(strip_escapes(&bytes).as_bytes())?;
-            }
+            std::io::stdout().lock().write_all(&B64.decode(data)?)?;
             return Ok(());
         },
         Command::Send { target, text, enter } => {
@@ -188,47 +180,6 @@ fn resolve_pane(target: PaneId) -> Result<PaneId> {
         },
         None => Ok(target),
     }
-}
-
-/// Drops CSI, OSC and other escape sequences plus carriage returns, leaving the text a terminal would have printed.
-fn strip_escapes(bytes: &[u8]) -> String {
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            0x1b => {
-                i += 1;
-                match bytes.get(i) {
-                    Some(b'[') => {
-                        i += 1;
-                        while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
-                            i += 1;
-                        }
-                    },
-                    Some(b']' | b'P' | b'X' | b'^' | b'_') => {
-                        i += 1;
-                        while i < bytes.len() && bytes[i] != 0x07 && !(bytes[i] == 0x1b && bytes.get(i + 1) == Some(&b'\\')) {
-                            i += 1;
-                        }
-                        if bytes.get(i) == Some(&0x1b) {
-                            i += 1;
-                        }
-                    },
-                    Some(b'(' | b')' | b'*' | b'+' | b'#' | b'%') => i += 1,
-                    _ => {},
-                }
-                i += 1;
-            },
-            b'\r' => i += 1,
-            b => {
-                if b == b'\n' || b == b'\t' || b >= 0x20 {
-                    out.push(b);
-                }
-                i += 1;
-            },
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn list(json: bool) -> Result<()> {
@@ -262,16 +213,5 @@ fn print_tree(ws: &Workspace, all: &[Workspace], depth: usize) {
     );
     for child in all.iter().filter(|c| c.parent == Some(ws.id)) {
         print_tree(child, all, depth + 1);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::strip_escapes;
-
-    #[test]
-    fn strips_escape_sequences() {
-        let raw = b"\x1b[1;32mClaude\x1b[0m Code\r\n\x1b]0;title\x07ok\x1b]8;;http://x\x1b\\link\x1b(B\x1b=done\x08";
-        assert_eq!(strip_escapes(raw), "Claude Code\noklinkdone");
     }
 }

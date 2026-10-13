@@ -44,7 +44,7 @@ ftm spawn terminal|agent [--path P] [--name N] [--worktree BRANCH [--base REF] [
                          [--brief FILE] [--parent ID | --detached]
 ftm status working|needs-input|idle|done      # id from $FTM_WORKSPACE_ID
 ftm close [--remove-worktree]
-ftm capture <pane|workspace> [--raw]          # buffered output, escapes stripped unless --raw
+ftm capture <pane|workspace> [--raw]          # screen + scrollback as text; --raw: last 1 MiB of output bytes
 ftm send <pane|workspace> <text> [--enter]    # type into a pane; a workspace id means its first pane
 ```
 

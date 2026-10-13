@@ -39,9 +39,11 @@ pub enum Request {
         cols: u16,
         rows: u16,
     },
-    /// The pane's buffered raw output, as `Response::Output`.
+    /// The pane's screen and scrollback as plain text, or with `raw` its buffered output bytes, as `Response::Output`.
     Capture {
         pane: PaneId,
+        #[serde(default)]
+        raw: bool,
     },
     Subscribe,
 }

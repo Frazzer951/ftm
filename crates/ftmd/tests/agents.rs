@@ -210,6 +210,7 @@ fn agents_nest_report_status_and_clean_up() {
     assert_eq!(after.iter().find(|w| w.id == child).unwrap().parent, None);
     assert!(alive(child_pid));
 
+    // Stopping ftmd right after a close still finishes killing the HUP-ignoring agent.
     let mut conn = Conn::open(&socket);
     for id in [child, loose] {
         conn.send(&Request::Close {
@@ -217,8 +218,8 @@ fn agents_nest_report_status_and_clean_up() {
             remove_worktree: false,
         });
     }
-    wait_for("child agent to die", Duration::from_secs(10), || !alive(child_pid));
     assert!(ls(&bin, &socket).is_empty());
     drop(daemon);
+    wait_for("child agent to die with ftmd", Duration::from_secs(1), || !alive(child_pid));
     let _ = std::fs::remove_dir_all(&root);
 }

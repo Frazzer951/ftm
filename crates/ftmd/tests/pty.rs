@@ -1,5 +1,6 @@
 mod common;
 
+use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use common::{Conn, alive, git, start_daemon, temp_root, wait_for, wait_for_output, wait_until};
 use ftm_core::model::{Kind, Layout, SplitDir};
 use ftm_core::protocol::{Event, Request, Response, SpawnRequest};
@@ -43,6 +44,19 @@ fn pty_streams_and_accepts_input() {
         }),
         Response::Ok
     ));
+
+    // Capture renders the screen plus scrollback as text; raw returns the output bytes.
+    req.type_in(pane, "seq 1 60 | sed 's/^/n/'; echo end-$((1+1))\n");
+    wait_for_output(&mut events, pane, "end-2");
+    let mut capture = |raw| match req.send(&Request::Capture { pane, raw }) {
+        Response::Output { data } => String::from_utf8(B64.decode(data).unwrap()).unwrap(),
+        r => panic!("{r:?}"),
+    };
+    let text = capture(false);
+    assert!(text.lines().any(|l| l == "n1"), "scrollback lost: {text}");
+    assert!(text.lines().any(|l| l == "n60") && text.contains("end-2"));
+    assert!(!text.contains('\x1b') && !text.contains('\r'));
+    assert!(capture(true).contains("n60\r\n"));
 
     // A late subscriber gets the buffered output replayed.
     let mut late = Conn::open(&daemon.socket);

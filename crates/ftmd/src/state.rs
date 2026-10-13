@@ -8,13 +8,14 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
 pub type Shared = Arc<Mutex<State>>;
 
 const BUFFER_CAP: usize = 1 << 20;
+const SCROLLBACK: usize = 10_000;
 /// Trimming only once the buffer is this far over the cap keeps the per-read cost amortized.
 const BUFFER_SLACK: usize = 256 << 10;
 
@@ -31,6 +32,8 @@ struct Pane {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     child: Box<dyn Child + Send + Sync>,
     buffer: Vec<u8>,
+    /// Headless emulator fed the same output, so the current screen and scrollback can be read back as text.
+    screen: vt100::Parser,
 }
 
 /// What the first command in a pane runs before handing over to a login shell.
@@ -65,6 +68,10 @@ impl State {
 
     fn pane(&self, id: PaneId) -> Result<&Pane> {
         self.panes.get(&id).ok_or_else(|| eyre!("no pane {id}"))
+    }
+
+    fn pane_mut(&mut self, id: PaneId) -> Result<&mut Pane> {
+        self.panes.get_mut(&id).ok_or_else(|| eyre!("no pane {id}"))
     }
 
     /// Drops `pane` from its tab's layout, and the tab itself once it has no panes left.
@@ -135,6 +142,7 @@ impl State {
                 writer: Arc::new(Mutex::new(writer)),
                 child,
                 buffer: Vec::new(),
+                screen: vt100::Parser::new(24, 80, SCROLLBACK),
             },
         );
         let shared = shared.clone();
@@ -185,6 +193,7 @@ fn read_loop(shared: Shared, id: PaneId, mut reader: Box<dyn Read + Send>) {
         // A closed pane keeps being drained until its processes are gone, so none of them block writing to the tty.
         let Some(pane) = state.panes.get_mut(&id) else { continue };
         pane.buffer.extend_from_slice(&buf[..n]);
+        pane.screen.process(&buf[..n]);
         if pane.buffer.len() > BUFFER_CAP + BUFFER_SLACK {
             let excess = pane.buffer.len() - BUFFER_CAP;
             pane.buffer.drain(..excess);
@@ -210,9 +219,17 @@ fn close_pane(shared: &Shared, id: PaneId) {
     reap(pane);
 }
 
+/// Terminations still running; `shutdown` waits for them so exiting never abandons a half-killed agent.
+static REAPING: (Mutex<usize>, Condvar) = (Mutex::new(0), Condvar::new());
+
 /// Killing waits on the child, so it runs off the lock and off the request path.
 fn reap(pane: Pane) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || terminate(pane))
+    *REAPING.0.lock().unwrap_or_else(PoisonError::into_inner) += 1;
+    std::thread::spawn(move || {
+        terminate(pane);
+        *REAPING.0.lock().unwrap_or_else(PoisonError::into_inner) -= 1;
+        REAPING.1.notify_all();
+    })
 }
 
 /// Hangs up the shell's process group and the terminal's foreground group, then SIGKILLs whatever is left. An agent
@@ -249,12 +266,18 @@ fn signal_groups(groups: &[libc::pid_t], signal: libc::c_int) {
     }
 }
 
-/// Terminates every pane before ftmd exits. Their processes would get SIGHUP from the closing ttys anyway, but an
+/// Terminates every pane, and waits for terminations already under way, before ftmd exits. Their processes would get SIGHUP from the closing ttys anyway, but an
 /// agent ignores that.
 pub fn shutdown(shared: &Shared) {
     let panes: Vec<Pane> = lock(shared).panes.drain().map(|(_, pane)| pane).collect();
-    let reaping: Vec<_> = panes.into_iter().map(reap).collect();
-    reaping.into_iter().for_each(|h| drop(h.join()));
+    panes.into_iter().for_each(|pane| drop(reap(pane)));
+    let count = REAPING.0.lock().unwrap_or_else(PoisonError::into_inner);
+    drop(
+        REAPING
+            .1
+            .wait_while(count, |n| *n > 0)
+            .unwrap_or_else(PoisonError::into_inner),
+    );
 }
 
 /// Snapshot taken under the lock, so replaying it and then reading `rx` neither drops nor repeats output.
@@ -270,6 +293,24 @@ pub fn subscribe(shared: &Shared) -> (broadcast::Receiver<Event>, Vec<Event>) {
         reset: true,
     }));
     (rx, replay)
+}
+
+/// Scrollback lines oldest first, then the visible screen, with trailing blanks trimmed.
+fn screen_text(parser: &mut vt100::Parser) -> String {
+    let screen = parser.screen_mut();
+    let cols = screen.size().1;
+    screen.set_scrollback(usize::MAX);
+    let mut lines = Vec::new();
+    for offset in (1..=screen.scrollback()).rev() {
+        screen.set_scrollback(offset);
+        lines.extend(screen.rows(0, cols).next());
+    }
+    screen.set_scrollback(0);
+    lines.extend(screen.rows(0, cols));
+    let mut text = lines.iter().map(|l| l.trim_end()).collect::<Vec<_>>().join("\n");
+    text.truncate(text.trim_end().len());
+    text.push('\n');
+    text
 }
 
 pub fn handle(shared: &Shared, request: Request) -> Response {
@@ -296,22 +337,8 @@ pub fn handle(shared: &Shared, request: Request) -> Response {
             Ok(Response::Ok)
         },
         Request::Input { pane, data } => input(shared, pane, &data),
-        Request::Capture { pane } => lock(shared).pane(pane).map(|p| Response::Output {
-            data: B64.encode(&p.buffer),
-        }),
-        Request::Resize { pane, cols, rows } => lock(shared)
-            .pane(pane)
-            .and_then(|p| {
-                p.master
-                    .resize(PtySize {
-                        rows,
-                        cols,
-                        pixel_width: 0,
-                        pixel_height: 0,
-                    })
-                    .map_err(|e| eyre!("resizing: {e}"))
-            })
-            .map(|()| Response::Ok),
+        Request::Capture { pane, raw } => capture(shared, pane, raw),
+        Request::Resize { pane, cols, rows } => resize(shared, pane, cols, rows),
         Request::Subscribe => Err(eyre!("subscribe is handled by the connection")),
     };
     result.unwrap_or_else(|e| Response::Error {
@@ -437,6 +464,32 @@ fn split(shared: &Shared, target: PaneId, dir: SplitDir) -> Result<Response> {
     }
     state.emit_workspaces();
     Ok(Response::Pane { pane })
+}
+
+fn capture(shared: &Shared, pane: PaneId, raw: bool) -> Result<Response> {
+    let mut state = lock(shared);
+    let pane = state.pane_mut(pane)?;
+    let data = if raw {
+        B64.encode(&pane.buffer)
+    } else {
+        B64.encode(screen_text(&mut pane.screen))
+    };
+    Ok(Response::Output { data })
+}
+
+fn resize(shared: &Shared, pane: PaneId, cols: u16, rows: u16) -> Result<Response> {
+    let mut state = lock(shared);
+    let pane = state.pane_mut(pane)?;
+    pane.screen.screen_mut().set_size(rows, cols);
+    pane.master
+        .resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| eyre!("resizing: {e}"))?;
+    Ok(Response::Ok)
 }
 
 fn input(shared: &Shared, pane: PaneId, data: &str) -> Result<Response> {
