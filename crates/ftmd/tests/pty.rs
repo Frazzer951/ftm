@@ -21,12 +21,13 @@ impl Drop for Daemon {
 }
 
 /// macOS caps socket paths at ~104 bytes, so this stays in /tmp rather than the (long) per-user temp dir.
-fn start_daemon() -> Daemon {
-    let socket = PathBuf::from(format!("/tmp/ftmd-test-{}.sock", std::process::id()));
+fn start_daemon(name: &str, data_home: &Path) -> Daemon {
+    let socket = PathBuf::from(format!("/tmp/ftmd-{}-{name}.sock", std::process::id()));
     let _ = std::fs::remove_file(&socket);
     let child = Command::new(env!("CARGO_BIN_EXE_ftmd"))
         .env("FTM_SOCKET", &socket)
         .env("SHELL", "/bin/sh")
+        .env("XDG_DATA_HOME", data_home)
         .spawn()
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -110,9 +111,9 @@ fn wait_until(conn: &mut Conn, what: &str, ok: impl Fn(&[Workspace]) -> bool) {
 
 #[test]
 fn pty_streams_and_accepts_input() {
-    let daemon = start_daemon();
-    let mut req = Conn::open(&daemon.socket);
     let dir = std::env::temp_dir().canonicalize().unwrap();
+    let daemon = start_daemon("pty", &dir);
+    let mut req = Conn::open(&daemon.socket);
 
     let Response::Spawned { workspace } = req.send(&Request::Spawn(SpawnRequest {
         kind: Kind::Terminal,
@@ -174,4 +175,73 @@ fn pty_streams_and_accepts_input() {
         remove_worktree: false,
     });
     assert!(req.list().is_empty());
+}
+
+fn git(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn alive(pid: i32) -> bool {
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// An agent runs as the foreground job of an interactive shell, in its own process group, and Claude Code ignores
+/// SIGHUP. Closing with `remove_worktree` must still stop it before deleting the worktree, then drop the merged branch
+/// and the empty `prefix/` directory.
+#[test]
+fn close_kills_foreground_job_and_removes_worktree() {
+    let root = std::env::temp_dir()
+        .canonicalize()
+        .unwrap()
+        .join(format!("ftmd-wt-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("f"), "a").unwrap();
+    git(&repo, &["add", "f"]);
+    git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"]);
+
+    let daemon = start_daemon("wt", &root.join("data"));
+    let mut req = Conn::open(&daemon.socket);
+    let Response::Spawned { workspace } = req.send(&Request::Spawn(SpawnRequest {
+        kind: Kind::Terminal,
+        name: None,
+        parent: None,
+        cwd: repo.clone(),
+        worktree_branch: Some("chore/wt".into()),
+        base: None,
+        copy_changes: false,
+        brief: None,
+    })) else {
+        panic!("expected spawned")
+    };
+    let wt = workspace.cwd.clone();
+    assert_eq!(wt, root.join("data/ftm/worktrees/repo/chore/wt"));
+    let Layout::Pane { id: pane } = workspace.tabs[0].layout else {
+        panic!("expected one pane")
+    };
+
+    let mut events = Conn::open(&daemon.socket);
+    events.send(&Request::Subscribe);
+    req.type_in(pane, "sh -c 'trap \"\" HUP; echo PID=$$.; exec sleep 600'\n");
+    let out = wait_for_output(&mut events, pane, ".\r\n");
+    let pid: i32 = out.split("PID=").last().unwrap().split('.').next().unwrap().parse().unwrap();
+    assert!(alive(pid));
+
+    req.send(&Request::Close {
+        id: workspace.id,
+        remove_worktree: true,
+    });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while alive(pid) {
+        assert!(Instant::now() < deadline, "foreground job {pid} survived close");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!wt.exists());
+    assert!(!root.join("data/ftm/worktrees/repo/chore").exists());
+    assert!(git(&repo, &["branch", "--list", "chore/wt"]).is_empty());
+    let _ = std::fs::remove_dir_all(&root);
 }

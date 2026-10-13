@@ -128,6 +128,21 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn remove(repo: &Path, path: &Path) -> Result<()> {
-    git(repo, &["worktree", "remove", &path.to_string_lossy()]).map(|_| ())
+/// Removes the worktree (never forced), then deletes its branch only if it is merged, and prunes the empty
+/// directories a `prefix/name` branch left under the worktrees dir.
+pub fn remove(repo: &Path, path: &Path, branch: &str) -> Result<()> {
+    git(repo, &["worktree", "remove", &path.to_string_lossy()])?;
+    if let Err(e) = git(repo, &["branch", "-d", branch]) {
+        tracing::info!("keeping branch {branch}: {e:#}");
+    }
+    let root = paths::worktrees_dir();
+    let mut dir = path.parent();
+    while let Some(d) = dir
+        && d.starts_with(&root)
+        && d != root
+        && std::fs::remove_dir(d).is_ok()
+    {
+        dir = d.parent();
+    }
+    Ok(())
 }

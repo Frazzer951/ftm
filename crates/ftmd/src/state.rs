@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
 pub type Shared = Arc<Mutex<State>>;
@@ -179,7 +180,8 @@ fn read_loop(shared: Shared, id: PaneId, mut reader: Box<dyn Read + Send>) {
             Err(_) => break,
         };
         let mut state = lock(&shared);
-        let Some(pane) = state.panes.get_mut(&id) else { return };
+        // A closed pane keeps being drained until its processes are gone, so none of them block writing to the tty.
+        let Some(pane) = state.panes.get_mut(&id) else { continue };
         pane.buffer.extend_from_slice(&buf[..n]);
         if pane.buffer.len() > BUFFER_CAP + BUFFER_SLACK {
             let excess = pane.buffer.len() - BUFFER_CAP;
@@ -207,12 +209,42 @@ fn close_pane(shared: &Shared, id: PaneId) {
 }
 
 /// Killing waits on the child, so it runs off the lock and off the request path.
-fn reap(mut pane: Pane) {
-    std::thread::spawn(move || {
-        let _ = pane.child.kill();
-        let _ = pane.child.wait();
-        drop(pane.master);
-    });
+fn reap(pane: Pane) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || terminate(pane))
+}
+
+/// Hangs up the shell's process group and the terminal's foreground group, then SIGKILLs whatever is left. An agent
+/// started by an interactive shell runs in its own group, so signalling the shell alone (portable-pty's `kill`) leaves
+/// it running.
+fn terminate(mut pane: Pane) {
+    let mut groups: Vec<libc::pid_t> = pane.child.process_id().map(|pid| pid as libc::pid_t).into_iter().collect();
+    if let Some(fg) = pane.master.process_group_leader()
+        && fg > 0
+        && !groups.contains(&fg)
+    {
+        groups.push(fg);
+    }
+    signal_groups(&groups, libc::SIGHUP);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let _ = pane.child.try_wait();
+        if !groups.iter().any(|&g| unsafe { libc::kill(-g, 0) } == 0) {
+            break;
+        }
+        if Instant::now() > deadline {
+            signal_groups(&groups, libc::SIGKILL);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = pane.child.wait();
+    drop(pane.master);
+}
+
+fn signal_groups(groups: &[libc::pid_t], signal: libc::c_int) {
+    for &group in groups {
+        unsafe { libc::kill(-group, signal) };
+    }
 }
 
 /// Snapshot taken under the lock, so replaying it and then reading `rx` neither drops nor repeats output.
@@ -360,9 +392,11 @@ fn close(shared: &Shared, id: WorkspaceId, remove_worktree: bool) -> Result<Resp
         state.emit_workspaces();
         (ws, panes)
     };
-    panes.into_iter().for_each(reap);
+    let reaping: Vec<_> = panes.into_iter().map(reap).collect();
     if remove_worktree && let Some(wt) = &ws.worktree {
-        worktree::remove(&wt.repo, &ws.cwd)?;
+        // Nothing may still be running in the worktree when it is deleted.
+        reaping.into_iter().for_each(|h| drop(h.join()));
+        worktree::remove(&wt.repo, &ws.cwd, &wt.branch)?;
     }
     Ok(Response::Ok)
 }

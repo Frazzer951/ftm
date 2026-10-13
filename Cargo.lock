@@ -1003,6 +1003,7 @@ dependencies = [
  "eyre",
  "ftm-core",
  "glob",
+ "libc",
  "portable-pty",
  "serde",
  "serde_json",
