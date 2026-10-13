@@ -7,8 +7,12 @@ repository.workspace = true
 version.workspace = true
 
 [dependencies]
+base64 = "0.23.1"
 eyre = "0.6.14"
 ftm-core = { version = "0.1.0", path = "../ftm-core" }
+glob = "0.3.4"
+portable-pty = "0.9.0"
+serde = "1.0.229"
 serde_json = "1.0.154"
 tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "signal", "fs"] }
 tracing = "0.1.44"

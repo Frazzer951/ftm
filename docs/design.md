@@ -27,6 +27,9 @@ Every PTY the daemon starts gets:
 | `FTM_SOCKET` | daemon socket path |
 | `FTM_WORKSPACE_ID` | the workspace this pane belongs to |
 | `FTM_PANE_ID` | the pane itself |
+| `FTM_NAME` | the workspace name (`claude -n`) |
+
+Inherited `CLAUDECODE`, `CLAUDE_CODE_*` and `SUPACODE_*` are stripped, so an agent started from inside another agent is not treated as nested Claude Code. Panes run `$SHELL -l`; an agent's first pane runs `$SHELL -l -i -c '<setup; >claude -n "$FTM_NAME" ${FTM_BRIEF:+"$FTM_BRIEF"}; exec "$SHELL" -l'`, with the brief passed in the environment rather than interpolated. Each pane keeps the last 1 MiB of raw output; `Subscribe` replays it, then streams live.
 
 `ftm spawn` run inside a workspace defaults `--parent` to `$FTM_WORKSPACE_ID`. That is the whole leader/worker mechanism: no registration step, no config.
 

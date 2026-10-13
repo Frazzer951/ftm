@@ -18,3 +18,10 @@ pub fn config_dir() -> PathBuf {
 pub fn repo_config_path(repo_name: &str) -> PathBuf {
     config_dir().join("repos").join(format!("{repo_name}.toml"))
 }
+
+pub fn worktrees_dir() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("ftm")
+        .join("worktrees")
+}
