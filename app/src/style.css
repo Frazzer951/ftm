@@ -82,3 +82,23 @@ dialog input[type="number"] { width: 100%; background: #16181d; color: inherit; 
 #recent .recent { text-align: left; background: none; border: 1px solid transparent; padding: 3px 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #c4c9d2; }
 #recent .recent:hover { background: #2b3140; }
 #recent .recent.chosen { border-color: #3d5a8a; background: #23293a; }
+dialog#settings { width: 460px; }
+.field { display: flex; flex-direction: column; gap: 4px; }
+.field > span { font-size: 12px; color: #a3aab7; }
+.font-picker { display: flex; flex-direction: column; gap: 6px; }
+.font-picker .row { justify-content: space-between; }
+#font-search { flex: 1; background: #16181d; color: inherit; border: 1px solid #3a3f4a; border-radius: 4px; padding: 4px 6px; }
+label.inline { display: flex; gap: 4px; align-items: center; white-space: nowrap; font-size: 12px; }
+#font-list { height: 200px; overflow-y: auto; border: 1px solid #3a3f4a; border-radius: 4px; background: #16181d; display: flex; flex-direction: column; }
+#font-list button { text-align: left; background: none; border: none; border-radius: 0; padding: 5px 8px; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: none; }
+#font-list button:hover { background: #23293a; }
+#font-list button.chosen { background: #2b3a57; }
+#font-list button.custom { font-family: inherit; color: #a3aab7; border-bottom: 1px solid #2a2e37; }
+#font-list .group { padding: 6px 8px 2px; font-size: 10px; letter-spacing: 0.05em; text-transform: uppercase; color: #7f8796; }
+#font-custom { width: 100%; background: #16181d; color: inherit; border: 1px solid #3a3f4a; border-radius: 4px; padding: 4px; }
+.stepper { display: flex; gap: 4px; align-items: center; }
+.stepper button { width: 28px; }
+.stepper input { width: 70px !important; text-align: center; }
+input[type="range"] { flex: 1; }
+#line-height-value { width: 36px; text-align: right; font-variant-numeric: tabular-nums; }
+#font-preview { padding: 8px 10px; border: 1px solid #3a3f4a; border-radius: 4px; background: #16181d; white-space: nowrap; overflow: hidden; }

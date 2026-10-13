@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod daemon;
+mod fonts;
 
 use ftm_core::config::Settings;
 use ftm_core::paths;
@@ -105,6 +106,19 @@ fn git_info(path: String) -> Option<GitInfo> {
     })
 }
 
+/// Enumerated once per app run, off the main thread.
+#[tauri::command]
+async fn list_fonts() -> Vec<fonts::FontFamily> {
+    static FONTS: std::sync::OnceLock<Vec<fonts::FontFamily>> = std::sync::OnceLock::new();
+    if let Some(cached) = FONTS.get() {
+        return cached.clone();
+    }
+    let listed = tauri::async_runtime::spawn_blocking(fonts::families)
+        .await
+        .unwrap_or_default();
+    FONTS.get_or_init(|| listed).clone()
+}
+
 #[tauri::command]
 fn get_settings() -> Result<Settings, String> {
     Settings::load(&paths::settings_path()).map_err(|e| e.to_string())
@@ -207,6 +221,7 @@ fn main() {
             git_info,
             get_settings,
             save_settings,
+            list_fonts,
             log,
             ensure_on_screen
         ])

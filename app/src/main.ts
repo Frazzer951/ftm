@@ -187,29 +187,136 @@ function fontInstalled(family: string): boolean {
   });
 }
 
+interface FontFamily {
+  name: string;
+  monospace: boolean;
+}
+
+let fontList: Promise<FontFamily[]> | null = null;
+
+/// A searchable list of installed families (monospace first, the rest behind "Show all fonts"), each drawn in its own
+/// font, with "Custom…" for a CSS font stack, and a preview line that shows ligatures on or off.
 function setupSettingsDialog() {
   const dialog = $<HTMLDialogElement>("settings");
   const form = $<HTMLFormElement>("settings-form");
   const field = (name: string) => form.elements.namedItem(name) as HTMLInputElement;
-  const hint = () => {
-    const family = field("font_family").value.trim();
-    const bare = family && !/[,"']/.test(family);
-    $("font-hint").textContent = bare && !fontInstalled(family) ? `"${family}" does not look installed; a fallback will be used.` : "";
+  const custom = $<HTMLInputElement>("font-custom");
+  const search = $<HTMLInputElement>("font-search");
+  const showAll = $<HTMLInputElement>("font-all");
+  let fonts: FontFamily[] = [];
+  let family = settings.font_family;
+  let customMode = false;
+
+  const isStack = (f: string) => /[,"']/.test(f);
+  const chosen = () => (customMode ? custom.value.trim() : family);
+
+  const preview = () => {
+    const p = $("font-preview");
+    p.style.fontFamily = cssFamily(chosen() || settings.font_family);
+    p.style.fontSize = `${Number(field("font_size").value) || settings.font_size}px`;
+    p.style.lineHeight = String(Number(field("line_height").value) || 1);
+    p.style.fontVariantLigatures = field("ligatures").checked ? "normal" : "none";
+    p.style.fontFeatureSettings = field("ligatures").checked ? '"calt" 1, "liga" 1' : '"calt" 0, "liga" 0';
+    $("line-height-value").textContent = Number(field("line_height").value).toFixed(2);
+    const f = chosen();
+    $("font-hint").textContent = f && !isStack(f) && !fontInstalled(f) ? `"${f}" does not look installed; a fallback will be used.` : "";
   };
-  field("font_family").oninput = hint;
+
+  const renderList = () => {
+    const query = search.value.trim().toLowerCase();
+    const matches = fonts.filter((f) => !query || f.name.toLowerCase().includes(query));
+    const mono = matches.filter((f) => f.monospace);
+    const rest = showAll.checked || query ? matches.filter((f) => !f.monospace) : [];
+    const option = (f: FontFamily) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = f.name;
+      b.title = f.name;
+      b.style.fontFamily = `"${f.name}", monospace`;
+      b.className = !customMode && f.name === family ? "chosen" : "";
+      b.onclick = () => {
+        customMode = false;
+        family = f.name;
+        custom.hidden = true;
+        renderList();
+        preview();
+      };
+      return b;
+    };
+    const group = (label: string) => {
+      const g = document.createElement("div");
+      g.className = "group";
+      g.textContent = label;
+      return g;
+    };
+    const customOption = document.createElement("button");
+    customOption.type = "button";
+    customOption.className = "custom" + (customMode ? " chosen" : "");
+    customOption.textContent = "Custom… (a CSS font stack)";
+    customOption.onclick = () => {
+      customMode = true;
+      custom.hidden = false;
+      if (!custom.value) custom.value = family;
+      custom.focus();
+      renderList();
+      preview();
+    };
+    const items: HTMLElement[] = [customOption];
+    if (mono.length) items.push(group("Monospace"), ...mono.map(option));
+    if (rest.length) items.push(group("Other fonts"), ...rest.map(option));
+    if (!mono.length && !rest.length) {
+      const none = document.createElement("p");
+      none.className = "hint";
+      none.textContent = fonts.length ? "No matching fonts" : "No fonts found";
+      items.push(none);
+    }
+    $("font-list").replaceChildren(...items);
+    $("font-list").querySelector(".chosen:not(.custom)")?.scrollIntoView({ block: "nearest" });
+  };
+
+  search.oninput = renderList;
+  showAll.onchange = renderList;
+  custom.oninput = preview;
+  for (const name of ["font_size", "line_height", "ligatures"]) field(name).addEventListener("input", preview);
+  form.querySelectorAll<HTMLButtonElement>(".stepper button").forEach((b) => {
+    b.onclick = () => {
+      const input = field("font_size");
+      const next = (Number(input.value) || settings.font_size) + Number(b.dataset.step);
+      input.value = String(Math.min(Number(input.max), Math.max(Number(input.min), next)));
+      preview();
+    };
+  });
+
   $("open-settings").onclick = () => {
-    field("font_family").value = settings.font_family;
+    family = settings.font_family;
+    customMode = isStack(family);
+    custom.hidden = !customMode;
+    custom.value = customMode ? family : "";
+    search.value = "";
     field("font_size").value = String(settings.font_size);
     field("line_height").value = String(settings.line_height);
     field("ligatures").checked = settings.ligatures;
     $("settings-error").textContent = "";
-    hint();
+    preview();
     dialog.showModal();
+    fontList ??= invoke<FontFamily[]>("list_fonts");
+    fontList
+      .then((list) => {
+        fonts = list;
+        // A saved family that is not monospace (or not found) would otherwise be hidden.
+        if (!customMode && !list.some((f) => f.name === family && f.monospace)) showAll.checked = true;
+        renderList();
+      })
+      .catch((err) => {
+        console.error("listing fonts", err);
+        $("font-list").textContent = "Could not list fonts; use Custom…";
+      });
   };
+
   $("save-settings").onclick = async (e) => {
     e.preventDefault();
     const next: TerminalSettings = {
-      font_family: field("font_family").value.trim() || settings.font_family,
+      font_family: chosen() || settings.font_family,
       font_size: Number(field("font_size").value) || settings.font_size,
       line_height: Number(field("line_height").value) || settings.line_height,
       ligatures: field("ligatures").checked,
