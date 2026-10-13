@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FTM</title>
+  </head>
+  <body>
+    <aside id="sidebar">
+      <header><span>Workspaces</span><button id="add" title="New workspace">+</button></header>
+      <ul id="workspaces"></ul>
+    </aside>
+    <main>
+      <nav id="tabs"></nav>
+      <section id="panes"></section>
+    </main>
+    <div id="parking"></div>
+    <dialog id="spawn">
+      <form method="dialog" id="spawn-form">
+        <h3>New workspace</h3>
+        <label><input type="radio" name="kind" value="terminal" checked /> Terminal</label>
+        <label><input type="radio" name="kind" value="agent" /> Agent</label>
+        <div class="row"><button type="button" id="pick">Folder…</button><span id="folder">none</span></div>
+        <label>Name <input name="name" placeholder="defaults to folder or branch" /></label>
+        <fieldset id="git" hidden>
+          <label><input type="checkbox" name="worktree" /> New worktree</label>
+          <label>Branch <input name="branch" /></label>
+          <label>Base <input name="base" placeholder="repo default" /></label>
+          <label><input type="checkbox" name="copy" /> Copy my changes</label>
+        </fieldset>
+        <p id="spawn-error"></p>
+        <div class="row">
+          <button value="cancel" formnovalidate>Cancel</button>
+          <button id="create" value="create">Create</button>
+        </div>
+      </form>
+    </dialog>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

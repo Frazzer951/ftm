@@ -19,9 +19,12 @@ pub fn repo_config_path(repo_name: &str) -> PathBuf {
     config_dir().join("repos").join(format!("{repo_name}.toml"))
 }
 
+/// `$XDG_DATA_HOME/ftm/worktrees`, else `~/.local/share/ftm/worktrees` on both platforms; macOS's own data dir has a
+/// space in it, which trips up shell scripts run inside worktrees.
 pub fn worktrees_dir() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(std::env::temp_dir)
+    std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".local").join("share"))
         .join("ftm")
         .join("worktrees")
 }

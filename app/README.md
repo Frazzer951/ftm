@@ -1,3 +1,20 @@
 # app
 
-Desktop UI: Tauri v2 + xterm.js. Not started; see [../docs/design.md](../docs/design.md#ui).
+Desktop UI: Tauri v2 + xterm.js. The frontend is vanilla TypeScript (`src/`); the Rust side (`src-tauri/`) is a workspace
+member, so the binary lands in `target/` next to `ftmd`.
+
+```sh
+npm install
+npm run tauri dev      # builds ftmd + ftm, starts Vite, launches the window
+```
+
+On launch the app connects to `ftmd`, starting it (from next to the app binary, else `$PATH`) if the socket does not
+answer. The daemon is detached in its own process group and logs to `ftmd.log` next to the socket, so panes survive the
+app quitting. Set `FTM_SOCKET=/tmp/ftm-dev.sock` to run against a separate daemon.
+
+| Shortcut | macOS | Linux |
+|---|---|---|
+| New tab | Cmd+T | Ctrl+Shift+T |
+| Split right | Cmd+D | Ctrl+Shift+D |
+| Split down | Cmd+Shift+D | Ctrl+Shift+E |
+| Close pane | Cmd+W | Ctrl+Shift+W |

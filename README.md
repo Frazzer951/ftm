@@ -9,9 +9,9 @@ See [docs/design.md](docs/design.md) for the design.
 | Path | What |
 |---|---|
 | `crates/ftm-core` | Shared model, socket protocol, paths, repo config |
-| `crates/ftmd` | Daemon: owns workspaces (and later PTYs and worktrees) |
+| `crates/ftmd` | Daemon: owns workspaces, PTYs and worktrees |
 | `crates/ftm` | CLI client |
-| `app/` | Desktop UI (Tauri v2 + xterm.js, not started) |
+| `app/` | Desktop UI (Tauri v2 + xterm.js), see [app/README.md](app/README.md) |
 
 ## Try it
 
