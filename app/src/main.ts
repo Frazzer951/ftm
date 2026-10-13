@@ -8,6 +8,7 @@ import { LigaturesAddon } from "@xterm/addon-ligatures";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
+import { chromeColors } from "./colors";
 import "./style.css";
 
 type Id = string;
@@ -107,7 +108,7 @@ function view(pane: Id): PaneView {
     fontSize: settings.font_size,
     lineHeight: settings.line_height,
     scrollback: 10000,
-    theme: { background: "#16181d" },
+    theme: xtermTheme,
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
@@ -127,6 +128,68 @@ function view(pane: Id): PaneView {
   views.set(pane, v);
   return v;
 }
+
+interface ThemeColors {
+  name: string;
+  background: string;
+  foreground: string;
+  cursor: string;
+  cursor_text: string;
+  selection_background: string;
+  selection_foreground: string | null;
+  palette: string[];
+}
+
+interface ThemeSettings {
+  name: string;
+  follow_system: boolean;
+  dark: string;
+  light: string;
+}
+
+let themeSettings: ThemeSettings = { name: "Supacode Dark", follow_system: false, dark: "Supacode Dark", light: "Supacode Light" };
+let themes: Promise<(ThemeColors & { source: string })[]> | null = null;
+const loadThemes = () => (themes ??= invoke<(ThemeColors & { source: string })[]>("list_themes"));
+let xtermTheme: Record<string, string> = { background: "#1e1e1e", foreground: "#ffffff" };
+
+const systemDark = window.matchMedia("(prefers-color-scheme: dark)");
+/// The theme name the settings call for right now, following the system appearance if asked to.
+const wantedTheme = (t: ThemeSettings) => (t.follow_system ? (systemDark.matches ? t.dark : t.light) : t.name);
+
+/// Terminal colors from the theme; the app's chrome derived from its background, foreground and palette.
+function applyTheme(t: ThemeColors) {
+  const p = t.palette;
+  xtermTheme = {
+    background: t.background,
+    foreground: t.foreground,
+    cursor: t.cursor,
+    cursorAccent: t.cursor_text,
+    selectionBackground: t.selection_background,
+    ...(t.selection_foreground ? { selectionForeground: t.selection_foreground } : {}),
+    black: p[0], red: p[1], green: p[2], yellow: p[3], blue: p[4], magenta: p[5], cyan: p[6], white: p[7],
+    brightBlack: p[8], brightRed: p[9], brightGreen: p[10], brightYellow: p[11],
+    brightBlue: p[12], brightMagenta: p[13], brightCyan: p[14], brightWhite: p[15],
+  };
+  for (const v of views.values()) v.term.options.theme = xtermTheme;
+
+  const { vars, dark } = chromeColors(t.background, t.foreground, p);
+  for (const [k, v] of Object.entries(vars)) document.documentElement.style.setProperty(k, v);
+  document.documentElement.style.colorScheme = dark ? "dark" : "light";
+}
+
+/// Applies the named theme, falling back to the default when it is missing (e.g. a removed user file).
+async function applyThemeNamed(name: string) {
+  const list = await loadThemes();
+  const theme =
+    list.find((t) => t.name.toLowerCase() === name.toLowerCase()) ??
+    list.find((t) => t.name === "Supacode Dark") ??
+    list[0];
+  if (theme) applyTheme(theme);
+}
+
+systemDark.addEventListener("change", () => {
+  if (themeSettings.follow_system) applyThemeNamed(wantedTheme(themeSettings)).catch(console.error);
+});
 
 interface TerminalSettings {
   font_family: string;
@@ -317,7 +380,7 @@ function setupSettingsDialog() {
       ligatures: field("ligatures").checked,
     };
     try {
-      await invoke("save_settings", { settings: { terminal: next } });
+      await invoke("save_settings", { settings: { terminal: next, theme: themeSettings } });
       settings = next;
       dialog.close();
       await applySettings();
@@ -975,9 +1038,11 @@ setInterval(() => refreshAllGit().catch(console.error), 10_000);
 new ResizeObserver(() => requestAnimationFrame(fitVisible)).observe($("panes"));
 setupSpawnDialog();
 setupSettingsDialog();
-invoke<{ terminal: TerminalSettings }>("get_settings")
+invoke<{ terminal: TerminalSettings; theme: ThemeSettings }>("get_settings")
   .then((loaded) => {
     settings = loaded.terminal;
+    themeSettings = loaded.theme;
+    applyThemeNamed(wantedTheme(themeSettings)).catch(console.error);
     return applySettings();
   })
   .catch(console.error);
