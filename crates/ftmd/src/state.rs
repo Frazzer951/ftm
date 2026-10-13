@@ -483,7 +483,7 @@ pub fn handle(shared: &Shared, request: Request) -> Response {
         Request::Spawn(req) => spawn(shared, req),
         Request::SetStatus { id, status } => {
             let mut state = lock(shared);
-            state.workspace_mut(id).map(|ws| ws.status = status).map(|()| {
+            state.workspace_mut(id).map(|ws| set_status(ws, status)).map(|()| {
                 state.emit_workspaces();
                 Response::Ok
             })
@@ -496,6 +496,18 @@ pub fn handle(shared: &Shared, request: Request) -> Response {
                 state.emit_workspaces();
                 Response::Ok
             })
+        },
+        Request::MarkSeen { id } => {
+            let mut state = lock(shared);
+            state
+                .workspace_mut(id)
+                .map(|ws| std::mem::replace(&mut ws.unseen, false))
+                .map(|was| {
+                    if was {
+                        state.emit_workspaces();
+                    }
+                    Response::Ok
+                })
         },
         Request::Folders => Ok(Response::Folders {
             folders: lock(shared).folders.clone(),
@@ -520,6 +532,15 @@ pub fn handle(shared: &Shared, request: Request) -> Response {
     result.unwrap_or_else(|e| Response::Error {
         message: format!("{e:#}"),
     })
+}
+
+fn set_status(ws: &mut Workspace, status: Status) {
+    if ws.status.completes(status) {
+        ws.unseen = true;
+    } else if matches!(status, Status::Starting | Status::Working | Status::NeedsInput) {
+        ws.unseen = false;
+    }
+    ws.status = status;
 }
 
 fn spawn(shared: &Shared, req: SpawnRequest) -> Result<Response> {
@@ -570,6 +591,7 @@ fn spawn(shared: &Shared, req: SpawnRequest) -> Result<Response> {
             cwd,
             worktree,
             status: Status::Starting,
+            unseen: false,
             tabs: Vec::new(),
         },
     );

@@ -23,6 +23,14 @@ pub enum Status {
     Done,
 }
 
+impl Status {
+    /// Moving from `self` to `next` ends a turn: the agent was busy or waiting and now is not. A session ending after
+    /// it was already idle does not count; that completion was already reported.
+    pub fn completes(self, next: Status) -> bool {
+        matches!(self, Status::Working | Status::NeedsInput) && matches!(next, Status::Idle | Status::Done)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Worktree {
     pub repo: PathBuf,
@@ -142,6 +150,10 @@ pub struct Workspace {
     pub cwd: PathBuf,
     pub worktree: Option<Worktree>,
     pub status: Status,
+    /// The agent finished a turn (or its session) since someone last looked at the workspace; cleared by `MarkSeen`
+    /// and when it starts working again.
+    #[serde(default)]
+    pub unseen: bool,
     pub tabs: Vec<Tab>,
 }
 
@@ -164,6 +176,13 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_ending_a_turn_completes() {
+        use Status::*;
+        assert!(Working.completes(Idle) && Working.completes(Done) && NeedsInput.completes(Idle));
+        assert!(!Idle.completes(Done) && !Starting.completes(Idle) && !Idle.completes(Idle) && !Working.completes(Working));
+    }
 
     #[test]
     fn split_then_remove_collapses() {

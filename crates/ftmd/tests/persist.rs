@@ -344,3 +344,37 @@ fn folders_and_pins_are_remembered() {
     req.send(&Request::RemoveFolder { path: a.clone() });
     assert_eq!(folders(&mut req), vec![b]);
 }
+
+#[test]
+fn finishing_a_turn_marks_the_workspace_unseen_until_looked_at() {
+    let dir = temp_root("unseen");
+    let mut daemon = start_daemon("unseen", |_| {});
+    let mut req = Conn::open(&daemon.socket);
+    let id = spawn_terminal(&mut req, &dir, "agent").id;
+    let set = |req: &mut Conn, status| {
+        assert!(matches!(req.send(&Request::SetStatus { id, status }), Response::Ok));
+        req.list().into_iter().find(|w| w.id == id).unwrap().unseen
+    };
+    assert!(!set(&mut req, Status::Idle), "starting to idle is not a finished turn");
+    assert!(!set(&mut req, Status::Working));
+    assert!(set(&mut req, Status::Idle));
+    assert!(set(&mut req, Status::Done), "stays unseen when the session then ends");
+    assert!(!set(&mut req, Status::Working), "working again clears it");
+    assert!(!set(&mut req, Status::NeedsInput));
+    assert!(set(&mut req, Status::Done));
+
+    daemon.restart();
+    let mut req = Conn::open(&daemon.socket);
+    assert!(
+        req.list().into_iter().find(|w| w.id == id).unwrap().unseen,
+        "unseen survives a restart"
+    );
+    assert!(matches!(req.send(&Request::MarkSeen { id }), Response::Ok));
+    assert!(!req.list().into_iter().find(|w| w.id == id).unwrap().unseen);
+    assert!(matches!(
+        req.try_send(&Request::MarkSeen {
+            id: WorkspaceId::new_v4()
+        }),
+        Some(Response::Error { .. })
+    ));
+}

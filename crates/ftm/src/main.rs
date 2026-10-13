@@ -224,7 +224,7 @@ fn print_tree(ws: &Workspace, all: &[Workspace], depth: usize) {
         None => ws.cwd.display().to_string(),
     };
     println!(
-        "{:indent$}{} {:?} {:?} {}  {}",
+        "{:indent$}{} {:?} {:?}{} {}  {}",
         "",
         match ws.display_name() {
             shown if shown != ws.name => format!("{shown} ({})", ws.name),
@@ -232,6 +232,7 @@ fn print_tree(ws: &Workspace, all: &[Workspace], depth: usize) {
         },
         ws.kind,
         ws.status,
+        if ws.unseen { " (unseen)" } else { "" },
         location,
         ws.id,
         indent = depth * 2

@@ -29,6 +29,10 @@ pub enum Request {
         id: WorkspaceId,
         pinned: bool,
     },
+    /// Clears the workspace's `unseen` flag: someone has looked at it.
+    MarkSeen {
+        id: WorkspaceId,
+    },
     /// Remembered folders, most recently used first, as `Response::Folders`.
     Folders,
     /// Forgets a folder; its workspaces are untouched.

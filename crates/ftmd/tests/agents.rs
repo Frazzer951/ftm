@@ -243,8 +243,9 @@ fn agents_nest_report_status_and_clean_up() {
             .output()
             .unwrap();
         assert!(ran.status.success() && ran.stdout.is_empty(), "{event} hook: {ran:?}");
-        let now = ls(&bin, &socket).into_iter().find(|w| w.id == leader).unwrap().status;
-        assert_eq!(now, status, "after {event}");
+        let now = ls(&bin, &socket).into_iter().find(|w| w.id == leader).unwrap();
+        assert_eq!(now.status, status, "after {event}");
+        assert_eq!(now.unseen, matches!(event, "Stop" | "SessionEnd"), "unseen after {event}");
     }
     let idle_prompt = settings["hooks"]["Notification"]
         .as_array()
