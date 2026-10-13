@@ -452,6 +452,7 @@ function setupSpawnDialog() {
   };
 }
 
+invoke("ensure_on_screen").catch(console.error);
 window.addEventListener("keydown", shortcut, true);
 new ResizeObserver(() => requestAnimationFrame(fitVisible)).observe($("panes"));
 setupSpawnDialog();
