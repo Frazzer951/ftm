@@ -48,7 +48,7 @@ async fn daemon() -> Result<()> {
     std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
     tracing::info!("listening on {}", socket.display());
 
-    let claude_settings = socket.parent().map(hooks::write).transpose().unwrap_or_else(|e| {
+    let claude_settings = hooks::write(&socket).map(Some).unwrap_or_else(|e| {
         tracing::warn!("agents start without status hooks: {e:#}");
         None
     });

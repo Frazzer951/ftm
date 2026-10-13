@@ -166,7 +166,7 @@ fn connect() -> Result<UnixStream, String> {
 fn launch() -> Result<(), String> {
     let sibling = std::env::current_exe().ok().and_then(|exe| Some(exe.parent()?.join("ftmd")));
     let binary = sibling.filter(|p| p.is_file()).unwrap_or_else(|| PathBuf::from("ftmd"));
-    let log_path = paths::socket_path().with_file_name("ftmd.log");
+    let log_path = paths::socket_path().with_extension("log");
     if let Some(dir) = log_path.parent() {
         paths::private_dir(dir, paths::socket_dir_is_ours(dir)).map_err(|e| e.to_string())?;
     }

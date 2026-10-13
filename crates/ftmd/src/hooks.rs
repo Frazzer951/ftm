@@ -58,8 +58,9 @@ pub fn ftm_binary() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("ftm"))
 }
 
-pub fn write(dir: &Path) -> Result<PathBuf> {
-    let path = dir.join("claude-settings.json");
+/// Writes the settings next to `socket`, named after it so daemons sharing a dir (installed and dev) keep their own.
+pub fn write(socket: &Path) -> Result<PathBuf> {
+    let path = socket.with_extension("claude-settings.json");
     let body = serde_json::to_vec_pretty(&settings(&ftm_binary()))?;
     std::fs::write(&path, body).wrap_err_with(|| format!("writing {}", path.display()))?;
     Ok(path)
