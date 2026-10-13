@@ -13,7 +13,18 @@ See [docs/design.md](docs/design.md) for the design.
 | `crates/ftm` | CLI client |
 | `app/` | Desktop UI (Tauri v2 + xterm.js), see [app/README.md](app/README.md) |
 
-## Try it
+## Run it
+
+```sh
+scripts/dev.sh
+```
+
+Builds everything, quits a running app, restarts ftmd on the new build (sessions survive: each pane lives in its own
+holder process) and runs the app with `tauri dev`. Ctrl+C stops the app; ftmd and your sessions keep running. Rerun it
+after pulling or changing code. Panes started by an older build keep running that build's holder until they close; see
+[PTY persistence](docs/design.md#pty-persistence).
+
+## Try the CLI
 
 ```sh
 cargo build

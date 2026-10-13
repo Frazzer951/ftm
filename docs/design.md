@@ -118,6 +118,8 @@ ftmd keeps its own copy of each pane's output and feeds it through a headless `v
 
 The app is just a client: quitting it changes nothing, and on launch it starts ftmd if needed, then restores its window geometry (`tauri-plugin-window-state`) and the selected workspace and tabs (`localStorage`).
 
+**Upgrading.** `scripts/dev.sh` (or any SIGTERM) restarts ftmd on new code without touching panes, but each holder keeps running the binary it was started from until its pane closes; new panes get the new holder. ftmd and holders agree on `frame::VERSION`: a change to the frames bumps it, and a newer ftmd then cannot reattach older holders (it logs `pane holder speaks version N`, drops those panes from the layout and leaves their processes running unattached), so close panes before upgrading across a version bump. The frame protocol is still version 1. An ftmd from before holders existed owns its PTYs directly, so stopping it ends its panes; `dev.sh` detects that (panes without holder sockets) and asks first.
+
 ## Milestones
 
 1. **Daemon + CLI**: workspace tree, parent from env, status, tree saved to disk.
