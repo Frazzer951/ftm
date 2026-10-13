@@ -8,6 +8,7 @@ Frazzer's Terminal Manager: a standalone terminal workspace manager for running 
 - **Parent**: a workspace may have a parent. Agents spawned by a leader agent appear nested under it. Nesting depth is unbounded.
 - **Tab / pane**: each workspace holds tabs; each tab is a split tree of panes; each pane is one PTY.
 - **Status**: `starting | working | needs_input | idle | done`, driven by Claude Code hooks for agents.
+- **Unseen**: a flag on the workspace, set when an agent finishes a turn (working or needs_input to idle or done) and cleared when it works again or the app shows it (`MarkSeen`). It lives in ftmd and is saved with the tree, so it survives app restarts and every client agrees.
 
 ## Architecture
 
@@ -93,9 +94,31 @@ ftmd writes hook settings to `claude-settings.json` next to its socket and start
 | `Stop`, `StopFailure` | `idle` |
 | `SessionEnd` | `done` (best effort: a killed session may not send it) |
 
-The 60s `idle_prompt` notification is deliberately not mapped, so a finished agent never turns red. `PostToolUse` rather than `PreToolUse` marks work so it cannot race the `AskUserQuestion` hook, and it clears `needs_input` once a prompt is answered. In the app, agent rows show a dot (starting blue, working green, needs input red, idle grey, done hollow grey; CSS variables `--status-*`); terminals show none.
+The 60s `idle_prompt` notification is deliberately not mapped, so a finished agent never turns red. `PostToolUse` rather than `PreToolUse` marks work so it cannot race the `AskUserQuestion` hook, and it clears `needs_input` once a prompt is answered. In the app, agent rows show a dot (starting blue, working green, needs input red, idle grey, done hollow grey, finished but unseen yellow; CSS variables `--status-*`, taken from the theme's palette and nudged until they read against the sidebar); terminals show none. `ftm ls` marks unseen workspaces `(unseen)`.
 
-`needs_input` also raises a desktop notification (agent name, "needs input") and badges every ancestor row with the count of agents below it that need input. Agents are started with `claude -n <name> "<brief>"`, so `SendMessage` between leader and workers keeps working as today. `sonarx:spawn-repo-agent` and `sonarx:agent-shutdown` switch from `supacode ...` to `ftm spawn` / `ftm close`.
+`needs_input` also raises a desktop notification (agent name, "needs input"), plays the needs-input sound, and badges every ancestor row with the count of agents below it that need input. A workspace turning unseen plays the finished sound, unless it is the selected workspace and the window has focus: then the app marks it seen at once and stays quiet. Selecting an unseen workspace (or focusing the window on one) marks it seen. A session ending after the agent was already idle does not count as finishing again. Agents are started with `claude -n <name> "<brief>"`, so `SendMessage` between leader and workers keeps working as today. `sonarx:spawn-repo-agent` and `sonarx:agent-shutdown` switch from `supacode ...` to `ftm spawn` / `ftm close`.
+
+## Settings
+
+The app's settings live in `~/.config/ftm/config.toml` (`$XDG_CONFIG_HOME/ftm/...` when set) and are edited from the sidebar's ⚙; Save rewrites only the keys the app owns, Cancel reverts any live preview.
+
+```toml
+[terminal]
+font_family = "Menlo"
+font_size = 13
+ligatures = false
+line_height = 1.0
+
+[theme]
+name = "Supacode Dark"   # or follow_system = true with dark/light
+
+[sounds]
+needs_input = "Nudge"    # a name from the sound list; "" plays nothing
+completed = "Chime"
+volume = 0.7             # 0 to 1
+```
+
+Themes are Ghostty theme files: built in, in `~/.config/ftm/themes`, or found in Ghostty's and Supacode's theme folders. Sounds come from the app's built-ins (`app/src-tauri/sounds`, synthesized by `scripts/gen-sounds.py`), `~/.config/ftm/sounds` (wav, aiff, ogg/oga, mp3, m4a, caf, flac; named by file stem), macOS `/System/Library/Sounds` and freedesktop `/usr/share/sounds/freedesktop/stereo`; on a name clash yours win over built-ins over the system's. The webview plays them (the bytes come over IPC), and the picker hides formats it cannot play: WKWebView has no Ogg Vorbis, and WebKitGTK plays what its GStreamer plugins decode. Picking a sound in the dropdown plays it; ▶ replays it.
 
 ## UI
 

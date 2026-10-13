@@ -18,3 +18,6 @@ app quitting. Set `FTM_SOCKET=/tmp/ftm-dev.sock` to run against a separate daemo
 | Split right | Cmd+D | Ctrl+Shift+D |
 | Split down | Cmd+Shift+D | Ctrl+Shift+E |
 | Close pane | Cmd+W | Ctrl+Shift+W |
+
+Settings (⚙ in the sidebar) cover the terminal font, theme and the two status sounds; they are saved to
+`~/.config/ftm/config.toml`, see [Settings](../docs/design.md#settings). Drop your own sounds in `~/.config/ftm/sounds`.
