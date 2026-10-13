@@ -2,6 +2,7 @@
 
 mod daemon;
 mod fonts;
+mod themes;
 
 use ftm_core::config::Settings;
 use ftm_core::paths;
@@ -119,6 +120,17 @@ async fn list_fonts() -> Vec<fonts::FontFamily> {
     FONTS.get_or_init(|| listed).clone()
 }
 
+/// Read once per app run, off the main thread.
+#[tauri::command]
+async fn list_themes() -> Vec<ftm_core::theme::ThemeEntry> {
+    static THEMES: std::sync::OnceLock<Vec<ftm_core::theme::ThemeEntry>> = std::sync::OnceLock::new();
+    if let Some(cached) = THEMES.get() {
+        return cached.clone();
+    }
+    let listed = tauri::async_runtime::spawn_blocking(themes::all).await.unwrap_or_default();
+    THEMES.get_or_init(|| listed).clone()
+}
+
 #[tauri::command]
 fn get_settings() -> Result<Settings, String> {
     Settings::load(&paths::settings_path()).map_err(|e| e.to_string())
@@ -222,6 +234,7 @@ fn main() {
             get_settings,
             save_settings,
             list_fonts,
+            list_themes,
             log,
             ensure_on_screen
         ])

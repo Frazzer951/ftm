@@ -35,6 +35,29 @@ impl RepoConfig {
 #[serde(default)]
 pub struct Settings {
     pub terminal: TerminalSettings,
+    pub theme: ThemeSettings,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ThemeSettings {
+    /// Used unless `follow_system` is set.
+    pub name: String,
+    /// Switch between `dark` and `light` with the system appearance.
+    pub follow_system: bool,
+    pub dark: String,
+    pub light: String,
+}
+
+impl Default for ThemeSettings {
+    fn default() -> Self {
+        ThemeSettings {
+            name: crate::theme::DEFAULT_DARK.into(),
+            follow_system: false,
+            dark: crate::theme::DEFAULT_DARK.into(),
+            light: crate::theme::DEFAULT_LIGHT.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -117,11 +140,19 @@ mod tests {
         assert_eq!(settings.terminal.font_size, 15.0);
         assert!(!settings.terminal.ligatures);
 
+        assert_eq!(settings.theme.name, "Supacode Dark");
         settings.terminal.font_family = "FiraCode Nerd Font Mono".into();
         settings.terminal.ligatures = true;
+        settings.theme = ThemeSettings {
+            name: "Dracula".into(),
+            follow_system: true,
+            dark: "Nord".into(),
+            light: "Supacode Light".into(),
+        };
         settings.save(&path).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("future = \"keep\"") && text.contains("[other]"), "{text}");
+        assert!(text.contains("[theme]") && text.contains("follow_system = true"), "{text}");
         assert_eq!(Settings::load(&path).unwrap(), settings);
         let _ = std::fs::remove_dir_all(&dir);
     }
