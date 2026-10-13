@@ -39,6 +39,8 @@ Inherited `CLAUDECODE`, `CLAUDE_CODE_*` and `SUPACODE_*` are stripped, so an age
 
 Socket location: `$XDG_RUNTIME_DIR/ftm/ftmd.sock` on Linux, `~/Library/Caches/ftm/ftmd.sock` on macOS. Unix socket paths are limited to ~104 bytes on macOS, so keep overrides short.
 
+Everything a daemon keeps is keyed by its socket, so daemons on different sockets never share state: holder sockets in `<socket>.d/`, the saved tree in `$XDG_STATE_HOME/ftm/<socket path>.json`, hook settings in `<socket stem>.claude-settings.json` and the app-launched daemon's log in `<socket stem>.log`, all next to the socket. An installed FTM (`scripts/install.sh`) uses the default socket; `scripts/dev.sh` uses `ftmd-dev.sock` in the same dir and runs the app under the identifier `dev.frazzer.ftm.dev`, so the two run side by side with separate sessions, window state and web storage while sharing `~/.config/ftm` (settings, themes, sounds, repo setup). Panes get `FTM_SOCKET` for their own daemon, so `ftm` inside a pane, whichever binary, talks to the daemon that owns it.
+
 ## CLI
 
 ```
@@ -83,7 +85,7 @@ Worktrees live under `~/.local/share/ftm/worktrees/<repo>/<branch>` (`$XDG_DATA_
 
 ## Claude Code integration
 
-ftmd writes hook settings to `claude-settings.json` next to its socket and starts every agent with `claude --settings <that file>`, so the user's own `~/.claude/settings.json` is untouched (hook entries from both apply). Each hook runs `<ftm next to ftmd> status <s> >/dev/null 2>&1 || true` with a 5s timeout: silent (a `UserPromptSubmit` hook's stdout would be fed to Claude), never failing, and a no-op outside FTM.
+ftmd writes hook settings to `<socket stem>.claude-settings.json` next to its socket (`ftmd.claude-settings.json` for the default one) and starts every agent with `claude --settings <that file>`, so the user's own `~/.claude/settings.json` is untouched (hook entries from both apply). Each hook runs `<ftm next to ftmd> status <s> >/dev/null 2>&1 || true` with a 5s timeout: silent (a `UserPromptSubmit` hook's stdout would be fed to Claude), never failing, and a no-op outside FTM.
 
 | Hook (matcher) | Status |
 |---|---|
@@ -144,7 +146,7 @@ ftmd keeps its own copy of each pane's output and feeds it through a headless `v
 
 The app is just a client: quitting it changes nothing, and on launch it starts ftmd if needed, then restores its window geometry (`tauri-plugin-window-state`) and the selected workspace and tabs (`localStorage`).
 
-**Upgrading.** `scripts/dev.sh` (or any SIGTERM) restarts ftmd on new code without touching panes, but each holder keeps running the binary it was started from until its pane closes; new panes get the new holder. ftmd and holders agree on `frame::VERSION`: a change to the frames bumps it, and a newer ftmd then cannot reattach older holders (it logs `pane holder speaks version N`, drops those panes from the layout and leaves their processes running unattached), so close panes before upgrading across a version bump. The frame protocol is still version 1. An ftmd from before holders existed owns its PTYs directly, so stopping it ends its panes; `dev.sh` detects that (panes without holder sockets) and asks first.
+**Upgrading.** `scripts/install.sh`, `scripts/dev.sh` (each on its own socket) or any SIGTERM restarts ftmd on new code without touching panes, but each holder keeps running the binary it was started from until its pane closes; new panes get the new holder. ftmd and holders agree on `frame::VERSION`: a change to the frames bumps it, and a newer ftmd then cannot reattach older holders (it logs `pane holder speaks version N`, drops those panes from the layout and leaves their processes running unattached), so close panes before upgrading across a version bump. The frame protocol is still version 1. An ftmd from before holders existed owns its PTYs directly, so stopping it ends its panes; both scripts detect that (panes without holder sockets) and ask first.
 
 ## Milestones
 

@@ -9,8 +9,9 @@ npm run tauri dev      # builds ftmd + ftm, starts Vite, launches the window
 ```
 
 On launch the app connects to `ftmd`, starting it (from next to the app binary, else `$PATH`) if the socket does not
-answer. The daemon is detached in its own process group and logs to `ftmd.log` next to the socket, so panes survive the
-app quitting. Set `FTM_SOCKET=/tmp/ftm-dev.sock` to run against a separate daemon.
+answer. The daemon is detached in its own process group and logs to `<socket stem>.log` next to the socket (`ftmd.log` for
+the default one), so panes survive the app quitting. Set `FTM_SOCKET=/tmp/ftm-dev.sock` to run against a separate daemon;
+`scripts/dev.sh` does that for you.
 
 | Shortcut | macOS | Linux |
 |---|---|---|
