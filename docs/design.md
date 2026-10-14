@@ -66,15 +66,25 @@ Per-repo config at `~/.config/ftm/repos/<repo>.toml` (`$XDG_CONFIG_HOME/ftm/...`
 ```toml
 base = "origin/main"
 setup = "direnv allow; rm -rf .venv; uv sync --all-extras"
-copy_ignored = [".env", ".envrc.local", "profiles.yml"]
+copy_ignored_exclude = ["data", "*.parquet"]
 ```
+
+`copy_ignored` picks which gitignored paths of the source checkout a new worktree gets:
+
+| Value | Copies |
+|---|---|
+| unset or `true` (default) | every gitignored path, minus the built-in excludes and `copy_ignored_exclude` |
+| `[".env", "profiles.yml"]` | only paths matching these globs (relative to the repo root); no excludes apply |
+| `false` | nothing |
+
+The built-in excludes (`DEFAULT_COPY_IGNORED_EXCLUDE` in `ftm-core/src/config.rs`) are `.venv`, `venv`, `node_modules`, `target`, `__pycache__`, `.pytest_cache`, `.ruff_cache`, `.mypy_cache`, `.tox` and `.DS_Store`: big or rebuildable, and in a Rust or Python checkout often gigabytes. `copy_ignored_exclude` adds to them, never replaces them. Each exclude is a name or glob matched against every component of a path, at any depth, and against the whole repo-relative path, so `node_modules` also skips `app/node_modules` and `data/*.csv` skips CSVs under `data/`.
 
 Steps:
 
 1. `git worktree add <wt> -b <branch> <base>`
 2. If `--copy-changes`: `git diff HEAD --binary | git -C <wt> apply` (staged + unstaged edits to tracked files)
 3. If `--copy-changes`: copy `git ls-files --others --exclude-standard` (untracked, not ignored)
-4. Always: copy gitignored paths matching `copy_ignored`. Copying all ignored files would drag in `.venv`, `node_modules`, `target/`.
+4. Always: copy gitignored paths as `copy_ignored` says (`git ls-files --others --ignored --exclude-standard --directory`, so an ignored directory is one entry). Files go through `fs::copy`, which on macOS clones on APFS (copy-on-write, near free) and falls back to a byte copy; modes are kept. Symlinks are recreated as symlinks and never followed, so a link out of the repo stays a link. A directory holding `.git` (a nested repo or worktree, e.g. `.claude/worktrees/*`) and special files are skipped. ftmd logs each skipped path at debug and the totals at info.
 5. Run `setup` in the first pane, then start `claude` (or the shell). Setup runs inline before the agent starts, so nothing has to wait on a sentinel file. It is POSIX sh whatever the login shell (it runs as `/bin/sh -c "$FTM_SETUP"`), so environment changes it makes do not reach the agent.
 
 Worktrees live under `~/.local/share/ftm/worktrees/<repo>/<branch>` (`$XDG_DATA_HOME/ftm/worktrees` when set). `--remove-worktree` never forces: it fails on a dirty worktree, deletes the branch only if merged (`git branch -d`), and prunes empty `prefix/` directories.

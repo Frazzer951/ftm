@@ -436,3 +436,100 @@ fn pin_only_top_level_workspaces() {
     ftm(&bin, socket, &["pin", &child]);
     assert!(pinned(&child));
 }
+
+/// New worktrees get the source checkout's gitignored files, minus big rebuildable directories at any depth and the
+/// repo's own excludes; an explicit `copy_ignored` list copies only what it names, and `false` copies nothing.
+#[test]
+fn worktrees_copy_ignored_files() {
+    let bin = ftm_bin();
+    let root = temp_root("ignored");
+    let (repo, config) = (root.join("ignrepo"), root.join("config"));
+    std::fs::create_dir_all(config.join("ftm/repos")).unwrap();
+    std::fs::create_dir_all(root.join("home")).unwrap();
+    std::fs::create_dir_all(root.join("outside")).unwrap();
+    std::fs::write(root.join("outside/secret"), "outside\n").unwrap();
+
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(
+        repo.join(".gitignore"),
+        ".env\n.claude/\n.venv/\nnode_modules/\ntarget/\n__pycache__/\ndbt_profiles/\nbig/\nlink\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(repo.join("pkg")).unwrap();
+    std::fs::write(repo.join("pkg/index.js"), "tracked\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"]);
+    let write = |rel: &str, body: &str, mode: u32| {
+        let p = repo.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, body).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    write(".env", "SECRET=1\n", 0o644);
+    write(".claude/settings.local.json", "{}\n", 0o644);
+    write(".claude/node_modules/dep.js", "x\n", 0o644);
+    write(".claude/worktrees/other/.git", "gitdir: elsewhere\n", 0o644);
+    write(".venv/bin/python", "x\n", 0o755);
+    write("pkg/node_modules/dep.js", "x\n", 0o644);
+    write("pkg/__pycache__/m.pyc", "x\n", 0o644);
+    write("target/debug/bin", "x\n", 0o755);
+    write("dbt_profiles/profiles.yml", "dev: {}\n", 0o600);
+    write("dbt_profiles/run.sh", "#!/bin/sh\n", 0o755);
+    write("big/data.bin", "lots\n", 0o644);
+    std::os::unix::fs::symlink("../outside/secret", repo.join("link")).unwrap();
+
+    let daemon = start_daemon("ignored", |c| {
+        c.env("HOME", root.join("home"))
+            .env("XDG_CONFIG_HOME", &config)
+            .env("XDG_DATA_HOME", root.join("data"));
+    });
+    let socket = daemon.socket.clone();
+    let spawn = |branch: &str, repo_config: &str| {
+        std::fs::write(config.join("ftm/repos/ignrepo.toml"), repo_config).unwrap();
+        let id = ftm(
+            &bin,
+            &socket,
+            &["spawn", "terminal", "--path", repo.to_str().unwrap(), "--worktree", branch],
+        );
+        ftm(&bin, &socket, &["close", "--id", &id]);
+        root.join("data/ftm/worktrees/ignrepo").join(branch)
+    };
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+
+    let wt = spawn("default", "");
+    assert_eq!(std::fs::read_to_string(wt.join(".env")).unwrap(), "SECRET=1\n");
+    assert!(wt.join(".claude/settings.local.json").is_file());
+    assert_eq!(mode(&wt.join("dbt_profiles/profiles.yml")), 0o600);
+    assert_eq!(mode(&wt.join("dbt_profiles/run.sh")), 0o755);
+    assert!(wt.join("big/data.bin").is_file());
+    assert!(wt.join("link").symlink_metadata().unwrap().file_type().is_symlink());
+    assert_eq!(std::fs::read_link(wt.join("link")).unwrap(), Path::new("../outside/secret"));
+    for skipped in [
+        ".venv",
+        "target",
+        "pkg/node_modules",
+        "pkg/__pycache__",
+        ".claude/node_modules",
+        ".claude/worktrees/other",
+    ] {
+        assert!(!wt.join(skipped).exists(), "{skipped} was copied");
+    }
+    assert!(wt.join("pkg/index.js").is_file());
+
+    let wt = spawn("exclude", "copy_ignored_exclude = [\"big\", \"*.sh\"]\n");
+    assert!(wt.join(".env").is_file() && wt.join("dbt_profiles/profiles.yml").is_file());
+    assert!(!wt.join("big").exists() && !wt.join("dbt_profiles/run.sh").exists());
+    assert!(!wt.join(".venv").exists());
+
+    let wt = spawn("explicit", "copy_ignored = [\".env\", \"target\"]\n");
+    assert!(wt.join(".env").is_file() && wt.join("target/debug/bin").is_file());
+    assert!(!wt.join(".claude").exists() && !wt.join("dbt_profiles").exists());
+
+    let wt = spawn("disabled", "copy_ignored = false\n");
+    assert!(wt.join("pkg/index.js").is_file());
+    assert!(!wt.join(".env").exists() && !wt.join(".claude").exists());
+
+    drop(daemon);
+    let _ = std::fs::remove_dir_all(&root);
+}

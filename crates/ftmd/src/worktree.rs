@@ -1,5 +1,6 @@
 use eyre::{Result, WrapErr, bail};
-use ftm_core::{config::RepoConfig, paths};
+use ftm_core::config::{CopyIgnored, DEFAULT_COPY_IGNORED_EXCLUDE, RepoConfig};
+use ftm_core::paths;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -46,23 +47,46 @@ pub fn create(cwd: &Path, branch: &str, base: Option<&str>, copy_changes: bool) 
         git(&repo, &args)?;
     }
 
+    let mut copied = Copied::default();
     if copy_changes {
         copy_tracked_changes(&repo, &path)?;
         let untracked = git(&repo, &["ls-files", "--others", "--exclude-standard", "-z"])?;
-        copy_files(
-            &repo,
-            &path,
-            untracked.split('\0').filter(|s| !s.is_empty()).map(PathBuf::from),
-        )?;
+        for rel in split_nul(&untracked) {
+            copy_entry(&repo, &path, &rel, &Excludes::default(), &mut copied)?;
+        }
     }
-    for pattern in &config.copy_ignored {
-        let full = repo.join(pattern).to_string_lossy().into_owned();
-        let matches = glob::glob(&full).wrap_err_with(|| format!("bad copy_ignored pattern {pattern}"))?;
-        let rel = matches
-            .flatten()
-            .filter_map(|p| p.strip_prefix(&repo).ok().map(Path::to_path_buf));
-        copy_files(&repo, &path, rel)?;
+    match &config.copy_ignored {
+        CopyIgnored::All(false) => {},
+        CopyIgnored::All(true) => {
+            let excludes = Excludes::new(&config.copy_ignored_exclude)?;
+            let ignored = git(
+                &repo,
+                &["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"],
+            )?;
+            for rel in split_nul(&ignored) {
+                copy_entry(&repo, &path, &rel, &excludes, &mut copied)?;
+            }
+        },
+        CopyIgnored::Only(patterns) => {
+            for pattern in patterns {
+                let full = repo.join(pattern).to_string_lossy().into_owned();
+                let matches = glob::glob(&full).wrap_err_with(|| format!("bad copy_ignored pattern {pattern}"))?;
+                for rel in matches
+                    .flatten()
+                    .filter_map(|p| p.strip_prefix(&repo).ok().map(Path::to_path_buf))
+                {
+                    copy_entry(&repo, &path, &rel, &Excludes::default(), &mut copied)?;
+                }
+            }
+        },
     }
+    tracing::info!(
+        "copied {} files ({} KiB) into {}, skipped {}",
+        copied.files,
+        copied.bytes / 1024,
+        path.display(),
+        copied.skipped
+    );
 
     Ok(Created {
         path,
@@ -98,32 +122,80 @@ fn copy_tracked_changes(repo: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-fn copy_files(from: &Path, to: &Path, rel: impl Iterator<Item = PathBuf>) -> Result<()> {
-    for rel in rel {
-        let src = from.join(&rel);
-        let dst = to.join(&rel);
-        if src.is_dir() {
-            copy_dir(&src, &dst)?;
-        } else if src.is_file() {
-            if let Some(parent) = dst.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::copy(&src, &dst).wrap_err_with(|| format!("copying {}", rel.display()))?;
-        }
-    }
-    Ok(())
+#[derive(Default)]
+struct Copied {
+    files: u64,
+    bytes: u64,
+    skipped: u64,
 }
 
-fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let (s, d) = (entry.path(), dst.join(entry.file_name()));
-        if s.is_dir() {
-            copy_dir(&s, &d)?
-        } else {
-            std::fs::copy(&s, &d).map(|_| ())?
+/// Names or globs matched against every component of a repo-relative path, and against the whole path.
+#[derive(Default)]
+struct Excludes(Vec<glob::Pattern>);
+
+impl Excludes {
+    fn new(extra: &[String]) -> Result<Self> {
+        let all = DEFAULT_COPY_IGNORED_EXCLUDE
+            .iter()
+            .copied()
+            .chain(extra.iter().map(String::as_str));
+        all.map(|p| glob::Pattern::new(p).wrap_err_with(|| format!("bad copy_ignored_exclude pattern {p}")))
+            .collect::<Result<_>>()
+            .map(Excludes)
+    }
+
+    fn matches(&self, rel: &Path) -> bool {
+        self.0
+            .iter()
+            .any(|p| p.matches_path(rel) || rel.components().any(|c| p.matches(&c.as_os_str().to_string_lossy())))
+    }
+}
+
+fn split_nul(s: &str) -> impl Iterator<Item = PathBuf> + '_ {
+    s.split('\0').filter(|s| !s.is_empty()).map(PathBuf::from)
+}
+
+/// Copies `from/rel` to `to/rel`, recursing into directories. Symlinks are recreated, never followed; nested
+/// repositories and worktrees (a directory holding `.git`) and special files are skipped. On macOS `fs::copy` clones
+/// on APFS and falls back to a byte copy; either way the file mode is kept.
+fn copy_entry(from: &Path, to: &Path, rel: &Path, excludes: &Excludes, copied: &mut Copied) -> Result<()> {
+    if excludes.matches(rel) {
+        tracing::debug!("not copying excluded {}", rel.display());
+        copied.skipped += 1;
+        return Ok(());
+    }
+    let (src, dst) = (from.join(rel), to.join(rel));
+    let Ok(meta) = std::fs::symlink_metadata(&src) else {
+        return Ok(());
+    };
+    let kind = meta.file_type();
+    if kind.is_dir() && src.join(".git").symlink_metadata().is_ok() {
+        tracing::debug!("not copying nested repository {}", rel.display());
+        copied.skipped += 1;
+        return Ok(());
+    }
+    if !(kind.is_dir() || kind.is_file() || kind.is_symlink()) {
+        return Ok(());
+    }
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let wrap = || format!("copying {}", rel.display());
+    if kind.is_symlink() {
+        let target = std::fs::read_link(&src).wrap_err_with(wrap)?;
+        match std::os::unix::fs::symlink(&target, &dst) {
+            Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e).wrap_err_with(wrap),
+            _ => copied.files += 1,
         }
+    } else if kind.is_dir() {
+        std::fs::create_dir_all(&dst).wrap_err_with(wrap)?;
+        for entry in std::fs::read_dir(&src).wrap_err_with(wrap)? {
+            copy_entry(from, to, &rel.join(entry?.file_name()), excludes, copied)?;
+        }
+        std::fs::set_permissions(&dst, meta.permissions()).wrap_err_with(wrap)?;
+    } else {
+        copied.bytes += std::fs::copy(&src, &dst).wrap_err_with(wrap)?;
+        copied.files += 1;
     }
     Ok(())
 }

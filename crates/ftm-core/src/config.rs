@@ -7,8 +7,39 @@ use std::path::Path;
 pub struct RepoConfig {
     pub base: Option<String>,
     pub setup: Option<String>,
-    /// Gitignored paths (globs) to copy into new worktrees, e.g. `.env`. Untracked, non-ignored files are always copied.
-    pub copy_ignored: Vec<String>,
+    /// Which gitignored paths to copy into new worktrees. Untracked, non-ignored files are always copied.
+    pub copy_ignored: CopyIgnored,
+    /// Names or globs skipped on top of [`DEFAULT_COPY_IGNORED_EXCLUDE`] when `copy_ignored` is `true`.
+    pub copy_ignored_exclude: Vec<String>,
+}
+
+/// Skipped at any depth when copying all gitignored paths: big, rebuildable, or machine-specific.
+pub const DEFAULT_COPY_IGNORED_EXCLUDE: &[&str] = &[
+    ".venv",
+    "venv",
+    "node_modules",
+    "target",
+    "__pycache__",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".mypy_cache",
+    ".tox",
+    ".DS_Store",
+];
+
+/// `copy_ignored = true` (the default) copies every gitignored path except the excludes, `false` copies none, and a
+/// list of globs copies only the paths they match, with no excludes applied.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum CopyIgnored {
+    All(bool),
+    Only(Vec<String>),
+}
+
+impl Default for CopyIgnored {
+    fn default() -> Self {
+        CopyIgnored::All(true)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -149,6 +180,20 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copy_ignored_forms() {
+        let parse = |s: &str| toml::from_str::<RepoConfig>(s).unwrap();
+        assert_eq!(parse("").copy_ignored, CopyIgnored::All(true));
+        assert_eq!(parse("copy_ignored = false").copy_ignored, CopyIgnored::All(false));
+        assert_eq!(
+            parse("copy_ignored = [\".env\"]").copy_ignored,
+            CopyIgnored::Only(vec![".env".into()])
+        );
+        let c = parse("copy_ignored_exclude = [\"data\", \"*.parquet\"]");
+        assert_eq!(c.copy_ignored, CopyIgnored::All(true));
+        assert_eq!(c.copy_ignored_exclude, ["data", "*.parquet"]);
+    }
 
     #[test]
     fn settings_round_trip_and_keep_unknown_keys() {
