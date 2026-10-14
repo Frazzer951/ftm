@@ -1,9 +1,10 @@
 mod common;
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
-use common::{Conn, alive, git, start_daemon, temp_root, wait_for, wait_for_output, wait_until};
+use common::{Conn, alive, ftm_bin, git, start_daemon, temp_root, wait_for, wait_for_output, wait_until};
 use ftm_core::model::{Kind, Layout, SplitDir};
 use ftm_core::protocol::{Event, Request, Response, SpawnRequest};
+use std::process::Command;
 use std::time::Duration;
 
 #[test]
@@ -190,5 +191,70 @@ fn resize_to_the_same_size_makes_the_pane_repaint() {
     resize(&mut req);
     let out = wait_for_output(&mut events, pane, "w40 120w");
     assert!(out.contains("w40 119w"), "no narrower size first: {out:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Enter has to reach the pane in a read of its own, or Claude Code takes it as part of a pasted burst.
+#[test]
+fn send_enter_presses_enter_in_its_own_read() {
+    let dir = temp_root("send-enter");
+    let daemon = start_daemon("send-enter", |c| {
+        c.env("XDG_DATA_HOME", &dir);
+    });
+    let mut req = Conn::open(&daemon.socket);
+    let Response::Spawned { workspace } = req.send(&Request::Spawn(SpawnRequest {
+        kind: Kind::Terminal,
+        name: None,
+        parent: None,
+        cwd: dir.clone(),
+        worktree_branch: None,
+        base: None,
+        copy_changes: false,
+        brief: None,
+    })) else {
+        panic!("expected spawned")
+    };
+    let Layout::Pane { id: pane } = workspace.tabs[0].layout else {
+        panic!("expected one pane")
+    };
+
+    // Saves each read the pane's program gets as reads/<n>.
+    std::fs::write(
+        dir.join("record.sh"),
+        "mkdir reads; stty raw -echo; touch ready; n=0\n\
+         while :; do dd bs=4096 count=1 of=part 2>/dev/null; n=$((n+1)); mv part reads/$n; done\n",
+    )
+    .unwrap();
+    req.type_in(pane, "sh record.sh\n");
+    wait_for("recorder", Duration::from_secs(10), || dir.join("ready").exists());
+
+    let bin = ftm_bin();
+    let send = |args: &[&str]| {
+        let out = Command::new(&bin)
+            .arg("send")
+            .arg(workspace.id.to_string())
+            .args(args)
+            .env("FTM_SOCKET", &daemon.socket)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "ftm send {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    let reads = |n: usize| {
+        wait_for("reads", Duration::from_secs(10), || dir.join(format!("reads/{n}")).exists());
+        (1..=n)
+            .map(|i| std::fs::read_to_string(dir.join(format!("reads/{i}"))).unwrap())
+            .collect::<Vec<_>>()
+    };
+
+    send(&["hello world", "--enter"]);
+    assert_eq!(reads(2), ["hello world", "\r"]);
+    send(&["", "--enter"]);
+    assert_eq!(reads(3), ["hello world", "\r", "\r"]);
+    send(&["no enter"]);
+    assert_eq!(reads(4)[3], "no enter");
     let _ = std::fs::remove_dir_all(&dir);
 }
