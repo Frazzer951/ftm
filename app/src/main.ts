@@ -55,6 +55,19 @@ interface PaneView {
 
 const isMac = navigator.userAgent.includes("Mac");
 
+/// iTerm2's "Natural Text Editing": what shells' emacs keymaps understand, unlike xterm's `\e[1;3D` and friends.
+const textEditKeys: Record<string, { alt?: string; meta?: string }> = {
+  ArrowLeft: { alt: "\x1bb", meta: "\x01" },
+  ArrowRight: { alt: "\x1bf", meta: "\x05" },
+  Backspace: { alt: "\x17", meta: "\x15" },
+  Delete: { alt: "\x1bd" },
+};
+
+function textEditKey(e: KeyboardEvent): string | undefined {
+  if (e.type !== "keydown" || e.isComposing || e.shiftKey || e.ctrlKey || e.altKey === e.metaKey) return;
+  return textEditKeys[e.key]?.[e.altKey ? "alt" : "meta"];
+}
+
 const report = (message: string) => invoke("log", { message }).catch(() => {});
 const consoleError = console.error.bind(console);
 console.error = (...args: unknown[]) => {
@@ -131,6 +144,14 @@ function view(pane: Id): PaneView {
   }
   term.onData((d) => send({ op: "input", pane, data: encode(d) }));
   term.onBinary((d) => send({ op: "input", pane, data: btoa(d) }));
+  if (isMac)
+    term.attachCustomKeyEventHandler((e) => {
+      const seq = textEditKey(e);
+      if (seq === undefined) return true;
+      e.preventDefault();
+      term.input(seq);
+      return false;
+    });
   // xterm already turns off autocorrect, autocapitalize and spellcheck; macOS inline predictions also need these.
   term.textarea?.setAttribute("writingsuggestions", "false");
   term.textarea?.setAttribute("autocomplete", "off");
