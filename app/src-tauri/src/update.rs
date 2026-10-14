@@ -122,7 +122,7 @@ fn script(version: &str, channel: Channel, switch: bool, pkgbuild_url: &str) -> 
     };
     Some(format!(
         r#"echo 'Installing {name} {version}'
-d=$(mktemp -d -t ftm-update.XXXXXX) || exit 1
+d=$(mktemp -d "${{TMPDIR:-/tmp}}/ftm-update.XXXXXX") || exit 1
 cd "$d" && curl -fLO '{pkgbuild_url}' && makepkg -si && cd / && rm -rf "$d" || {{ echo "FTM update failed; build files are in $d"; exit 1; }}
 echo '{name} {version} is installed. {done}'"#
     ))
