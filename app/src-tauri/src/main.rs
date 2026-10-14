@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod crash_log;
 mod daemon;
 mod fonts;
 mod sounds;
@@ -243,6 +244,7 @@ fn log(message: String) {
 }
 
 fn main() {
+    crash_log::install();
     // FTM_BACKGROUND=1 (for scripted launches): never take focus from whatever the user is doing.
     let background = std::env::var("FTM_BACKGROUND").is_ok_and(|v| v == "1");
     // WebKitGTK's DMA-BUF renderer dies with "Error 71 (Protocol error) dispatching to Wayland display" on NVIDIA;
