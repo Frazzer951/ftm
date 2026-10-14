@@ -252,6 +252,12 @@ impl State {
             std::thread::sleep(Duration::from_millis(10));
         };
         std::thread::spawn(move || holder.wait());
+        // Before the replay goes in, so an unnamed agent's title printed before ftmd connected still names it.
+        if startup.is_some_and(|s| s.agent && !s.named)
+            && let Some(ws) = self.workspaces.get_mut(&workspace)
+        {
+            ws.agent_pane = Some(id);
+        }
         self.attach_holder(shared, workspace, id, holder_socket, stream, startup.is_some())?;
         Ok(id)
     }
@@ -684,9 +690,6 @@ fn spawn(shared: &Shared, req: SpawnRequest) -> Result<Response> {
         id: TabId::new_v4(),
         layout: Layout::Pane { id: pane },
     });
-    if ws.kind == Kind::Agent && !named {
-        ws.agent_pane = Some(pane);
-    }
     let workspace = ws.clone();
     // The folder the user picked, not the worktree made from it.
     if req.parent.is_none() {
