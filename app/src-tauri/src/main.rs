@@ -26,9 +26,27 @@ fn send(client: State<'_, daemon::Client>, request: Request) {
 
 #[tauri::command]
 fn subscribe(app: AppHandle, events: State<'_, daemon::Events>) {
-    events.restart(move |event| {
-        let _ = app.emit("ftm-event", event);
-    });
+    let daemon = app.clone();
+    events.restart(
+        move |event| {
+            let _ = app.emit("ftm-event", event);
+        },
+        move |version| {
+            let _ = daemon.emit(
+                "ftm-daemon",
+                DaemonInfo {
+                    version,
+                    app_version: env!("CARGO_PKG_VERSION"),
+                },
+            );
+        },
+    );
+}
+
+#[derive(Clone, serde::Serialize)]
+struct DaemonInfo {
+    version: String,
+    app_version: &'static str,
 }
 
 /// (x, y, width, height) in physical pixels.

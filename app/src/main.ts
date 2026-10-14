@@ -41,7 +41,8 @@ interface Folder {
 type FtmEvent =
   | { event: "workspaces"; workspaces: Workspace[] }
   | { event: "folders"; folders: Folder[] }
-  | { event: "output"; pane: Id; data: string; reset: boolean };
+  | { event: "output"; pane: Id; data: string; reset: boolean }
+  | { event: "update_blocked"; version: string | null; reason: string };
 
 interface PaneView {
   term: Terminal;
@@ -1088,16 +1089,39 @@ function targetPane(): Id | undefined {
   return focused && panes.includes(focused) ? focused : panes[0];
 }
 
+/** A dismissable message in the corner; showing one under a key that is already up replaces it, `null` removes it. */
+function notice(key: string, message: string | null, kind: "warning" | "error" = "warning") {
+  const box = $("notices");
+  box.querySelector(`[data-key="${key}"]`)?.remove();
+  if (message === null) return;
+  const el = document.createElement("div");
+  el.className = `notice ${kind}`;
+  el.dataset.key = key;
+  const text = document.createElement("span");
+  text.textContent = message;
+  const close = document.createElement("button");
+  close.textContent = "×";
+  close.title = "Dismiss";
+  close.onclick = () => el.remove();
+  el.append(text, close);
+  box.append(el);
+}
+
+function paneFailed(err: unknown) {
+  console.error(err);
+  notice("pane", `Could not open a pane: ${err}`, "error");
+}
+
 async function newTab() {
   if (!selected) return;
-  const r = await request({ op: "new_tab", workspace: selected }).catch(console.error);
+  const r = await request({ op: "new_tab", workspace: selected }).catch(paneFailed);
   if (r?.pane) focusWhenShown(r.pane);
 }
 
 async function split(dir: "row" | "column") {
   const pane = targetPane();
   if (!pane) return newTab();
-  const r = await request({ op: "split", pane, dir }).catch(console.error);
+  const r = await request({ op: "split", pane, dir }).catch(paneFailed);
   if (r?.pane) focusWhenShown(r.pane);
 }
 
@@ -1256,16 +1280,34 @@ invoke<{ terminal: TerminalSettings; theme: ThemeSettings; sounds: SoundSettings
   .catch(console.error);
 render();
 
-listen<FtmEvent>("ftm-event", ({ payload }) => {
+const events = listen<FtmEvent>("ftm-event", ({ payload }) => {
   if (payload.event === "workspaces") {
     onWorkspaces(payload.workspaces);
   } else if (payload.event === "folders") {
     folders = payload.folders;
     refreshGit(folders.map((f) => f.path).filter((p) => !gitInfo.has(p))).catch(console.error);
     renderSidebar();
+  } else if (payload.event === "update_blocked") {
+    const build = payload.version ? `FTM ${payload.version}` : "A new FTM build";
+    notice(
+      "update",
+      `${build} is installed, but ftmd cannot switch to it without closing your sessions (${payload.reason}). Restarting ftmd finishes the update and closes every pane.`,
+    );
   } else if (live.has(payload.pane)) {
     const v = view(payload.pane);
     if (payload.reset) v.term.reset();
     v.term.write(decode(payload.data));
   }
-}).then(() => invoke("subscribe"));
+});
+
+// Each (re)connect of the event stream reports the daemon's version, then replays any update_blocked.
+const daemon = listen<{ version: string; app_version: string }>("ftm-daemon", ({ payload }) => {
+  notice("update", null);
+  notice(
+    "version",
+    payload.version === payload.app_version
+      ? null
+      : `FTM was updated (ftmd ${payload.version}, app ${payload.app_version}). Relaunch FTM to finish; your sessions stay open.`,
+  );
+});
+Promise.all([events, daemon]).then(() => invoke("subscribe"));

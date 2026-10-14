@@ -36,6 +36,8 @@ pub struct State {
     state_file: PathBuf,
     /// Hook settings every agent gets via `--settings`, from `hooks::write`.
     claude_settings: Option<PathBuf>,
+    /// The last `Event::UpdateBlocked`, replayed to every subscriber.
+    update_blocked: Option<Event>,
 }
 
 /// A pane's PTY and processes live in its holder (`ftmd pty-holder`), so they survive ftmd restarts; ftmd keeps a
@@ -99,6 +101,7 @@ impl State {
             state_file: paths::state_file(&socket),
             socket,
             claude_settings,
+            update_blocked: None,
         }))
     }
 
@@ -239,6 +242,7 @@ impl State {
             });
         }
         let mut holder = cmd.spawn().wrap_err("starting pane holder")?;
+        let holder_pid = holder.id() as libc::pid_t;
 
         let deadline = Instant::now() + Duration::from_secs(5);
         let stream = loop {
@@ -261,7 +265,17 @@ impl State {
         {
             ws.agent_pane = Some(id);
         }
-        self.attach_holder(shared, workspace, id, holder_socket, stream, startup.is_some())?;
+        if let Err(e) = self.attach_holder(shared, workspace, id, holder_socket.clone(), stream, startup.is_some()) {
+            // Closing its PTY hangs up the shell it started.
+            unsafe { libc::kill(holder_pid, libc::SIGKILL) };
+            let _ = std::fs::remove_file(&holder_socket);
+            if e.downcast_ref::<HolderVersion>().is_some() {
+                return Err(e.wrap_err(
+                    "ftmd's binary was replaced by a build it cannot run panes with; restarting ftmd finishes the update but closes every pane",
+                ));
+            }
+            return Err(e);
+        }
         Ok(id)
     }
 
@@ -280,7 +294,7 @@ impl State {
             bail!("pane holder did not say hello");
         };
         if version != frame::VERSION {
-            bail!("pane holder speaks version {version}, ftmd {}", frame::VERSION);
+            return Err(HolderVersion(version).into());
         }
         // The replay goes in before anyone can see the pane, so a capture or attach right after a restart has the screen.
         let Some(Frame::Output(replay)) = frame::read(&mut read)? else {
@@ -340,14 +354,55 @@ impl State {
     }
 }
 
+#[derive(Debug)]
+struct HolderVersion(u8);
+
+impl std::fmt::Display for HolderVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "pane holder speaks version {}, ftmd {}", self.0, frame::VERSION)
+    }
+}
+
+impl std::error::Error for HolderVersion {}
+
+fn read_saved(path: &std::path::Path) -> Result<Option<Saved>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(
+            serde_json::from_slice(&bytes).wrap_err_with(|| format!("parsing {}", path.display()))?,
+        )),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// What `load` would fail on, checked by an ftmd taking over before the old one lets go.
+pub fn check_saved(shared: &Shared) -> Result<()> {
+    let path = lock(shared).state_file.clone();
+    read_saved(&path).map(drop)
+}
+
+/// Saves the tree and keeps the lock, so nothing changes or saves it again while a new ftmd takes over.
+pub fn freeze(shared: &Shared) -> Result<MutexGuard<'_, State>> {
+    let state = lock(shared);
+    state
+        .save()
+        .wrap_err_with(|| format!("saving {}", state.state_file.display()))?;
+    Ok(state)
+}
+
+pub fn update_blocked(shared: &Shared, version: Option<String>, reason: String) {
+    let mut state = lock(shared);
+    let event = Event::UpdateBlocked { version, reason };
+    let _ = state.events.send(event.clone());
+    state.update_blocked = Some(event);
+}
+
 /// Restores the saved tree, reconnecting each pane to its holder; a pane whose holder is gone (it exited, or the
 /// machine rebooted) is dropped from its layout. Workspaces stay even when that leaves them without tabs.
 pub fn load(shared: &Shared) -> Result<()> {
     let mut state = lock(shared);
-    let saved: Saved = match std::fs::read(&state.state_file) {
-        Ok(bytes) => serde_json::from_slice(&bytes).wrap_err_with(|| format!("parsing {}", state.state_file.display()))?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e.into()),
+    let Some(saved) = read_saved(&state.state_file)? else {
+        return Ok(());
     };
     for ws in saved.workspaces {
         state.workspaces.insert(ws.id, ws);
@@ -516,6 +571,7 @@ pub fn subscribe(shared: &Shared) -> (broadcast::Receiver<Event>, Vec<Event>) {
         data: B64.encode(&pane.buffer),
         reset: true,
     }));
+    replay.extend(state.update_blocked.clone());
     (rx, replay)
 }
 
