@@ -12,12 +12,12 @@ See [docs/design.md](docs/design.md) for the design.
 | `crates/ftmd` | Daemon: owns workspaces, PTYs and worktrees |
 | `crates/ftm` | CLI client |
 | `app/` | Desktop UI (Tauri v2 + xterm.js), see [app/README.md](app/README.md) |
-| `packaging/` | Homebrew cask and AUR `PKGBUILD` templates the release workflow fills in, see [RELEASE.md](RELEASE.md) |
+| `packaging/` | Homebrew cask and Arch `PKGBUILD` templates the release workflow fills in, see [RELEASE.md](RELEASE.md) |
 
 ## Install
 
 Every release ships the app with the `ftm` CLI and the `ftmd` daemon inside it. Upgrade through the package manager
-you installed with (`brew upgrade`, your AUR helper, or the newer `.deb`/`.rpm`), then quit and reopen the app.
+you installed with (`brew upgrade`, or the newer `.deb`, `.rpm` or `PKGBUILD`), then quit and reopen the app.
 
 **macOS** (Apple silicon and Intel), with Homebrew:
 
@@ -29,10 +29,13 @@ This installs `FTM.app` and links `ftm` onto `PATH`. The app is signed ad hoc, n
 quarantine flag so it opens. If you take the `.dmg` from the [releases](https://github.com/Frazzer951/ftm/releases)
 instead, run `xattr -dr com.apple.quarantine /Applications/FTM.app` after copying it.
 
-**Arch Linux**, from the AUR (x86_64 and aarch64):
+**Arch Linux** (x86_64 and aarch64): `ftm-bin` is not yet published to the AUR. Each release carries its
+`PKGBUILD`, which repackages the release's `.deb`:
 
 ```sh
-yay -S ftm-bin
+mkdir ftm-bin && cd ftm-bin
+curl -fLO https://github.com/Frazzer951/ftm/releases/latest/download/PKGBUILD
+makepkg -si
 ```
 
 **Debian, Ubuntu** (22.04 or newer) and **Fedora** (x86_64 and aarch64): take the `.deb` or `.rpm` for your

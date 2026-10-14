@@ -31,11 +31,13 @@ The tag starts `.github/workflows/release.yml`:
 - **publish**: once every asset is up, makes the release public.
 - **homebrew**: renders `packaging/homebrew/ftm.rb` with the `.dmg` checksums and pushes it to
   [Frazzer951/homebrew-ftm](https://github.com/Frazzer951/homebrew-ftm) as `Casks/ftm.rb`.
-- **aur**: renders `packaging/aur/ftm-bin/PKGBUILD` with the `.deb` checksums and pushes it, with a fresh `.SRCINFO`,
-  to [ftm-bin](https://aur.archlinux.org/packages/ftm-bin).
+- **aur**: renders `packaging/aur/ftm-bin/PKGBUILD` with the `.deb` checksums and attaches it to the release as
+  `PKGBUILD`. It pushes it, with a fresh `.SRCINFO`, to [ftm-bin](https://aur.archlinux.org/packages/ftm-bin) only
+  when the repository variable `AUR_PUBLISH` is `true`. It isn't yet: there is no AUR account (see below).
 
 A pre-release tag (`v0.1.0-rc.1`) runs the same build and publishes a GitHub pre-release, but the homebrew and aur jobs
-only render the cask and PKGBUILD and upload them as workflow artifacts; they don't push. Use one to try the pipeline.
+push nothing: they render the cask and PKGBUILD and upload them as workflow artifacts (the PKGBUILD is attached to the
+pre-release too). Use one to try the pipeline.
 
 If a build fails, fix it on `main`, delete the draft release and the tag (`git push origin :v<version>`), and cut the
 release again.
@@ -47,29 +49,30 @@ Repository secrets in Settings → Secrets and variables → Actions:
 | Secret | What |
 |---|---|
 | `HOMEBREW_TAP_TOKEN` | A fine-grained token with Contents: read and write on `Frazzer951/homebrew-ftm` only |
-| `AUR_SSH_PRIVATE_KEY` | The private half of the SSH key registered on the AUR account (below) |
 
-## One-time AUR setup
+## Publishing to the AUR (not yet on)
 
-1. Make an account at <https://aur.archlinux.org/register>.
+`ftm-bin` is not on the AUR yet: there is no account to maintain it, and AUR registration is closed. Until it is, each
+release carries a `PKGBUILD` asset to build from (see the README). To turn publishing on:
+
+1. Make an account at <https://aur.archlinux.org/register> once registration reopens.
 2. Make a key just for this: `ssh-keygen -t ed25519 -C ftm-bin-ci -f ~/.ssh/aur_ftm -N ''`. Paste
-   `~/.ssh/aur_ftm.pub` into My Account → SSH Public Key, and `~/.ssh/aur_ftm` into the `AUR_SSH_PRIVATE_KEY` secret.
-3. Create the package. The AUR creates a package the first time anyone pushes to a new name, so the first release's
-   aur job normally does it. If that push is refused (say, the key isn't registered yet), push the rendered PKGBUILD
-   by hand once the release's assets are downloadable:
+   `~/.ssh/aur_ftm.pub` into My Account → SSH Public Key, and `~/.ssh/aur_ftm` into a new repository secret,
+   `AUR_SSH_PRIVATE_KEY`.
+3. Set the repository variable `AUR_PUBLISH` to `true` (Settings → Secrets and variables → Actions → Variables).
+4. Create the package. The AUR creates a package the first time anyone pushes to a new name, so the next release's aur
+   job normally does it. To do it now from the latest release, or if that push is refused:
 
    ```sh
-   # the PKGBUILD the release's aur job rendered, from its workflow artifacts
-   gh run download <run-id> -n aur-pkgbuild -D /tmp/ftm-bin-pkgbuild
    GIT_SSH_COMMAND='ssh -i ~/.ssh/aur_ftm' git clone ssh://aur@aur.archlinux.org/ftm-bin.git
    cd ftm-bin
-   cp /tmp/ftm-bin-pkgbuild/PKGBUILD .
+   curl -fLO https://github.com/Frazzer951/ftm/releases/latest/download/PKGBUILD
    makepkg --printsrcinfo > .SRCINFO
    git add PKGBUILD .SRCINFO && git commit -m "ftm-bin <version>"
    GIT_SSH_COMMAND='ssh -i ~/.ssh/aur_ftm' git push origin master
    ```
 
-   Later releases update it from CI.
+   Later releases update it from CI. Then change the README's Arch section to `yay -S ftm-bin`.
 
 ## Signing
 

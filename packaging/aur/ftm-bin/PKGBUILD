@@ -1,5 +1,6 @@
 # Maintainer: Luke Eltiste <luke343279@gmail.com>
-# Rendered by .github/workflows/release.yml, which fills in the version and checksums and pushes it to the AUR.
+# Rendered by .github/workflows/release.yml, which fills in the version and checksums, attaches it to the release and,
+# with AUR_PUBLISH on, pushes it to the AUR.
 
 pkgname=ftm-bin
 _pkgver=@VERSION@

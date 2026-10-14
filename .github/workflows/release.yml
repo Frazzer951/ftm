@@ -1,8 +1,9 @@
 name: Release
 
 # A v* tag (pushed by `cargo release`, see RELEASE.md) builds every target into a draft release, publishes it once all
-# assets are up, then updates the Homebrew cask and the AUR package. Pre-release tags (v0.1.0-rc.1) stop short of the
-# tap and the AUR: those jobs render the cask and PKGBUILD and upload them as workflow artifacts instead.
+# assets are up, then updates the Homebrew cask and attaches an ftm-bin PKGBUILD to the release. Pre-release tags
+# (v0.1.0-rc.1) stop short of the tap: the cask is only rendered and uploaded as a workflow artifact. The PKGBUILD goes
+# to the AUR only when the repository variable AUR_PUBLISH is "true" (see RELEASE.md).
 
 on:
   push:
@@ -175,6 +176,8 @@ jobs:
     name: aur ftm-bin
     needs: [draft, publish]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     env:
       VERSION: ${{ needs.draft.outputs.version }}
     steps:
@@ -194,9 +197,14 @@ jobs:
         with:
           name: aur-pkgbuild
           path: out/PKGBUILD
+      # Workflow artifacts need a GitHub login to download; release assets don't.
+      - name: Attach the PKGBUILD to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" out/PKGBUILD --clobber -R "$GITHUB_REPOSITORY"
       # Regenerates .SRCINFO from the PKGBUILD in an Arch container before pushing.
       - uses: KSXGitHub/github-actions-deploy-aur@084b0d9b15415bf9cdb65d44dad1efe37a354050 # v4.2.0
-        if: needs.draft.outputs.prerelease == 'false'
+        if: needs.draft.outputs.prerelease == 'false' && vars.AUR_PUBLISH == 'true'
         with:
           pkgname: ftm-bin
           pkgbuild: out/PKGBUILD
