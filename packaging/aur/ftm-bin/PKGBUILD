@@ -1,0 +1,29 @@
+# Maintainer: Luke Eltiste <luke343279@gmail.com>
+# Rendered by .github/workflows/release.yml, which fills in the version and checksums, attaches it to the release and,
+# with AUR_PUBLISH on, pushes it to the AUR.
+
+pkgname=ftm-bin
+_pkgver=@VERSION@
+pkgver=${_pkgver//-/_}
+pkgrel=1
+pkgdesc="Terminal workspace manager for Claude Code agents"
+arch=('x86_64' 'aarch64')
+url="https://github.com/Frazzer951/ftm"
+license=('MIT')
+depends=('webkit2gtk-4.1' 'gtk3' 'gst-plugins-good' 'libsoup3' 'glib2' 'cairo' 'gdk-pixbuf2' 'dbus' 'hicolor-icon-theme' 'gcc-libs' 'glibc')
+provides=('ftm')
+conflicts=('ftm')
+options=('!strip' '!debug')
+source=("LICENSE-$_pkgver::https://raw.githubusercontent.com/Frazzer951/ftm/v$_pkgver/LICENSE")
+source_x86_64=("ftm-$_pkgver-x86_64.deb::$url/releases/download/v$_pkgver/FTM_${_pkgver}_amd64.deb")
+source_aarch64=("ftm-$_pkgver-aarch64.deb::$url/releases/download/v$_pkgver/FTM_${_pkgver}_arm64.deb")
+noextract=("ftm-$_pkgver-x86_64.deb" "ftm-$_pkgver-aarch64.deb")
+sha256sums=('@SHA256_LICENSE@')
+sha256sums_x86_64=('@SHA256_X86_64@')
+sha256sums_aarch64=('@SHA256_AARCH64@')
+
+# ftm-app, ftm and ftmd stay side by side in /usr/bin: the app and ftmd find each other next to their own executable.
+package() {
+  bsdtar -xOf "ftm-$_pkgver-$CARCH.deb" 'data.tar.*' | bsdtar -xf - -C "$pkgdir"
+  install -Dm644 "LICENSE-$_pkgver" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
