@@ -54,6 +54,15 @@ sudo apt install ./FTM_<version>_amd64.deb    # or arm64
 sudo dnf install ./FTM-<version>-1.x86_64.rpm # or aarch64
 ```
 
+A nightly build of `main` is the `FTM.Nightly_…` `.deb` or `.rpm` from a
+[nightly pre-release](https://github.com/Frazzer951/ftm/releases), installed the same way. On Linux you have either
+the nightly (package `ftm-nightly`) or the stable release (package `ftm`), never both: they use the same `/usr/bin`
+paths, so installing one removes the other. Switching channels starts a fresh daemon with no sessions. The old
+channel's ftmd keeps running from its old build with its panes until you stop it or log out; reach them from the app
+window that is still open, from `ftm` inside one of those panes, or by pointing `FTM_SOCKET` at the old socket
+(`$XDG_RUNTIME_DIR/ftm/ftmd.sock` for stable, `ftm-nightly/ftmd.sock` for nightly). Switch back while those panes
+are still running and the daemon picks them up again.
+
 The Linux packages put `ftm-app`, `ftm` and `ftmd` in `/usr/bin` and add a desktop entry. The app needs WebKitGTK 4.1
 and, for status sounds, GStreamer's good plugins (the webview plays audio through `autoaudiosink`); the packages
 depend on both.

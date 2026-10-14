@@ -63,8 +63,13 @@ tick *force* to build an unchanged `main`.
   (`brew install --cask frazzer951/ftm/ftm@nightly`), which links the CLI as `ftm-nightly`. It never touches
   `Casks/ftm.rb`, the PKGBUILD or the AUR.
 
-The Linux `.deb` and `.rpm` are attached too, but they install the same `/usr/bin` paths as stable, so they replace
-it rather than sit next to it.
+The Linux `.deb` and `.rpm` are attached too. They install the same `/usr/bin` paths as stable, so on Linux you have
+one channel or the other, never both. The package is `ftm-nightly` against stable's `ftm`, and each declares the other
+in `Conflicts` plus `Replaces` (deb) or `Obsoletes` (rpm) (`bundle.linux` in `tauri.conf.json` and
+`tauri.nightly.conf.json`). So `apt install` or `dnf install` of either one removes the other and doesn't fail on
+the shared files. Switching channels gives you a fresh daemon and fresh sessions. The running ftmd sees the other
+channel's build in `--handshake` and doesn't hand over to it. It keeps serving its panes on its own socket until it
+exits, and the new channel's app and CLI start a daemon on theirs.
 
 To build one locally: `scripts/set-version.sh <version>`, then with `FTM_CHANNEL=nightly` exported run
 `scripts/sidecars.sh` and `npx tauri build --config src-tauri/tauri.bundle.conf.json --config
