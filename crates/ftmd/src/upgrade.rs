@@ -3,11 +3,15 @@
 //! `--handshake` with the same holder frame version, ftmd starts it with the listening socket and a readiness pipe,
 //! and exits once the new ftmd has checked both and parsed the saved tree. The socket stays bound throughout, so
 //! clients queue rather than find nothing and launch a second ftmd. The new ftmd then adopts every holder, as after
-//! any restart. A replacement that cannot adopt the holders is reported with `Event::UpdateBlocked` instead.
+//! any restart. A replacement that cannot adopt the holders is reported with `Event::UpdateBlocked` instead, as is
+//! one from another release channel: on Linux, installing the nightly package over stable (or back) puts the other
+//! channel's ftmd at this path, and that one belongs to the other channel's socket. This ftmd keeps serving its panes
+//! until it exits, and the other channel starts a daemon of its own.
 
 use crate::frame;
 use crate::state::{self, Shared};
 use eyre::{Result, WrapErr, bail, eyre};
+use ftm_core::paths;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::io::Read;
@@ -35,12 +39,16 @@ const PARENT_EXIT_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct Handshake {
     pub version: String,
     pub frame: u8,
+    /// Absent from builds that predate it.
+    #[serde(default)]
+    pub channel: Option<String>,
 }
 
 pub fn print_handshake() {
     let handshake = Handshake {
         version: env!("CARGO_PKG_VERSION").to_string(),
         frame: frame::VERSION,
+        channel: Some(paths::CHANNEL.to_string()),
     };
     println!("{}", serde_json::to_string(&handshake).expect("serializable"));
 }
@@ -180,6 +188,19 @@ pub fn watch(shared: Shared) -> Option<mpsc::Receiver<Candidate>> {
                 tokio::task::spawn_blocking(move || probe(&exe)).await
             };
             match probed.map_err(eyre::Report::from).and_then(|p| p) {
+                Ok(Handshake {
+                    version,
+                    channel: Some(channel),
+                    ..
+                }) if channel != paths::CHANNEL => {
+                    let reason = format!(
+                        "the new ftmd is a {channel} build and this one {}: it runs its own daemon, and this one keeps \
+                         its panes until it exits",
+                        paths::CHANNEL
+                    );
+                    tracing::warn!("not restarting onto ftmd {version}: {reason}");
+                    state::update_blocked(&shared, Some(version), reason);
+                },
                 Ok(h) if h.frame == frame::VERSION => {
                     let candidate = Candidate {
                         exe: exe.clone(),

@@ -1,5 +1,11 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "FTM Nightly",
-  "identifier": "dev.frazzer.ftm.nightly"
+  "identifier": "dev.frazzer.ftm.nightly",
+  "bundle": {
+    "linux": {
+      "deb": { "conflicts": ["ftm"], "replaces": ["ftm"] },
+      "rpm": { "conflicts": ["ftm"], "obsoletes": ["ftm"] }
+    }
+  }
 }
