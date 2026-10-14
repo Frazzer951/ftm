@@ -83,6 +83,10 @@ pub struct SpawnRequest {
     pub base: Option<String>,
     pub copy_changes: bool,
     pub brief: Option<String>,
+    /// For a terminal: a POSIX sh script its first pane runs before handing over to a login shell. An ftmd from
+    /// before the field ignores it and opens a plain shell.
+    #[serde(default)]
+    pub command: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,4 +136,25 @@ pub enum Event {
     /// speaks another holder protocol, or does not start). Sent on subscribe until ftmd restarts. `version` is the
     /// new build's, when it could say.
     UpdateBlocked { version: Option<String>, reason: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Old and new clients and daemons talk to each other across an upgrade, so fields a side does not know are
+    /// ignored and fields it lacks default.
+    #[test]
+    fn spawn_tolerates_fields_across_versions() {
+        let old = r#"{"op":"spawn","kind":"terminal","name":null,"parent":null,"cwd":"/","worktree_branch":null,"base":null,"copy_changes":false,"brief":null}"#;
+        let Request::Spawn(req) = serde_json::from_str(old).unwrap() else {
+            panic!()
+        };
+        assert_eq!(req.command, None);
+        let newer = old.replace(r#""brief":null"#, r#""brief":null,"command":"true","future":1"#);
+        let Request::Spawn(req) = serde_json::from_str(&newer).unwrap() else {
+            panic!()
+        };
+        assert_eq!(req.command.as_deref(), Some("true"));
+    }
 }

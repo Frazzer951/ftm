@@ -169,6 +169,7 @@ fn main() -> Result<()> {
                 base,
                 copy_changes,
                 brief: brief.map(std::fs::read_to_string).transpose()?,
+                command: None,
             })
         },
         Command::Status { status, id } => Request::SetStatus {

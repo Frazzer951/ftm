@@ -1,0 +1,31 @@
+# Maintainer: Luke Eltiste <luke343279@gmail.com>
+# Rendered by .github/workflows/nightly.yml, which fills in the version and checksums and attaches it to the nightly
+# pre-release. Never pushed to the AUR. The nightly installs the same /usr/bin paths as ftm-bin, so it replaces it.
+
+pkgname=ftm-nightly-bin
+_pkgver=@VERSION@
+# 0.1.4-nightly.20261014.11 becomes 0.1.4_nightly.20261014.11, which vercmp orders after the previous nightly and
+# the previous stable release.
+pkgver=${_pkgver//-/_}
+pkgrel=1
+pkgdesc="Terminal workspace manager for Claude Code agents (nightly build of main)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/Frazzer951/ftm"
+license=('MIT')
+depends=('webkit2gtk-4.1' 'gtk3' 'gst-plugins-good' 'libsoup3' 'glib2' 'cairo' 'gdk-pixbuf2' 'dbus' 'hicolor-icon-theme' 'gcc-libs' 'glibc')
+provides=('ftm')
+conflicts=('ftm' 'ftm-bin')
+options=('!strip' '!debug')
+source=("LICENSE-$_pkgver::https://raw.githubusercontent.com/Frazzer951/ftm/v$_pkgver/LICENSE")
+source_x86_64=("ftm-$_pkgver-x86_64.deb::$url/releases/download/v$_pkgver/FTM.Nightly_${_pkgver}_amd64.deb")
+source_aarch64=("ftm-$_pkgver-aarch64.deb::$url/releases/download/v$_pkgver/FTM.Nightly_${_pkgver}_arm64.deb")
+noextract=("ftm-$_pkgver-x86_64.deb" "ftm-$_pkgver-aarch64.deb")
+sha256sums=('@SHA256_LICENSE@')
+sha256sums_x86_64=('@SHA256_X86_64@')
+sha256sums_aarch64=('@SHA256_AARCH64@')
+
+# ftm-app, ftm and ftmd stay side by side in /usr/bin: the app and ftmd find each other next to their own executable.
+package() {
+  bsdtar -xOf "ftm-$_pkgver-$CARCH.deb" 'data.tar.*' | bsdtar -xf - -C "$pkgdir"
+  install -Dm644 "LICENSE-$_pkgver" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

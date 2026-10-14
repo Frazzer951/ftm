@@ -23,6 +23,7 @@ fn spawn_terminal(conn: &mut Conn, cwd: &Path, name: &str) -> Workspace {
         base: None,
         copy_changes: false,
         brief: None,
+        command: None,
     })) else {
         panic!("expected spawned")
     };
@@ -112,6 +113,41 @@ fn ftmd_restart_keeps_sessions() {
     assert_eq!(pids(&mut req, pane, "after"), (shell, holder));
     req.type_in(right, "echo right-$((1+1))\n");
     wait_for_output(&mut events, right, "right-2");
+}
+
+/// A terminal's command (an update's `makepkg -si`) runs once: a restarted ftmd reattaches to the pane's shell rather
+/// than starting the pane again.
+#[test]
+fn ftmd_restart_does_not_rerun_a_terminal_command() {
+    let dir = temp_root("rerun");
+    let mut daemon = start_daemon("rerun", |_| {});
+    let mut req = Conn::open(&daemon.socket);
+    let mut events = Conn::open(&daemon.socket);
+    events.send(&Request::Subscribe);
+    let runs = dir.join("runs");
+    let Response::Spawned { workspace } = req.send(&Request::Spawn(SpawnRequest {
+        kind: Kind::Terminal,
+        name: Some("once".into()),
+        parent: None,
+        cwd: dir.clone(),
+        worktree_branch: None,
+        base: None,
+        copy_changes: false,
+        brief: None,
+        command: Some(format!("echo run >> '{}'; echo ran-$((2+2))", runs.display())),
+    })) else {
+        panic!("expected spawned")
+    };
+    let pane = workspace.tabs[0].layout.panes()[0];
+    wait_for_output(&mut events, pane, "ran-4");
+    let before = pids(&mut req, pane, "before");
+    drop((req, events));
+
+    daemon.restart();
+
+    let mut req = Conn::open(&daemon.socket);
+    assert_eq!(pids(&mut req, pane, "after"), before);
+    assert_eq!(std::fs::read_to_string(&runs).unwrap(), "run\n");
 }
 
 #[test]
@@ -317,6 +353,7 @@ fn folders_and_pins_are_remembered() {
         base: None,
         copy_changes: false,
         brief: None,
+        command: None,
     })) else {
         panic!()
     };

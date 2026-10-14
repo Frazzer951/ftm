@@ -62,7 +62,13 @@ A run skips the build when `main` is still at the commit of the last nightly; ti
   and their tags are deleted, as are drafts left by failed runs.
 - **Homebrew**: renders `packaging/homebrew/ftm@nightly.rb` and pushes it to the tap as `Casks/ftm@nightly.rb`
   (`brew install --cask frazzer951/ftm/ftm@nightly`), which links the CLI as `ftm-nightly`. It never touches
-  `Casks/ftm.rb`, the PKGBUILD or the AUR.
+  `Casks/ftm.rb`.
+- **PKGBUILD**: renders `packaging/aur/ftm-nightly-bin/PKGBUILD` with the nightly `.deb` checksums and attaches it to
+  the pre-release as `PKGBUILD`, after publishing, as release.yml does for `ftm-bin`. It is never pushed to the AUR;
+  it is what the app's update check installs on the nightly channel. pacman's version can't contain `-`, so
+  `0.1.4-nightly.20261014.11` becomes `0.1.4_nightly.20261014.11`. `vercmp` orders that after every earlier nightly and
+  after the previous stable release. `ftm-nightly-bin` and `ftm-bin` both provide `ftm` and conflict with each other,
+  so installing one asks to remove the other.
 
 The Linux `.deb` and `.rpm` are attached too. They install the same `/usr/bin` paths as stable, so on Linux you have
 one channel or the other, never both. The package is `ftm-nightly` against stable's `ftm`, and each declares the other

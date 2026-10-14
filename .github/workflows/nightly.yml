@@ -2,8 +2,8 @@ name: Nightly
 
 # Builds FTM Nightly from main on every push to it (a release's version-bump commit included) into a GitHub pre-release
 # tagged v<next patch>-nightly.<YYYYMMDD>.<run number> that is never marked latest. Then pushes Casks/ftm@nightly.rb to
-# the tap and deletes all but the newest KEEP nightlies. Nothing here touches the stable cask or the PKGBUILD. See
-# RELEASE.md.
+# the tap, attaches an ftm-nightly-bin PKGBUILD to the pre-release and deletes all but the newest KEEP nightlies.
+# Nothing here touches the stable cask, ftm-bin or the AUR. See RELEASE.md.
 
 on:
   push:
@@ -170,6 +170,34 @@ jobs:
             git pull --rebase origin "$(git branch --show-current)"
           done
           exit 1
+
+  pkgbuild:
+    name: ftm-nightly-bin PKGBUILD
+    needs: [plan, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # GitHub turns the space in "FTM Nightly_<version>_<arch>.deb" into a dot.
+      - name: Render PKGBUILD
+        run: |
+          base=https://github.com/$GITHUB_REPOSITORY/releases/download/v$VERSION
+          sha() { curl -fsSL "$1" | sha256sum | cut -d' ' -f1; }
+          mkdir -p out
+          sed -e "s/@VERSION@/$VERSION/" \
+            -e "s/@SHA256_X86_64@/$(sha "$base/FTM.Nightly_${VERSION}_amd64.deb")/" \
+            -e "s/@SHA256_AARCH64@/$(sha "$base/FTM.Nightly_${VERSION}_arm64.deb")/" \
+            -e "s/@SHA256_LICENSE@/$(sha256sum LICENSE | cut -d' ' -f1)/" \
+            packaging/aur/ftm-nightly-bin/PKGBUILD >out/PKGBUILD
+          cat out/PKGBUILD
+      # The app's update check installs from this asset; it is never pushed to the AUR.
+      - name: Attach the PKGBUILD to the pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "v$VERSION" out/PKGBUILD --clobber -R "$GITHUB_REPOSITORY"
 
   prune:
     name: prune old nightlies

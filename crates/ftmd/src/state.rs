@@ -88,6 +88,7 @@ struct Startup<'a> {
     named: bool,
     setup: Option<&'a str>,
     brief: Option<&'a str>,
+    command: Option<&'a str>,
 }
 
 impl State {
@@ -210,6 +211,7 @@ impl State {
             if key == "CLAUDECODE"
                 || key == "FTM_BRIEF"
                 || key == "FTM_SETUP"
+                || key == "FTM_COMMAND"
                 || key.starts_with("CLAUDE_CODE_")
                 || key.starts_with("SUPACODE_")
             {
@@ -229,6 +231,9 @@ impl State {
         }
         if let Some(setup) = startup.and_then(|s| s.setup) {
             cmd.env("FTM_SETUP", setup);
+        }
+        if let Some(command) = startup.and_then(|s| s.command) {
+            cmd.env("FTM_COMMAND", command);
         }
         if let Some(settings) = &self.claude_settings {
             cmd.env("FTM_CLAUDE_SETTINGS", settings);
@@ -461,7 +466,8 @@ fn shell() -> String {
 
 /// Runs under the user's login shell, which may be fish, so it sticks to syntax fish, zsh and bash share: optional
 /// arguments are decided here rather than with `${VAR:+...}`, and values come in through quoted variables. The repo's
-/// setup is POSIX sh whatever the login shell, so it runs in its own `sh` from `$FTM_SETUP`.
+/// setup and a terminal's command are POSIX sh whatever the login shell, so each runs in its own `sh` from
+/// `$FTM_SETUP` or `$FTM_COMMAND`.
 fn script(startup: Startup, settings: bool) -> Option<String> {
     let setup = if startup.setup.is_some() {
         r#"/bin/sh -c "$FTM_SETUP"; "#
@@ -481,6 +487,8 @@ fn script(startup: Startup, settings: bool) -> Option<String> {
             line.push_str(r#" "$FTM_BRIEF""#);
         }
         Some(format!(r#"{setup}{line}; exec "$SHELL" -l"#))
+    } else if startup.command.is_some() {
+        Some(format!(r#"{setup}/bin/sh -c "$FTM_COMMAND"; exec "$SHELL" -l"#))
     } else if startup.setup.is_some() {
         Some(format!(r#"{setup}exec "$SHELL" -l"#))
     } else {
@@ -682,6 +690,9 @@ fn set_status(ws: &mut Workspace, status: Status) {
 }
 
 fn spawn(shared: &Shared, req: SpawnRequest) -> Result<Response> {
+    if req.command.is_some() && req.kind == Kind::Agent {
+        bail!("a command only applies to terminals");
+    }
     if let Some(parent) = req.parent
         && !lock(shared).workspaces.contains_key(&parent)
     {
@@ -739,6 +750,7 @@ fn spawn(shared: &Shared, req: SpawnRequest) -> Result<Response> {
         named,
         setup: setup.as_deref(),
         brief: req.brief.as_deref(),
+        command: req.command.as_deref(),
     };
     let pane = match state.open_pane(shared, id, Some(startup)) {
         Ok(pane) => pane,
@@ -753,8 +765,8 @@ fn spawn(shared: &Shared, req: SpawnRequest) -> Result<Response> {
         layout: Layout::Pane { id: pane },
     });
     let workspace = ws.clone();
-    // The folder the user picked, not the worktree made from it.
-    if req.parent.is_none() {
+    // The folder the user picked, not the worktree made from it. A one-off command is not a pick.
+    if req.parent.is_none() && req.command.is_none() {
         state.remember_folder(req.cwd.clone());
     }
     state.emit_workspaces();
@@ -916,6 +928,7 @@ mod tests {
             named,
             setup: None,
             brief,
+            command: None,
         };
         assert!(!script(startup(false, None), false).unwrap().contains(" -n "));
         for shell in ["/bin/sh", "/bin/bash", "/bin/zsh", "/bin/fish", "/usr/bin/fish"]

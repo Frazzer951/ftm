@@ -20,6 +20,24 @@ Every release ships the app with the `ftm` CLI and the `ftmd` daemon inside it. 
 you installed with (`brew upgrade`, or the newer `.deb`, `.rpm` or `PKGBUILD`): within a few seconds the running ftmd
 moves itself onto the new build, keeping every session, and the app asks to be reopened.
 
+The app checks GitHub for a newer release about 10 seconds after it starts, then every 6 hours, and shows a notice
+when one is out. On an Arch install from a release `PKGBUILD` (`ftm-bin` or `ftm-nightly-bin`, owned by pacman under
+`/usr/bin`), the notice has an **Update** button. It opens an "FTM <version> update" terminal workspace that downloads
+the new `PKGBUILD` and runs `makepkg -si` there, so you can watch the build, confirm pacman's questions and type your
+sudo password. **Dismiss** hides that version until a newer one comes out. Other installs only check when you turn it
+on, and then just say a release is out.
+
+The check follows the build's own channel unless you pick one. Pick the other channel and the app offers its newest
+build as a **Switch**, whatever its version. Switching replaces the installed package (pacman asks before removing
+the other one) and starts a fresh daemon: open panes and sessions stay with the old one and don't carry over (see
+below). Set both under ⚙ → Updates, or in `~/.config/ftm/config.toml`:
+
+```toml
+[updates]
+check = false        # never check; true checks on any install. Unset: only on a pacman ftm-bin/ftm-nightly-bin install
+channel = "nightly"  # or "stable". Unset: this build's own channel
+```
+
 **macOS** (Apple silicon and Intel), with Homebrew:
 
 ```sh
@@ -45,6 +63,9 @@ mkdir ftm-bin && cd ftm-bin
 curl -fLO https://github.com/Frazzer951/ftm/releases/latest/download/PKGBUILD
 makepkg -si
 ```
+
+Each nightly pre-release carries an `ftm-nightly-bin` `PKGBUILD` the same way. It conflicts with `ftm-bin`, so
+installing one replaces the other. The simplest way in is to set `channel = "nightly"` and take the app's Switch.
 
 **Debian, Ubuntu** (22.04 or newer) and **Fedora** (x86_64 and aarch64): take the `.deb` or `.rpm` for your
 architecture from the [latest release](https://github.com/Frazzer951/ftm/releases/latest), then

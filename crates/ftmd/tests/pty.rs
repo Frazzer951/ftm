@@ -24,6 +24,7 @@ fn pty_streams_and_accepts_input() {
         base: None,
         copy_changes: false,
         brief: None,
+        command: None,
     })) else {
         panic!("expected spawned")
     };
@@ -116,6 +117,7 @@ fn close_kills_foreground_job_and_removes_worktree() {
         base: None,
         copy_changes: false,
         brief: None,
+        command: None,
     })) else {
         panic!("expected spawned")
     };
@@ -163,6 +165,7 @@ fn resize_to_the_same_size_makes_the_pane_repaint() {
         base: None,
         copy_changes: false,
         brief: None,
+        command: None,
     })) else {
         panic!("expected spawned")
     };
@@ -211,6 +214,7 @@ fn send_enter_presses_enter_in_its_own_read() {
         base: None,
         copy_changes: false,
         brief: None,
+        command: None,
     })) else {
         panic!("expected spawned")
     };
@@ -257,4 +261,41 @@ fn send_enter_presses_enter_in_its_own_read() {
     send(&["no enter"]);
     assert_eq!(reads(4)[3], "no enter");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A terminal's command runs under `sh` whatever the login shell, then the pane stays open on a shell.
+#[test]
+fn terminal_command_runs_then_leaves_a_shell() {
+    let dir = temp_root("cmd");
+    let daemon = start_daemon("cmd", |c| {
+        c.env("XDG_DATA_HOME", &dir);
+    });
+    let mut req = Conn::open(&daemon.socket);
+    let mut events = Conn::open(&daemon.socket);
+    assert!(matches!(events.send(&Request::Subscribe), Response::Ok));
+
+    let Response::Spawned { workspace } = req.send(&Request::Spawn(SpawnRequest {
+        kind: Kind::Terminal,
+        name: Some("update".into()),
+        parent: None,
+        cwd: dir.clone(),
+        worktree_branch: None,
+        base: None,
+        copy_changes: false,
+        brief: None,
+        command: Some("d=$(echo cmd); echo \"ran-$d-$((1+1))\"".into()),
+    })) else {
+        panic!("expected spawned")
+    };
+    let Layout::Pane { id: pane } = workspace.tabs[0].layout else {
+        panic!("expected one pane")
+    };
+    wait_for_output(&mut events, pane, "ran-cmd-2");
+    req.type_in(pane, "echo after-$((2+1))\n");
+    wait_for_output(&mut events, pane, "after-3");
+
+    let Response::Folders { folders } = req.send(&Request::Folders) else {
+        panic!("expected folders")
+    };
+    assert!(folders.is_empty(), "{folders:?}");
 }

@@ -68,7 +68,41 @@ pub struct Settings {
     pub terminal: TerminalSettings,
     pub theme: ThemeSettings,
     pub sounds: SoundSettings,
+    pub updates: UpdateSettings,
 }
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UpdateSettings {
+    /// Look for a newer release. Unset means only when installed from the release's `PKGBUILD` (pacman `ftm-bin`),
+    /// the one install the app can upgrade by itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check: Option<bool>,
+    /// The channel to update from. Unset means this build's own; the other one is offered as a switch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<Channel>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Channel {
+    Stable,
+    Nightly,
+}
+
+impl Channel {
+    /// The channel this build was made for.
+    pub fn current() -> Self {
+        if crate::paths::CHANNEL == "nightly" {
+            Channel::Nightly
+        } else {
+            Channel::Stable
+        }
+    }
+}
+
+/// Keys the app owns that are left out while unset, so saving has to remove them rather than leave the old value.
+const OPTIONAL_KEYS: &[(&str, &str)] = &[("updates", "check"), ("updates", "channel")];
 
 /// Sounds the app plays on status changes, by name from its sound list; an empty name plays nothing.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -162,9 +196,18 @@ impl Settings {
             Err(e) => return Err(io(e)),
         };
         let ours = toml::Table::try_from(self).expect("settings serialize to a table");
+        for (section, key) in OPTIONAL_KEYS {
+            if let Some(toml::Value::Table(existing)) = doc.get_mut(*section) {
+                existing.remove(*key);
+                if existing.is_empty() {
+                    doc.remove(*section);
+                }
+            }
+        }
         for (section, values) in ours {
             match (doc.get_mut(&section), values) {
                 (Some(toml::Value::Table(existing)), toml::Value::Table(values)) => existing.extend(values),
+                (None, toml::Value::Table(values)) if values.is_empty() => {},
                 (_, values) => {
                     doc.insert(section, values);
                 },
@@ -224,7 +267,34 @@ mod tests {
         assert!(text.contains("future = \"keep\"") && text.contains("[other]"), "{text}");
         assert!(text.contains("[theme]") && text.contains("follow_system = true"), "{text}");
         assert!(text.contains("needs_input = \"\""), "{text}");
+        assert!(!text.contains("[updates]"), "{text}");
         assert_eq!(Settings::load(&path).unwrap(), settings);
+
+        std::fs::write(&path, "[updates]\ncheck = false\n").unwrap();
+        let settings = Settings::load(&path).unwrap();
+        assert_eq!(settings.updates.check, Some(false));
+        assert_eq!(settings.updates.channel, None);
+
+        std::fs::write(&path, "[updates]\ncheck = true\nchannel = \"nightly\"\nfuture = 1\n").unwrap();
+        let mut settings = Settings::load(&path).unwrap();
+        assert_eq!(settings.updates.check, Some(true));
+        assert_eq!(settings.updates.channel, Some(Channel::Nightly));
+        settings.updates.channel = Some(Channel::Stable);
+        settings.save(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("channel = \"stable\"") && text.contains("future = 1"), "{text}");
+        assert_eq!(Settings::load(&path).unwrap(), settings);
+
+        // Unset again: the keys go, and so does a section left empty.
+        Settings::default().save(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains("check") && !text.contains("channel") && text.contains("future = 1"),
+            "{text}"
+        );
+        std::fs::write(&path, "[updates]\ncheck = false\n").unwrap();
+        Settings::default().save(&path).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("[updates]"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

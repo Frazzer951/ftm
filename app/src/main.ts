@@ -281,6 +281,14 @@ let fontList: Promise<FontFamily[]> | null = null;
 
 let soundSettings: SoundSettings = { needs_input: "Nudge", completed: "Chime", volume: 0.7 };
 
+type Channel = "stable" | "nightly";
+/// Unset (`null`) means automatic: check only on a pacman install, on this build's own channel.
+interface UpdateSettings {
+  check: boolean | null;
+  channel: Channel | null;
+}
+let updateSettings: UpdateSettings = { check: null, channel: null };
+
 const playSound = (name: string, volume = soundSettings.volume) =>
   play(name, volume).catch((err) => console.error(`playing ${name}`, err));
 
@@ -539,6 +547,8 @@ function setupSettingsDialog() {
     field("font_size").value = String(settings.font_size);
     field("line_height").value = String(settings.line_height);
     field("ligatures").checked = settings.ligatures;
+    $<HTMLSelectElement>("update-check").value = updateSettings.check === null ? "" : String(updateSettings.check);
+    $<HTMLSelectElement>("update-channel").value = updateSettings.channel ?? "";
     $("settings-error").textContent = "";
     preview();
     dialog.showModal();
@@ -565,8 +575,16 @@ function setupSettingsDialog() {
       line_height: Number(field("line_height").value) || settings.line_height,
       ligatures: field("ligatures").checked,
     };
+    const check = $<HTMLSelectElement>("update-check").value;
+    const updates: UpdateSettings = {
+      check: check === "" ? null : check === "true",
+      channel: ($<HTMLSelectElement>("update-channel").value || null) as Channel | null,
+    };
     try {
-      await invoke("save_settings", { settings: { terminal: next, theme: draft, sounds: soundDraft } });
+      await invoke("save_settings", { settings: { terminal: next, theme: draft, sounds: soundDraft, updates } });
+      const recheck = updates.check !== updateSettings.check || updates.channel !== updateSettings.channel;
+      updateSettings = updates;
+      if (recheck) checkForRelease().catch(console.error);
       settings = next;
       themeSettings = { ...draft };
       soundSettings = { ...soundDraft };
@@ -1165,21 +1183,51 @@ function targetPane(): Id | undefined {
   return focused && panes.includes(focused) ? focused : panes[0];
 }
 
-/** A dismissable message in the corner; showing one under a key that is already up replaces it, `null` removes it. */
-function notice(key: string, message: string | null, kind: "warning" | "error" = "warning") {
+/**
+ * A dismissable message in the corner; showing one under a key that is already up replaces it, `null` removes it.
+ * Each action is a button that also closes the notice; `onClose` runs when × closes it.
+ */
+function notice(
+  key: string,
+  message: string | null,
+  kind: "warning" | "error" | "info" = "warning",
+  actions: [string, () => void][] = [],
+  onClose?: () => void,
+) {
   const box = $("notices");
   box.querySelector(`[data-key="${key}"]`)?.remove();
   if (message === null) return;
   const el = document.createElement("div");
   el.className = `notice ${kind}`;
   el.dataset.key = key;
+  const body = document.createElement("div");
+  body.className = "notice-body";
   const text = document.createElement("span");
   text.textContent = message;
+  body.append(text);
+  if (actions.length) {
+    const row = document.createElement("div");
+    row.className = "notice-actions";
+    for (const [label, run] of actions) {
+      const button = document.createElement("button");
+      button.textContent = label;
+      button.onclick = () => {
+        el.remove();
+        run();
+      };
+      row.append(button);
+    }
+    body.append(row);
+  }
   const close = document.createElement("button");
+  close.className = "notice-close";
   close.textContent = "×";
   close.title = "Dismiss";
-  close.onclick = () => el.remove();
-  el.append(text, close);
+  close.onclick = () => {
+    el.remove();
+    onClose?.();
+  };
+  el.append(body, close);
   box.append(el);
 }
 
@@ -1345,8 +1393,11 @@ setInterval(() => refreshAllGit().catch(console.error), 10_000);
 new ResizeObserver(() => requestAnimationFrame(fitVisible)).observe($("panes"));
 setupSpawnDialog();
 setupSettingsDialog();
-invoke<{ terminal: TerminalSettings; theme: ThemeSettings; sounds: SoundSettings }>("get_settings")
+invoke<{ terminal: TerminalSettings; theme: ThemeSettings; sounds: SoundSettings; updates: Partial<UpdateSettings> }>(
+  "get_settings",
+)
   .then((loaded) => {
+    updateSettings = { check: loaded.updates.check ?? null, channel: loaded.updates.channel ?? null };
     settings = loaded.terminal;
     themeSettings = loaded.theme;
     soundSettings = loaded.sounds;
@@ -1376,8 +1427,12 @@ const events = listen<FtmEvent>("ftm-event", ({ payload }) => {
   }
 });
 
+/// The daemon's version as of the last (re)connect; one older than the app may not know how to run a command.
+let daemonVersion: string | null = null;
+
 // Each (re)connect of the event stream reports the daemon's version, then replays any update_blocked.
 const daemon = listen<{ version: string; app_version: string }>("ftm-daemon", ({ payload }) => {
+  daemonVersion = payload.version === payload.app_version ? payload.version : null;
   notice("update", null);
   notice(
     "version",
@@ -1387,3 +1442,86 @@ const daemon = listen<{ version: string; app_version: string }>("ftm-daemon", ({
   );
 });
 Promise.all([events, daemon]).then(() => invoke("subscribe"));
+
+interface Release {
+  version: string;
+  channel: Channel;
+  switch: boolean;
+  script: string | null;
+}
+
+const releaseName = (r: Release) => `${r.channel === "nightly" ? "FTM Nightly" : "FTM"} ${r.version}`;
+
+const DISMISSED_RELEASE = "ftm.dismissedRelease";
+
+function dismissedRelease(): string | null {
+  try {
+    return localStorage.getItem(DISMISSED_RELEASE);
+  } catch {
+    return null;
+  }
+}
+
+async function checkForRelease() {
+  const release = await invoke<Release | null>("check_update");
+  if (!release) {
+    notice("release", null);
+    return;
+  }
+  if (release.version === dismissedRelease()) return;
+  const dismiss = () => {
+    try {
+      localStorage.setItem(DISMISSED_RELEASE, release.version);
+    } catch {}
+  };
+  const name = releaseName(release);
+  const fresh = release.switch
+    ? " Switching channels starts a fresh daemon: open panes and sessions stay with this one and don't carry over."
+    : "";
+  if (!release.script) {
+    const how = release.switch ? "Install it" : "Upgrade it";
+    notice("release", `${name} is available. ${how} with your package manager.${fresh}`, "info", [], dismiss);
+    return;
+  }
+  notice(
+    "release",
+    release.switch ? `Switch to ${name}?${fresh}` : `${name} is available.`,
+    "info",
+    [
+      [release.switch ? "Switch" : "Update", () => installRelease(release, release.script as string)],
+      ["Dismiss", dismiss],
+    ],
+    dismiss,
+  );
+}
+
+/// Runs the install in a pane of its own, where makepkg shows its progress and sudo can ask for the password.
+async function installRelease(release: Release, script: string) {
+  // An ftmd older than this app ignores the command and would open a bare shell.
+  if (daemonVersion === null) {
+    notice("release", `To install ${releaseName(release)}, run this in a terminal:\n\n${script}`, "info");
+    return;
+  }
+  try {
+    const r = await request({
+      op: "spawn",
+      kind: "terminal",
+      name: `${releaseName(release)} ${release.switch ? "switch" : "update"}`,
+      parent: null,
+      cwd: home || "/",
+      worktree_branch: null,
+      base: null,
+      copy_changes: false,
+      brief: null,
+      command: script,
+    });
+    selected = r.workspace.id;
+    render();
+  } catch (err) {
+    console.error(err);
+    notice("release", `Could not start installing ${releaseName(release)}: ${err}`, "error");
+  }
+}
+
+setTimeout(() => checkForRelease().catch(console.error), 10_000);
+setInterval(() => checkForRelease().catch(console.error), 6 * 60 * 60 * 1000);
