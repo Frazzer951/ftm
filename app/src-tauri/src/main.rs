@@ -3,6 +3,7 @@
 mod crash_log;
 mod daemon;
 mod fonts;
+mod open_in;
 mod sounds;
 mod themes;
 
@@ -149,6 +150,26 @@ async fn list_themes() -> Vec<ftm_core::theme::ThemeEntry> {
     }
     let listed = tauri::async_runtime::spawn_blocking(themes::all).await.unwrap_or_default();
     THEMES.get_or_init(|| listed).clone()
+}
+
+/// Detected once per app run, off the main thread: Spotlight can stall while it indexes.
+#[tauri::command]
+async fn open_targets() -> Vec<open_in::OpenTarget> {
+    static TARGETS: std::sync::OnceLock<Vec<open_in::OpenTarget>> = std::sync::OnceLock::new();
+    if let Some(cached) = TARGETS.get() {
+        return cached.clone();
+    }
+    let found = tauri::async_runtime::spawn_blocking(open_in::installed)
+        .await
+        .unwrap_or_default();
+    TARGETS.get_or_init(|| found).clone()
+}
+
+#[tauri::command]
+async fn open_in(target: String, path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || open_in::open(&target, &path))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -302,6 +323,8 @@ fn main() {
             list_themes,
             list_sounds,
             sound_data,
+            open_targets,
+            open_in,
             log,
             ensure_on_screen
         ])
