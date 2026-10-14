@@ -478,6 +478,9 @@ fn worktrees_copy_ignored_files() {
     write("dbt_profiles/run.sh", "#!/bin/sh\n", 0o755);
     write("big/data.bin", "lots\n", 0o644);
     std::os::unix::fs::symlink("../outside/secret", repo.join("link")).unwrap();
+    write(".claude/locked", "x\n", 0o000);
+    write(".claude/sealed/inner", "x\n", 0o644);
+    std::fs::set_permissions(repo.join(".claude/sealed"), std::fs::Permissions::from_mode(0o000)).unwrap();
 
     let daemon = start_daemon("ignored", |c| {
         c.env("HOME", root.join("home"))
@@ -516,6 +519,8 @@ fn worktrees_copy_ignored_files() {
         assert!(!wt.join(skipped).exists(), "{skipped} was copied");
     }
     assert!(wt.join("pkg/index.js").is_file());
+    // Unreadable paths are logged and left out; the rest still comes over.
+    assert!(!wt.join(".claude/locked").exists() && !wt.join(".claude/sealed/inner").exists());
 
     let wt = spawn("exclude", "copy_ignored_exclude = [\"big\", \"*.sh\"]\n");
     assert!(wt.join(".env").is_file() && wt.join("dbt_profiles/profiles.yml").is_file());
@@ -531,5 +536,6 @@ fn worktrees_copy_ignored_files() {
     assert!(!wt.join(".env").exists() && !wt.join(".claude").exists());
 
     drop(daemon);
+    std::fs::set_permissions(repo.join(".claude/sealed"), std::fs::Permissions::from_mode(0o755)).unwrap();
     let _ = std::fs::remove_dir_all(&root);
 }

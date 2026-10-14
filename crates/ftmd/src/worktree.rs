@@ -52,7 +52,7 @@ pub fn create(cwd: &Path, branch: &str, base: Option<&str>, copy_changes: bool) 
         copy_tracked_changes(&repo, &path)?;
         let untracked = git(&repo, &["ls-files", "--others", "--exclude-standard", "-z"])?;
         for rel in split_nul(&untracked) {
-            copy_entry(&repo, &path, &rel, &Excludes::default(), &mut copied)?;
+            copy_entry(&repo, &path, &rel, &Excludes::default(), &mut copied);
         }
     }
     match &config.copy_ignored {
@@ -64,7 +64,7 @@ pub fn create(cwd: &Path, branch: &str, base: Option<&str>, copy_changes: bool) 
                 &["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"],
             )?;
             for rel in split_nul(&ignored) {
-                copy_entry(&repo, &path, &rel, &excludes, &mut copied)?;
+                copy_entry(&repo, &path, &rel, &excludes, &mut copied);
             }
         },
         CopyIgnored::Only(patterns) => {
@@ -75,17 +75,18 @@ pub fn create(cwd: &Path, branch: &str, base: Option<&str>, copy_changes: bool) 
                     .flatten()
                     .filter_map(|p| p.strip_prefix(&repo).ok().map(Path::to_path_buf))
                 {
-                    copy_entry(&repo, &path, &rel, &Excludes::default(), &mut copied)?;
+                    copy_entry(&repo, &path, &rel, &Excludes::default(), &mut copied);
                 }
             }
         },
     }
     tracing::info!(
-        "copied {} files ({} KiB) into {}, skipped {}",
+        "copied {} files ({} KiB) into {}, skipped {}, failed {}",
         copied.files,
         copied.bytes / 1024,
         path.display(),
-        copied.skipped
+        copied.skipped,
+        copied.failed
     );
 
     Ok(Created {
@@ -127,6 +128,7 @@ struct Copied {
     files: u64,
     bytes: u64,
     skipped: u64,
+    failed: u64,
 }
 
 /// Names or globs matched against every component of a repo-relative path, and against the whole path.
@@ -157,8 +159,16 @@ fn split_nul(s: &str) -> impl Iterator<Item = PathBuf> + '_ {
 
 /// Copies `from/rel` to `to/rel`, recursing into directories. Symlinks are recreated, never followed; nested
 /// repositories and worktrees (a directory holding `.git`) and special files are skipped. On macOS `fs::copy` clones
-/// on APFS and falls back to a byte copy; either way the file mode is kept.
-fn copy_entry(from: &Path, to: &Path, rel: &Path, excludes: &Excludes, copied: &mut Copied) -> Result<()> {
+/// on APFS and falls back to a byte copy; either way the file mode is kept. Best effort: a path that fails to copy is
+/// logged and counted, and the rest are still copied.
+fn copy_entry(from: &Path, to: &Path, rel: &Path, excludes: &Excludes, copied: &mut Copied) {
+    if let Err(e) = try_copy_entry(from, to, rel, excludes, copied) {
+        tracing::warn!("not copying {}: {e:#}", rel.display());
+        copied.failed += 1;
+    }
+}
+
+fn try_copy_entry(from: &Path, to: &Path, rel: &Path, excludes: &Excludes, copied: &mut Copied) -> Result<()> {
     if excludes.matches(rel) {
         tracing::debug!("not copying excluded {}", rel.display());
         copied.skipped += 1;
@@ -180,21 +190,26 @@ fn copy_entry(from: &Path, to: &Path, rel: &Path, excludes: &Excludes, copied: &
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let wrap = || format!("copying {}", rel.display());
     if kind.is_symlink() {
-        let target = std::fs::read_link(&src).wrap_err_with(wrap)?;
+        let target = std::fs::read_link(&src)?;
         match std::os::unix::fs::symlink(&target, &dst) {
-            Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e).wrap_err_with(wrap),
+            Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e.into()),
             _ => copied.files += 1,
         }
     } else if kind.is_dir() {
-        std::fs::create_dir_all(&dst).wrap_err_with(wrap)?;
-        for entry in std::fs::read_dir(&src).wrap_err_with(wrap)? {
-            copy_entry(from, to, &rel.join(entry?.file_name()), excludes, copied)?;
+        std::fs::create_dir_all(&dst)?;
+        for entry in std::fs::read_dir(&src)? {
+            match entry {
+                Ok(entry) => copy_entry(from, to, &rel.join(entry.file_name()), excludes, copied),
+                Err(e) => {
+                    tracing::warn!("listing {}: {e}", rel.display());
+                    copied.failed += 1;
+                },
+            }
         }
-        std::fs::set_permissions(&dst, meta.permissions()).wrap_err_with(wrap)?;
+        std::fs::set_permissions(&dst, meta.permissions())?;
     } else {
-        copied.bytes += std::fs::copy(&src, &dst).wrap_err_with(wrap)?;
+        copied.bytes += std::fs::copy(&src, &dst)?;
         copied.files += 1;
     }
     Ok(())
