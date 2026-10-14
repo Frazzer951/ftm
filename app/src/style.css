@@ -145,5 +145,6 @@ dialog#settings { width: 520px; max-height: 92vh; overflow-y: auto; }
 #theme-list .swatches { display: flex; gap: 2px; flex: none; }
 #theme-list .swatches i { width: 10px; height: 14px; border-radius: 2px; }
 .sound-row { display: grid; grid-template-columns: 110px 1fr auto; gap: 6px; align-items: center; }
-.sound-row select { min-width: 0; background: var(--bg); color: inherit; border: 1px solid var(--border-strong); border-radius: 4px; padding: 3px 4px; }
+.select-row { display: grid; grid-template-columns: 110px 1fr; gap: 6px; align-items: center; }
+.sound-row select, .select-row select { min-width: 0; background: var(--bg); color: inherit; border: 1px solid var(--border-strong); border-radius: 4px; padding: 3px 4px; }
 .sound-row button { width: 32px; }

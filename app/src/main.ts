@@ -281,6 +281,14 @@ let fontList: Promise<FontFamily[]> | null = null;
 
 let soundSettings: SoundSettings = { needs_input: "Nudge", completed: "Chime", volume: 0.7 };
 
+type Channel = "stable" | "nightly";
+/// Unset (`null`) means automatic: check only on a pacman install, on this build's own channel.
+interface UpdateSettings {
+  check: boolean | null;
+  channel: Channel | null;
+}
+let updateSettings: UpdateSettings = { check: null, channel: null };
+
 const playSound = (name: string, volume = soundSettings.volume) =>
   play(name, volume).catch((err) => console.error(`playing ${name}`, err));
 
@@ -539,6 +547,8 @@ function setupSettingsDialog() {
     field("font_size").value = String(settings.font_size);
     field("line_height").value = String(settings.line_height);
     field("ligatures").checked = settings.ligatures;
+    $<HTMLSelectElement>("update-check").value = updateSettings.check === null ? "" : String(updateSettings.check);
+    $<HTMLSelectElement>("update-channel").value = updateSettings.channel ?? "";
     $("settings-error").textContent = "";
     preview();
     dialog.showModal();
@@ -565,8 +575,16 @@ function setupSettingsDialog() {
       line_height: Number(field("line_height").value) || settings.line_height,
       ligatures: field("ligatures").checked,
     };
+    const check = $<HTMLSelectElement>("update-check").value;
+    const updates: UpdateSettings = {
+      check: check === "" ? null : check === "true",
+      channel: ($<HTMLSelectElement>("update-channel").value || null) as Channel | null,
+    };
     try {
-      await invoke("save_settings", { settings: { terminal: next, theme: draft, sounds: soundDraft } });
+      await invoke("save_settings", { settings: { terminal: next, theme: draft, sounds: soundDraft, updates } });
+      const recheck = updates.check !== updateSettings.check || updates.channel !== updateSettings.channel;
+      updateSettings = updates;
+      if (recheck) checkForRelease().catch(console.error);
       settings = next;
       themeSettings = { ...draft };
       soundSettings = { ...soundDraft };
@@ -1375,8 +1393,11 @@ setInterval(() => refreshAllGit().catch(console.error), 10_000);
 new ResizeObserver(() => requestAnimationFrame(fitVisible)).observe($("panes"));
 setupSpawnDialog();
 setupSettingsDialog();
-invoke<{ terminal: TerminalSettings; theme: ThemeSettings; sounds: SoundSettings }>("get_settings")
+invoke<{ terminal: TerminalSettings; theme: ThemeSettings; sounds: SoundSettings; updates: Partial<UpdateSettings> }>(
+  "get_settings",
+)
   .then((loaded) => {
+    updateSettings = { check: loaded.updates.check ?? null, channel: loaded.updates.channel ?? null };
     settings = loaded.terminal;
     themeSettings = loaded.theme;
     soundSettings = loaded.sounds;
@@ -1424,8 +1445,12 @@ Promise.all([events, daemon]).then(() => invoke("subscribe"));
 
 interface Release {
   version: string;
+  channel: Channel;
+  switch: boolean;
   script: string | null;
 }
+
+const releaseName = (r: Release) => `${r.channel === "nightly" ? "FTM Nightly" : "FTM"} ${r.version}`;
 
 const DISMISSED_RELEASE = "ftm.dismissedRelease";
 
@@ -1445,16 +1470,21 @@ async function checkForRelease() {
       localStorage.setItem(DISMISSED_RELEASE, release.version);
     } catch {}
   };
+  const name = releaseName(release);
+  const fresh = release.switch
+    ? " Switching channels starts a fresh daemon: open panes and sessions stay with this one and don't carry over."
+    : "";
   if (!release.script) {
-    notice("release", `FTM ${release.version} is available. Upgrade it with your package manager.`, "info", [], dismiss);
+    const how = release.switch ? "Install it" : "Upgrade it";
+    notice("release", `${name} is available. ${how} with your package manager.${fresh}`, "info", [], dismiss);
     return;
   }
   notice(
     "release",
-    `FTM ${release.version} is available.`,
+    release.switch ? `Switch to ${name}?${fresh}` : `${name} is available.`,
     "info",
     [
-      ["Update", () => installRelease(release, release.script as string)],
+      [release.switch ? "Switch" : "Update", () => installRelease(release, release.script as string)],
       ["Dismiss", dismiss],
     ],
     dismiss,
@@ -1465,14 +1495,14 @@ async function checkForRelease() {
 async function installRelease(release: Release, script: string) {
   // An ftmd older than this app ignores the command and would open a bare shell.
   if (daemonVersion === null) {
-    notice("release", `To install FTM ${release.version}, run this in a terminal:\n\n${script}`, "info");
+    notice("release", `To install ${releaseName(release)}, run this in a terminal:\n\n${script}`, "info");
     return;
   }
   try {
     const r = await request({
       op: "spawn",
       kind: "terminal",
-      name: `FTM ${release.version} update`,
+      name: `${releaseName(release)} ${release.switch ? "switch" : "update"}`,
       parent: null,
       cwd: home || "/",
       worktree_branch: null,
@@ -1485,7 +1515,7 @@ async function installRelease(release: Release, script: string) {
     render();
   } catch (err) {
     console.error(err);
-    notice("release", `Could not start the FTM ${release.version} update: ${err}`, "error");
+    notice("release", `Could not start installing ${releaseName(release)}: ${err}`, "error");
   }
 }
 
