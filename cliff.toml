@@ -39,6 +39,7 @@ commit_parsers = [
   { message = ".*", group = "<!-- 6 -->Other" },
 ]
 filter_commits = false
-tag_pattern = "v[0-9]*"
+# Releases and their rc/alpha/beta pre-releases only: nightly tags (v0.1.1-nightly.20261014) must not split the notes.
+tag_pattern = "^v[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc)\\.[0-9]+)?$"
 topo_order = false
 sort_commits = "oldest"
