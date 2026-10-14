@@ -1424,7 +1424,6 @@ Promise.all([events, daemon]).then(() => invoke("subscribe"));
 
 interface Release {
   version: string;
-  release_url: string;
   script: string | null;
 }
 

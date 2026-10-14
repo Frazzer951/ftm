@@ -12,7 +12,6 @@ const PACKAGE: &str = "ftm-bin";
 #[derive(Debug, Deserialize)]
 struct Release {
     tag_name: String,
-    html_url: String,
     #[serde(default)]
     prerelease: bool,
     #[serde(default)]
@@ -30,7 +29,6 @@ struct Asset {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Update {
     pub version: String,
-    pub release_url: String,
     /// The `sh` script that builds and installs the release's PKGBUILD; `None` when this install cannot use it.
     pub script: Option<String>,
 }
@@ -65,7 +63,6 @@ fn newer(release: Release, current: &Version, installable: bool) -> Option<Updat
     };
     Some(Update {
         version: version.to_string(),
-        release_url: release.html_url,
         script,
     })
 }
@@ -112,7 +109,6 @@ mod tests {
     fn release(tag: &str, assets: &[&str]) -> Release {
         Release {
             tag_name: tag.into(),
-            html_url: format!("https://github.com/Frazzer951/ftm/releases/tag/{tag}"),
             prerelease: false,
             draft: false,
             assets: assets

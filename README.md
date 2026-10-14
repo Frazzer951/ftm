@@ -20,6 +20,18 @@ Every release ships the app with the `ftm` CLI and the `ftmd` daemon inside it. 
 you installed with (`brew upgrade`, or the newer `.deb`, `.rpm` or `PKGBUILD`): within a few seconds the running ftmd
 moves itself onto the new build, keeping every session, and the app asks to be reopened.
 
+The app checks GitHub for a newer stable release about 10 seconds after it starts, then every 6 hours, and shows a
+notice when one is out. On an Arch `ftm-bin` install (the release's `PKGBUILD`, owned by pacman under `/usr/bin`), the
+notice has an **Update** button. It opens an "FTM <version> update" terminal workspace that downloads the new
+`PKGBUILD` and runs `makepkg -si` there, so you can watch the build and type your sudo password. **Dismiss** hides
+that version until a newer one comes out. Other installs only check when you turn it on, and then just say a release
+is out. Set it in `~/.config/ftm/config.toml`:
+
+```toml
+[updates]
+check = false   # never check; true checks on any install. Unset: only on a pacman ftm-bin install
+```
+
 **macOS** (Apple silicon and Intel), with Homebrew:
 
 ```sh
