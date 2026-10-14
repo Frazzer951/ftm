@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.1.2] - 2026-10-14
+
+### Docs
+
+- docs: on Linux, install the nightly or the stable package, not both
+
+### Other
+
+- feat(app): macOS text-editing keys in terminal panes
+- ci(nightly): build a nightly on every push to main
+- fix(release): let set-version.sh resolve the index on a cold runner
+- feat(packaging): make the Linux nightly and stable packages replace each other
+- fix(ftmd): start pane holders from the running build on Linux
+
 ## [0.1.1] - 2026-10-14
 
 ### App
