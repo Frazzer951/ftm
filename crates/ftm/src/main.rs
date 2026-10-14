@@ -1,5 +1,6 @@
 mod attach;
 mod client;
+mod gc;
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -100,6 +101,15 @@ enum Command {
         /// Pane id, or a workspace id for the first pane of its first tab
         target: PaneId,
     },
+    /// List FTM worktrees whose branch is merged into the repo's base; --yes removes them and their branches
+    Gc {
+        /// Remove them; without it, only list
+        #[arg(long)]
+        yes: bool,
+        /// Use the last fetch of the base instead of fetching it
+        #[arg(long)]
+        no_fetch: bool,
+    },
     /// Type text into a pane
     Send {
         /// Pane id, or a workspace id for the first pane of its first tab
@@ -187,6 +197,7 @@ fn main() -> Result<()> {
             return Ok(());
         },
         Command::Attach { target } => return attach::run(resolve_pane(target)?),
+        Command::Gc { yes, no_fetch } => return gc::run(yes, !no_fetch),
         Command::Send { target, text, enter } => return send(resolve_pane(target)?, &text, enter),
     };
 

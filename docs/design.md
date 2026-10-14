@@ -55,9 +55,10 @@ ftm pin|unpin [ID]                            # sidebar's Pinned section; top-le
 ftm capture <pane|workspace> [--raw]          # screen + scrollback as text; --raw: last 1 MiB of output bytes
 ftm send <pane|workspace> <text> [--enter]    # type into a pane; a workspace id means its first pane
 ftm attach <pane|workspace>                   # this terminal shows the pane; Ctrl+] then d detaches
+ftm gc [--yes] [--no-fetch]                   # list merged FTM worktrees; --yes removes them and their branches
 ```
 
-Planned: `ftm gc` (remove worktrees whose PR merged), `ftm tab`/`ftm split`.
+Planned: `ftm tab`/`ftm split`.
 
 ## Worktree creation
 
@@ -79,9 +80,36 @@ Steps:
 
 Worktrees live under `~/.local/share/ftm/worktrees/<repo>/<branch>` (`$XDG_DATA_HOME/ftm/worktrees` when set). `--remove-worktree` never forces: it fails on a dirty worktree, deletes the branch only if merged (`git branch -d`), and prunes empty `prefix/` directories.
 
+## Worktree cleanup
+
+`ftm gc` looks only at worktrees under the worktrees dir, so it never touches checkouts FTM did not make. The CLI runs the git checks itself and asks ftmd for the workspace tree, so ftmd must be running. It only knows about the ftmd on its socket, so a dev ftmd's workspaces are not seen by the installed `ftm`, and the other way round. For each repo it fetches the remote of `base` (default `origin/main`) without pruning, unless `--no-fetch` says to use the last fetch. Then it lists each worktree whose branch is done:
+
+- **merged**: the branch tip is an ancestor of `base`. A branch with no commits of its own counts as merged.
+- **squash-merged**: the branch's whole diff from where it left `base` matches a commit in `base` by patch id (`git cherry`).
+- **upstream deleted**: the remote branch is gone (per `git ls-remote`) and the branch tip equals the last fetched tip of its remote-tracking ref, so everything was pushed. This catches PRs merged in a way the two checks above miss, such as a rebase merge. It cannot tell such a PR from one that was closed unmerged.
+
+A done worktree is skipped, with the reason printed, when any of these hold:
+
+- a workspace's cwd is in it
+- `git status --porcelain` shows changes (uncommitted, or untracked and not ignored)
+- its upstream was deleted but it has commits since the last fetched tip
+- its upstream was already pruned, so what was pushed is unknown
+
+Commits whose changes are not in `base` keep a branch out of the merged and squash-merged sets, so nothing unpushed is lost there.
+
+Without `--yes`, gc only lists. With `--yes`, it runs:
+
+1. `git worktree remove` (never forced; ignored files go with the worktree)
+2. `git branch -D` (squash merges are not ancestors, so `-d` would refuse)
+3. deletes the stale remote-tracking ref of an upstream-deleted branch
+4. prunes empty `prefix/` directories
+5. `git worktree prune` per repo
+
+Detached worktrees and unmerged branches are not listed.
+
 ## Testing
 
-- `cargo test` runs `crates/ftmd/tests/agents.rs`: ftmd on a private socket with temp `HOME`/`XDG_*` and `FTM_AGENT_CMD` set to a fake agent that drives the real `ftm` CLI (nesting, `--detached`, status, worktree copy + setup, close/reparent/kill, worktree removal).
+- `cargo test` runs `crates/ftmd/tests/agents.rs`: ftmd on a private socket with temp `HOME`/`XDG_*` and `FTM_AGENT_CMD` set to a fake agent that drives the real `ftm` CLI (nesting, `--detached`, status, worktree copy + setup, close/reparent/kill, worktree removal); `crates/ftmd/tests/gc.rs` runs `ftm gc` against a repo with a bare origin.
 - `scripts/agent-smoke.sh` is an opt-in live check with real Claude (Haiku): an isolated ftmd, a leader agent that spawns a child, and assertions on its results file, `ftm ls --json` and `ftm capture`. It costs a little usage, so it is not part of `cargo test`. Hook-driven status checks get added with milestone 5.
 
 ## Claude Code integration
