@@ -1,5 +1,5 @@
-# git-cliff config. FTM's commits name the component they touch ("ftmd: ...", "App: ..."), not a conventional type, so
-# the changelog groups by that prefix.
+# git-cliff config. FTM's commits are `type(scope): summary` ("feat(app): ...", "fix(ftmd): ..."); older ones name the
+# component as a prefix instead ("ftmd: ...", "App: ..."). The changelog groups by that scope or prefix.
 
 [changelog]
 header = "# Changelog\n\n"
@@ -30,12 +30,12 @@ commit_preprocessors = [
 commit_parsers = [
   { message = "^chore\\(release\\)", skip = true },
   { message = "^Merge ", skip = true },
-  { message = "^(?i)ftmd[,:]", group = "<!-- 0 -->Daemon" },
-  { message = "^(?i)ftm[,:]", group = "<!-- 1 -->CLI" },
-  { message = "^(?i)(app|settings|sidebar|themes|sounds)[,:]", group = "<!-- 2 -->App" },
-  { message = "^(?i)(scripts|scripts/[^:]+|dev\\.sh|install\\.sh)[,:]", group = "<!-- 3 -->Scripts" },
-  { message = "^(?i)(docs|readme)[,:]", group = "<!-- 4 -->Docs" },
-  { message = "^(?i)(ci|release)[,:]", group = "<!-- 5 -->CI and releases" },
+  { message = "^(?i)(ftmd[,:]|[a-z]+\\((ftmd|worktree)\\)!?:)", group = "<!-- 0 -->Daemon" },
+  { message = "^(?i)(ftm[,:]|[a-z]+\\(cli\\)!?:)", group = "<!-- 1 -->CLI" },
+  { message = "^(?i)((app|settings|sidebar|themes|sounds)[,:]|[a-z]+\\((app|settings|sidebar|themes|sounds)\\)!?:)", group = "<!-- 2 -->App" },
+  { message = "^(?i)((scripts|scripts/[^:]+|dev\\.sh|install\\.sh)[,:]|[a-z]+\\((scripts|scripts/[^)]+|dev\\.sh|install\\.sh)\\)!?:)", group = "<!-- 3 -->Scripts" },
+  { message = "^(?i)((docs|readme)[,:]|docs(\\([^)]*\\))?!?:)", group = "<!-- 4 -->Docs" },
+  { message = "^(?i)((ci|release)[,:]|ci(\\([^)]*\\))?!?:|[a-z]+\\((release|packaging|nightly)\\)!?:)", group = "<!-- 5 -->CI and releases" },
   { message = ".*", group = "<!-- 6 -->Other" },
 ]
 filter_commits = false
