@@ -1,7 +1,8 @@
 //! `ftmd pty-holder <socket> <rows> <cols> <cwd> <program> [args...]`: owns one pane's PTY and process tree so they
 //! outlive ftmd (dtach-style). It serves one ftmd at a time on its own socket: every new connection gets `Hello`, the
 //! buffered output, then live output, and replaces the previous connection. It exits once the terminal's processes
-//! are gone, removing its socket.
+//! are gone, removing its socket, but not before some ftmd has had the output: a pane that dies at once still shows
+//! why.
 
 use crate::frame::{self, Frame};
 use eyre::{Result, WrapErr, bail, eyre};
@@ -14,6 +15,9 @@ use std::time::{Duration, Instant};
 
 const BUFFER_CAP: usize = 1 << 20;
 const BUFFER_SLACK: usize = 256 << 10;
+/// How long a holder whose processes are gone waits for its first ftmd, which is still connecting when a pane's
+/// command fails at once. Matches ftmd's own wait for a new holder.
+const ATTACH_GRACE: Duration = Duration::from_secs(5);
 
 struct Shared {
     /// A `Kill` in progress. The terminal hits end of stream as soon as the shell dies (macOS revokes it), while a
@@ -21,6 +25,8 @@ struct Shared {
     killing: Option<std::thread::JoinHandle<()>>,
     buffer: Vec<u8>,
     client: Option<UnixStream>,
+    /// Some ftmd has been sent the buffer.
+    attached: bool,
     rows: u16,
     cols: u16,
 }
@@ -59,6 +65,7 @@ pub fn run(args: &[String]) -> Result<()> {
         killing: None,
         buffer: Vec::new(),
         client: None,
+        attached: false,
         rows,
         cols,
     }));
@@ -82,6 +89,7 @@ pub fn run(args: &[String]) -> Result<()> {
             if frame::write(&mut out, &hello).is_err() || frame::write(&mut out, &Frame::Output(s.buffer.clone())).is_err() {
                 continue;
             }
+            s.attached = true;
             if let Some(old) = s.client.replace(out) {
                 let _ = old.shutdown(std::net::Shutdown::Both);
             }
@@ -94,7 +102,7 @@ pub fn run(args: &[String]) -> Result<()> {
 
 /// Copies PTY output into the buffer and to the current client, under one lock so a new client's replay and the
 /// live stream neither overlap nor gap. Draining continues while processes are being killed, so none of them block on
-/// a full terminal. At end of stream every process on the terminal is gone: reap and exit.
+/// a full terminal. At end of stream every process on the terminal is gone: reap and exit, once an ftmd has the output.
 fn pump_output(
     mut reader: Box<dyn Read + Send>,
     shared: &Mutex<Shared>,
@@ -120,6 +128,10 @@ fn pump_output(
         {
             s.client = None;
         }
+    }
+    let deadline = Instant::now() + ATTACH_GRACE;
+    while !lock(shared).attached && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
     }
     let killing = lock(shared).killing.take();
     if let Some(killing) = killing {
