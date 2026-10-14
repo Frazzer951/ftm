@@ -21,6 +21,9 @@ const BUFFER_CAP: usize = 1 << 20;
 const SCROLLBACK: usize = 10_000;
 /// Trimming only once the buffer is this far over the cap keeps the per-read cost amortized.
 const BUFFER_SLACK: usize = 256 << 10;
+/// Long enough that the TUI reads the narrower size before the real one comes back; two SIGWINCHs handled together
+/// look like no change at all.
+const REDRAW_NUDGE: Duration = Duration::from_millis(150);
 
 pub struct State {
     workspaces: BTreeMap<WorkspaceId, Workspace>,
@@ -774,13 +777,33 @@ fn capture(shared: &Shared, pane: PaneId, raw: bool) -> Result<Response> {
     Ok(Response::Output { data })
 }
 
+/// A resize to the size the pane already has comes from a terminal that just attached (the app relaunched, `ftm
+/// attach`), which drew the replay at some other size. The kernel sends no SIGWINCH for an unchanged size, and Node
+/// ignores one that does not change it, so the pane is nudged one column narrower and back to make its TUI repaint.
 fn resize(shared: &Shared, pane: PaneId, cols: u16, rows: u16) -> Result<Response> {
     let mut state = lock(shared);
     let p = state.pane_mut(pane)?;
+    let unchanged = p.screen.screen().size() == (rows, cols);
     p.screen.screen_mut().set_size(rows, cols);
-    if !p.exited {
-        state.send_to_holder(pane, &Frame::Resize { rows, cols })?;
+    if p.exited {
+        return Ok(Response::Ok);
     }
+    if !unchanged || cols < 2 {
+        state.send_to_holder(pane, &Frame::Resize { rows, cols })?;
+        return Ok(Response::Ok);
+    }
+    state.send_to_holder(pane, &Frame::Resize { rows, cols: cols - 1 })?;
+    let shared = shared.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(REDRAW_NUDGE);
+        let state = lock(&shared);
+        if let Ok(p) = state.pane(pane)
+            && !p.exited
+        {
+            let (rows, cols) = p.screen.screen().size();
+            let _ = state.send_to_holder(pane, &Frame::Resize { rows, cols });
+        }
+    });
     Ok(Response::Ok)
 }
 
