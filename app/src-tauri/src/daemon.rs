@@ -74,10 +74,11 @@ impl Conn {
 /// Reconnects (starting ftmd if needed) and retries once when the connection has dropped.
 fn send(conn: &mut Option<Conn>, request: &Request) -> Result<Response, String> {
     for attempt in 0..2 {
-        if conn.is_none() {
-            *conn = Some(Conn::open()?);
-        }
-        match conn.as_mut().expect("connected").roundtrip(request) {
+        let open = match conn {
+            Some(open) => open,
+            None => conn.insert(Conn::open()?),
+        };
+        match open.roundtrip(request) {
             Ok(line) => {
                 return match serde_json::from_str(&line).map_err(|e| e.to_string())? {
                     Response::Error { message } => Err(message),
@@ -110,7 +111,8 @@ impl Events {
             let _ = old.shutdown(Shutdown::Both);
         }
         let (current, slot) = (self.generation.clone(), self.stream.clone());
-        std::thread::spawn(move || {
+        // Runs on the main thread (from the `subscribe` command), where a panic takes the whole app down.
+        let spawned = std::thread::Builder::new().name("ftmd-events".into()).spawn(move || {
             let live = || current.load(Ordering::SeqCst) == generation;
             while live() {
                 if let Err(e) = subscribe(&emit, &slot, &live) {
@@ -119,6 +121,9 @@ impl Events {
                 std::thread::sleep(Duration::from_millis(500));
             }
         });
+        if let Err(e) = spawned {
+            eprintln!("starting the ftmd event stream: {e}");
+        }
     }
 }
 
