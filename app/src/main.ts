@@ -111,16 +111,21 @@ function view(pane: Id): PaneView {
     lineHeight: settings.line_height,
     scrollback: 10000,
     theme: xtermTheme,
+    allowProposedApi: true,
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
   term.open(el);
-  try {
-    const gl = new WebglAddon();
-    gl.onContextLoss(() => gl.dispose());
-    term.loadAddon(gl);
-  } catch (e) {
-    console.warn("webgl unavailable, using the DOM renderer", e);
+  // WebKitGTK without its DMA-BUF renderer (forced on in main.rs) leaves a WebGL canvas unpainted until something
+  // else repaints the page, so output shows up one keystroke late; the DOM renderer has no such lag.
+  if (!navigator.userAgent.includes("Linux")) {
+    try {
+      const gl = new WebglAddon();
+      gl.onContextLoss(() => gl.dispose());
+      term.loadAddon(gl);
+    } catch (e) {
+      console.warn("webgl unavailable, using the DOM renderer", e);
+    }
   }
   term.onData((d) => send({ op: "input", pane, data: encode(d) }));
   term.onBinary((d) => send({ op: "input", pane, data: btoa(d) }));
@@ -211,7 +216,7 @@ let settings: TerminalSettings = {
 const cssFamily = (family: string) => (/[,"']/.test(family) ? family : `"${family.trim()}", Menlo, monospace`);
 
 /// WebKit has no font access API, so the addon cannot read the font's own ligature table; it joins a list of common
-/// sequences (=>, !=, ->, === ...) instead, and the WebGL renderer then draws each joined run with the font's glyphs.
+/// sequences (=>, !=, ->, === ...) instead, and the renderer then draws each joined run with the font's glyphs.
 function setLigatures(v: PaneView) {
   if (settings.ligatures && !v.ligatures) {
     try {
@@ -563,11 +568,14 @@ function setFocus(pane: Id) {
 
 let seenTree = false;
 
+/// Panes in some layout. Output can trail a pane's removal, and a view made for it then would never be disposed.
+let live = new Set<Id>();
+
 function onWorkspaces(list: Workspace[]) {
   onStatusChanges(list, !seenTree);
   seenTree = true;
   workspaces = list;
-  const live = new Set(list.flatMap((w) => w.tabs.flatMap((t) => panesOf(t.layout))));
+  live = new Set(list.flatMap((w) => w.tabs.flatMap((t) => panesOf(t.layout))));
   for (const [id, v] of views) {
     if (!live.has(id)) {
       v.term.dispose();
@@ -1246,7 +1254,7 @@ listen<FtmEvent>("ftm-event", ({ payload }) => {
     folders = payload.folders;
     refreshGit(folders.map((f) => f.path).filter((p) => !gitInfo.has(p))).catch(console.error);
     renderSidebar();
-  } else {
+  } else if (live.has(payload.pane)) {
     const v = view(payload.pane);
     if (payload.reset) v.term.reset();
     v.term.write(decode(payload.data));

@@ -221,6 +221,12 @@ fn log(message: String) {
 fn main() {
     // FTM_BACKGROUND=1 (for scripted launches): never take focus from whatever the user is doing.
     let background = std::env::var("FTM_BACKGROUND").is_ok_and(|v| v == "1");
+    // WebKitGTK's DMA-BUF renderer dies with "Error 71 (Protocol error) dispatching to Wayland display" on NVIDIA;
+    // fall back to the shared-memory path unless the user chose otherwise. Set before any thread starts.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        unsafe { std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1") };
+    }
     let builder = tauri::Builder::default();
     #[cfg(target_os = "macos")]
     let builder = builder.menu(menu).activate_ignoring_other_apps(!background);

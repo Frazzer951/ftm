@@ -15,6 +15,9 @@ See [docs/design.md](docs/design.md) for the design.
 
 ## Install
 
+On Linux, the app needs WebKitGTK 4.1 and, for status sounds, GStreamer's good plugins (the webview plays audio
+through `autoaudiosink`). On Arch: `pacman -S webkit2gtk-4.1 gst-plugins-good`.
+
 ```sh
 scripts/install.sh
 ```

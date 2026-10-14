@@ -191,7 +191,7 @@ impl State {
             .args(["24", "80"])
             .arg(&ws.cwd)
             .arg(&shell);
-        match startup.and_then(script) {
+        match startup.and_then(|s| script(s, self.claude_settings.is_some())) {
             Some(script) => cmd.args(["-l", "-i", "-c", &script]),
             None => cmd.arg("-l"),
         };
@@ -341,15 +341,23 @@ fn shell() -> String {
         .unwrap_or_else(|| if cfg!(target_os = "macos") { "/bin/zsh" } else { "/bin/bash" }.to_string())
 }
 
-fn script(startup: Startup) -> Option<String> {
+/// Runs under the user's login shell, which may be fish, so it sticks to syntax fish, zsh and bash share: optional
+/// arguments are decided here rather than with `${VAR:+...}`, and values come in through quoted variables.
+fn script(startup: Startup, settings: bool) -> Option<String> {
     let setup = startup.setup.map(|s| format!("{s}; ")).unwrap_or_default();
     if startup.agent {
         let agent = std::env::var(ENV_AGENT_CMD).ok().filter(|c| !c.trim().is_empty());
-        let agent = agent.as_deref().unwrap_or("claude");
-        let name = if startup.named { r#" -n "$FTM_NAME""# } else { "" };
-        Some(format!(
-            r#"{setup}{agent} ${{FTM_CLAUDE_SETTINGS:+--settings}} ${{FTM_CLAUDE_SETTINGS:+"$FTM_CLAUDE_SETTINGS"}}{name} ${{FTM_BRIEF:+"$FTM_BRIEF"}}; exec "$SHELL" -l"#
-        ))
+        let mut line = agent.unwrap_or_else(|| "claude".to_string());
+        if settings {
+            line.push_str(r#" --settings "$FTM_CLAUDE_SETTINGS""#);
+        }
+        if startup.named {
+            line.push_str(r#" -n "$FTM_NAME""#);
+        }
+        if startup.brief.is_some() {
+            line.push_str(r#" "$FTM_BRIEF""#);
+        }
+        Some(format!(r#"{setup}{line}; exec "$SHELL" -l"#))
     } else if startup.setup.is_some() {
         Some(format!(r#"{setup}exec "$SHELL" -l"#))
     } else {
@@ -730,41 +738,33 @@ mod tests {
         assert_eq!(task_title(" ✳ "), None);
     }
 
-    /// zsh does not word-split unquoted expansions, so each optional argument has to be its own expansion.
     #[test]
-    fn agent_script_passes_the_same_argv_in_sh_and_zsh() {
+    fn agent_script_passes_the_same_argv_in_every_shell() {
         // SAFETY: no other test in this binary reads FTM_AGENT_CMD.
         unsafe { std::env::set_var(ENV_AGENT_CMD, "printf '[%s]'") };
-        let unnamed = script(Startup {
+        let startup = |named, brief| Startup {
             agent: true,
-            named: false,
+            named,
             setup: None,
-            brief: None,
-        })
-        .unwrap();
-        assert!(!unnamed.contains(" -n "));
-        let line = script(Startup {
-            agent: true,
-            named: true,
-            setup: None,
-            brief: None,
-        })
-        .unwrap();
-        let line = line.split("; exec").next().unwrap();
-        for shell in ["/bin/sh", "/bin/bash", "/bin/zsh"]
+            brief,
+        };
+        assert!(!script(startup(false, None), false).unwrap().contains(" -n "));
+        for shell in ["/bin/sh", "/bin/bash", "/bin/zsh", "/bin/fish", "/usr/bin/fish"]
             .into_iter()
             .filter(|s| Path::new(s).exists())
         {
             for (settings, brief, want) in [
                 (
                     Some("/tmp/s.json"),
-                    Some("a \"b\" $(c)"),
-                    "[--settings][/tmp/s.json][-n][n][a \"b\" $(c)]",
+                    Some("a \"b\" $(c) (d) ' e"),
+                    "[--settings][/tmp/s.json][-n][n][a \"b\" $(c) (d) ' e]",
                 ),
                 (None, None, "[-n][n]"),
             ] {
+                let line = script(startup(true, brief), settings.is_some()).unwrap();
+                let line = line.split("; exec").next().unwrap().to_string();
                 let mut cmd = std::process::Command::new(shell);
-                cmd.args(["-c", line]).env("FTM_NAME", "n");
+                cmd.args(["-c", &line]).env("FTM_NAME", "n");
                 cmd.env_remove("FTM_CLAUDE_SETTINGS").env_remove("FTM_BRIEF");
                 settings.map(|s| cmd.env("FTM_CLAUDE_SETTINGS", s));
                 brief.map(|b| cmd.env("FTM_BRIEF", b));
