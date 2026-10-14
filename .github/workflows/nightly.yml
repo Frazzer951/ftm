@@ -1,12 +1,13 @@
 name: Nightly
 
-# Builds FTM Nightly from main once a day, unless main hasn't moved since the last nightly, into a GitHub pre-release
-# tagged v<next patch>-nightly.<YYYYMMDD> that is never marked latest. Then pushes Casks/ftm@nightly.rb to the tap and
-# deletes all but the newest KEEP nightlies. Nothing here touches the stable cask or the PKGBUILD. See RELEASE.md.
+# Builds FTM Nightly from main on every push to it (a release's version-bump commit included) into a GitHub pre-release
+# tagged v<next patch>-nightly.<YYYYMMDD>.<run number> that is never marked latest. Then pushes Casks/ftm@nightly.rb to
+# the tap and deletes all but the newest KEEP nightlies. Nothing here touches the stable cask or the PKGBUILD. See
+# RELEASE.md.
 
 on:
-  schedule:
-    - cron: "23 7 * * *"
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       force:
@@ -59,11 +60,9 @@ jobs:
           current=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
           IFS=. read -r major minor patch <<<"${current%%-*}"
           case $current in *-*) ;; *) patch=$((patch + 1)) ;; esac
-          version="$major.$minor.$patch-nightly.$(date -u +%Y%m%d)"
-          # A second run on the same day (workflow_dispatch) still has to sort higher.
-          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$version" >/dev/null 2>&1; then
-            version="$version.$(date -u +%H%M)"
-          fi
+          # The run number keeps several nightlies a day unique and in order; unlike a time of day it never has the
+          # leading zero that semver, and so Cargo, rejects.
+          version="$major.$minor.$patch-nightly.$(date -u +%Y%m%d).$GITHUB_RUN_NUMBER"
           echo "building $version from $GITHUB_SHA"
           {
             echo "build=true"
