@@ -12,11 +12,44 @@ See [docs/design.md](docs/design.md) for the design.
 | `crates/ftmd` | Daemon: owns workspaces, PTYs and worktrees |
 | `crates/ftm` | CLI client |
 | `app/` | Desktop UI (Tauri v2 + xterm.js), see [app/README.md](app/README.md) |
+| `packaging/` | Homebrew cask and AUR `PKGBUILD` templates the release workflow fills in, see [RELEASE.md](RELEASE.md) |
 
 ## Install
 
-On Linux, the app needs WebKitGTK 4.1 and, for status sounds, GStreamer's good plugins (the webview plays audio
-through `autoaudiosink`). On Arch: `pacman -S webkit2gtk-4.1 gst-plugins-good`.
+Every release ships the app with the `ftm` CLI and the `ftmd` daemon inside it. Upgrade through the package manager
+you installed with (`brew upgrade`, your AUR helper, or the newer `.deb`/`.rpm`), then quit and reopen the app.
+
+**macOS** (Apple silicon and Intel), with Homebrew:
+
+```sh
+brew install --cask frazzer951/ftm/ftm
+```
+
+This installs `FTM.app` and links `ftm` onto `PATH`. The app is signed ad hoc, not notarized; the cask clears the
+quarantine flag so it opens. If you take the `.dmg` from the [releases](https://github.com/Frazzer951/ftm/releases)
+instead, run `xattr -dr com.apple.quarantine /Applications/FTM.app` after copying it.
+
+**Arch Linux**, from the AUR (x86_64 and aarch64):
+
+```sh
+yay -S ftm-bin
+```
+
+**Debian, Ubuntu** (22.04 or newer) and **Fedora** (x86_64 and aarch64): take the `.deb` or `.rpm` for your
+architecture from the [latest release](https://github.com/Frazzer951/ftm/releases/latest), then
+
+```sh
+sudo apt install ./FTM_<version>_amd64.deb    # or arm64
+sudo dnf install ./FTM-<version>-1.x86_64.rpm # or aarch64
+```
+
+The Linux packages put `ftm-app`, `ftm` and `ftmd` in `/usr/bin` and add a desktop entry. The app needs WebKitGTK 4.1
+and, for status sounds, GStreamer's good plugins (the webview plays audio through `autoaudiosink`); the packages
+depend on both.
+
+### From source
+
+On Linux, install WebKitGTK 4.1 and GStreamer's good plugins first. On Arch: `pacman -S webkit2gtk-4.1 gst-plugins-good`.
 
 ```sh
 scripts/install.sh
