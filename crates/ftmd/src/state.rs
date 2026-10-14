@@ -273,6 +273,10 @@ impl State {
         if version != frame::VERSION {
             bail!("pane holder speaks version {version}, ftmd {}", frame::VERSION);
         }
+        // The replay goes in before anyone can see the pane, so a capture or attach right after a restart has the screen.
+        let Some(Frame::Output(replay)) = frame::read(&mut read)? else {
+            bail!("pane holder did not send its buffer");
+        };
         read.set_read_timeout(None)?;
         self.panes.insert(
             id,
@@ -286,12 +290,38 @@ impl State {
                 exited: false,
             },
         );
+        self.pane_output(id, &replay);
         let shared = shared.clone();
         std::thread::Builder::new()
             .name(format!("pane-{id}"))
             .spawn(move || read_loop(shared, id, read))
             .wrap_err("starting pane reader")?;
         Ok(())
+    }
+
+    fn pane_output(&mut self, id: PaneId, bytes: &[u8]) {
+        let Some(pane) = self.panes.get_mut(&id) else { return };
+        pane.buffer.extend_from_slice(bytes);
+        pane.screen.process(bytes);
+        let (workspace, titles) = (pane.workspace, std::mem::take(&mut pane.screen.callbacks_mut().0));
+        if pane.buffer.len() > BUFFER_CAP + BUFFER_SLACK {
+            let excess = pane.buffer.len() - BUFFER_CAP;
+            pane.buffer.drain(..excess);
+        }
+        let _ = self.events.send(Event::Output {
+            pane: id,
+            data: B64.encode(bytes),
+            reset: false,
+        });
+        // The last task-like title in this chunk wins; placeholders and the bare name in between do not count.
+        if let Some(ws) = self.workspaces.get_mut(&workspace)
+            && ws.agent_pane == Some(id)
+            && let Some(title) = titles.iter().rev().filter_map(|t| task_title(t)).find(|t| *t != ws.name)
+            && ws.auto_title.as_deref() != Some(&title)
+        {
+            ws.auto_title = Some(title);
+            self.emit_workspaces();
+        }
     }
 
     fn send_to_holder(&self, pane: PaneId, frame: &Frame) -> Result<()> {
@@ -395,28 +425,10 @@ fn read_loop(shared: Shared, id: PaneId, mut holder: UnixStream) {
     while let Ok(Some(frame)) = frame::read(&mut holder) {
         let Frame::Output(bytes) = frame else { continue };
         let mut state = lock(&shared);
-        let Some(pane) = state.panes.get_mut(&id) else { return };
-        pane.buffer.extend_from_slice(&bytes);
-        pane.screen.process(&bytes);
-        let (workspace, titles) = (pane.workspace, std::mem::take(&mut pane.screen.callbacks_mut().0));
-        if pane.buffer.len() > BUFFER_CAP + BUFFER_SLACK {
-            let excess = pane.buffer.len() - BUFFER_CAP;
-            pane.buffer.drain(..excess);
+        if !state.panes.contains_key(&id) {
+            return;
         }
-        let _ = state.events.send(Event::Output {
-            pane: id,
-            data: B64.encode(&bytes),
-            reset: false,
-        });
-        // The last task-like title in this chunk wins; placeholders and the bare name in between do not count.
-        if let Some(ws) = state.workspaces.get_mut(&workspace)
-            && ws.agent_pane == Some(id)
-            && let Some(title) = titles.iter().rev().filter_map(|t| task_title(t)).find(|t| *t != ws.name)
-            && ws.auto_title.as_deref() != Some(&title)
-        {
-            ws.auto_title = Some(title);
-            state.emit_workspaces();
-        }
+        state.pane_output(id, &bytes);
     }
     pane_exited(&shared, id);
 }

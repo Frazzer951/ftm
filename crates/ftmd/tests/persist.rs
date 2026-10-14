@@ -37,7 +37,8 @@ fn capture(conn: &mut Conn, pane: PaneId) -> String {
 }
 
 /// Runs `echo` in the pane and returns the numbers it printed: the shell's pid and its parent (the holder). The
-/// marker is spelled with arithmetic so the echoed command line never matches it.
+/// marker is spelled with arithmetic so the echoed command line never matches it. It is looked for anywhere in a
+/// line: typed before a shell without line editing (dash) prints its prompt, the output follows that prompt.
 fn pids(conn: &mut Conn, pane: PaneId, tag: &str) -> (i32, i32) {
     conn.type_in(pane, &format!("echo X$((1)){tag}=$$:$PPID.\n"));
     let marker = format!("X1{tag}=");
@@ -45,7 +46,7 @@ fn pids(conn: &mut Conn, pane: PaneId, tag: &str) -> (i32, i32) {
     wait_for(&format!("{tag} pids"), Duration::from_secs(10), || {
         let text = capture(conn, pane);
         found = text.lines().find_map(|l| {
-            let (a, b) = l.strip_prefix(marker.as_str())?.strip_suffix('.')?.split_once(':')?;
+            let (a, b) = l.split_once(marker.as_str())?.1.strip_suffix('.')?.split_once(':')?;
             Some((a.parse().ok()?, b.parse().ok()?))
         });
         found.is_some()
@@ -73,7 +74,7 @@ fn ftmd_restart_keeps_sessions() {
     let mut events = Conn::open(&daemon.socket);
     events.send(&Request::Subscribe);
     let (shell, holder) = pids(&mut req, pane, "before");
-    req.type_in(pane, "printf 'line%s\\n' $(seq 1 40) ; echo marker-$((6*7))\n");
+    req.type_in(pane, "echo; printf 'line%s\\n' $(seq 1 40) ; echo marker-$((6*7))\n");
     wait_for_output(&mut events, pane, "marker-42");
     let tree = serde_json::to_value(req.list()).unwrap();
     drop((req, events));
