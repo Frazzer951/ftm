@@ -97,7 +97,9 @@ fn send(conn: &mut Option<Conn>, request: &Request) -> Result<Response, String> 
 }
 
 /// Forwards daemon events to the frontend. The page starts it once it is listening, and again after a reload, so
-/// each start gets a fresh replay; an older stream notices the generation change and stops.
+/// each start gets a fresh replay; an older stream notices the generation change and stops. Each (re)connect first
+/// reports the daemon's version to `connected`: ftmd moves itself onto a new build after an upgrade, which drops the
+/// stream, and the app may then be older than the daemon it talks to.
 #[derive(Default)]
 pub struct Events {
     generation: Arc<AtomicU64>,
@@ -105,7 +107,7 @@ pub struct Events {
 }
 
 impl Events {
-    pub fn restart(&self, emit: impl Fn(Event) + Send + 'static) {
+    pub fn restart(&self, emit: impl Fn(Event) + Send + 'static, connected: impl Fn(String) + Send + 'static) {
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         if let Some(old) = self.stream.lock().unwrap_or_else(PoisonError::into_inner).take() {
             let _ = old.shutdown(Shutdown::Both);
@@ -115,7 +117,7 @@ impl Events {
         let spawned = std::thread::Builder::new().name("ftmd-events".into()).spawn(move || {
             let live = || current.load(Ordering::SeqCst) == generation;
             while live() {
-                if let Err(e) = subscribe(&emit, &slot, &live) {
+                if let Err(e) = subscribe(&emit, &connected, &slot, &live) {
                     eprintln!("ftmd event stream: {e}");
                 }
                 std::thread::sleep(Duration::from_millis(500));
@@ -127,9 +129,18 @@ impl Events {
     }
 }
 
-fn subscribe(emit: &impl Fn(Event), slot: &Mutex<Option<UnixStream>>, live: &impl Fn() -> bool) -> Result<(), String> {
+fn subscribe(
+    emit: &impl Fn(Event),
+    connected: &impl Fn(String),
+    slot: &Mutex<Option<UnixStream>>,
+    live: &impl Fn() -> bool,
+) -> Result<(), String> {
     let mut conn = Conn::open()?;
     *slot.lock().unwrap_or_else(PoisonError::into_inner) = conn.write.try_clone().ok();
+    let pong = conn.roundtrip(&Request::Ping).map_err(|e| e.to_string())?;
+    if let Ok(Response::Pong { version }) = serde_json::from_str(&pong) {
+        connected(version);
+    }
     conn.roundtrip(&Request::Subscribe).map_err(|e| e.to_string())?;
     let mut line = String::new();
     while live() {

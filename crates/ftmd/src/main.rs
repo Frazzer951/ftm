@@ -2,6 +2,7 @@ mod frame;
 mod holder;
 mod hooks;
 mod state;
+mod upgrade;
 mod worktree;
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
@@ -13,6 +14,7 @@ use ftm_core::{
 };
 use serde::Serialize;
 use state::{Shared, State};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::OwnedWriteHalf;
@@ -25,36 +27,56 @@ fn main() -> Result<()> {
     if args.get(1).map(String::as_str) == Some("pty-holder") {
         return holder::run(&args[2..]);
     }
+    if args.get(1).map(String::as_str) == Some(upgrade::HANDSHAKE) {
+        upgrade::print_handshake();
+        return Ok(());
+    }
+    let inherited = unsafe { upgrade::Inherited::take() };
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(daemon())
+        .block_on(daemon(inherited))
 }
 
-async fn daemon() -> Result<()> {
+async fn daemon(inherited: Option<upgrade::Inherited>) -> Result<()> {
     tracing_subscriber::fmt::init();
 
     let socket = std::path::absolute(paths::socket_path())?;
     if let Some(dir) = socket.parent() {
         paths::private_dir(dir, paths::socket_dir_is_ours(dir)).wrap_err_with(|| format!("creating {}", dir.display()))?;
     }
-    if socket.exists() {
-        if UnixStream::connect(&socket).await.is_ok() {
-            eyre::bail!("ftmd already running on {}", socket.display());
-        }
-        std::fs::remove_file(&socket)?;
-    }
-    let listener = UnixListener::bind(&socket).wrap_err_with(|| format!("binding {}", socket.display()))?;
-    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
-    tracing::info!("listening on {}", socket.display());
+    let listener = match &inherited {
+        Some(inherited) => {
+            let listener = UnixListener::from_std(inherited.listener(&socket)?)?;
+            tracing::info!("taking over {} (pid {})", socket.display(), std::process::id());
+            listener
+        },
+        None => {
+            if socket.exists() {
+                if UnixStream::connect(&socket).await.is_ok() {
+                    eyre::bail!("ftmd already running on {}", socket.display());
+                }
+                std::fs::remove_file(&socket)?;
+            }
+            let listener = UnixListener::bind(&socket).wrap_err_with(|| format!("binding {}", socket.display()))?;
+            std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
+            tracing::info!("listening on {} (pid {})", socket.display(), std::process::id());
+            listener
+        },
+    };
 
     let claude_settings = hooks::write(&socket).map(Some).unwrap_or_else(|e| {
         tracing::warn!("agents start without status hooks: {e:#}");
         None
     });
     let state = State::new(socket.clone(), claude_settings);
+    if let Some(inherited) = inherited {
+        state::check_saved(&state)?;
+        tokio::task::spawn_blocking(move || inherited.ready()).await??;
+    }
     let loading = state.clone();
     tokio::task::spawn_blocking(move || state::load(&loading)).await??;
+    let mut upgrades = upgrade::watch(state.clone());
     let mut terminate = signal(SignalKind::terminate())?;
     loop {
         tokio::select! {
@@ -66,6 +88,12 @@ async fn daemon() -> Result<()> {
                         tracing::warn!("client error: {e:#}");
                     }
                 });
+            }
+            Some(candidate) = async { upgrades.as_mut()?.recv().await } => {
+                tracing::info!("moving onto ftmd {}", candidate.version);
+                let Err(e) = upgrade::hand_over(&candidate.exe, listener.as_raw_fd(), &state);
+                tracing::warn!("staying on this ftmd: {e:#}");
+                state::update_blocked(&state, Some(candidate.version), format!("the new ftmd did not take over: {e:#}"));
             }
             _ = tokio::signal::ctrl_c() => break,
             _ = terminate.recv() => break,

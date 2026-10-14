@@ -16,16 +16,23 @@ pub struct Daemon {
     pub socket: PathBuf,
     envs: Vec<(OsString, Option<OsString>)>,
     state_home: PathBuf,
+    exe: PathBuf,
+    /// ftmd's output, kept only by `start_daemon_logged`.
+    log: Option<PathBuf>,
 }
 
 impl Daemon {
-    fn spawn(envs: &[(OsString, Option<OsString>)], socket: &Path) -> Child {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ftmd"));
+    fn spawn(exe: &Path, envs: &[(OsString, Option<OsString>)], socket: &Path, log: Option<&Path>) -> Child {
+        let mut cmd = Command::new(exe);
         for (key, value) in envs {
             match value {
                 Some(v) => cmd.env(key, v),
                 None => cmd.env_remove(key),
             };
+        }
+        if let Some(log) = log {
+            let file = std::fs::OpenOptions::new().create(true).append(true).open(log).unwrap();
+            cmd.stdout(file.try_clone().unwrap()).stderr(file);
         }
         let child = cmd.spawn().unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -36,16 +43,47 @@ impl Daemon {
         child
     }
 
-    /// SIGTERM: ftmd exits and leaves the panes to their holders.
+    /// SIGTERM: ftmd exits and leaves the panes to their holders. Also stops an ftmd this one handed over to.
     pub fn stop(&mut self) {
         unsafe { libc::kill(self.child.id() as i32, libc::SIGTERM) };
         let _ = self.child.wait();
+        if let Some(pid) = self.log.as_ref().and_then(|_| self.latest_pid())
+            && pid != self.child.id() as i32
+        {
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while alive(pid) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
     }
 
     /// Stops ftmd and starts a new one with the same environment, which reconnects to the panes.
     pub fn restart(&mut self) {
         self.stop();
-        self.child = Self::spawn(&self.envs, &self.socket);
+        self.child = Self::spawn(&self.exe, &self.envs, &self.socket, self.log.as_deref());
+    }
+
+    pub fn pid(&self) -> i32 {
+        self.child.id() as i32
+    }
+
+    /// The first ftmd's process, to see whether it has exited.
+    pub fn child(&mut self) -> &mut Child {
+        &mut self.child
+    }
+
+    pub fn log(&self) -> String {
+        std::fs::read_to_string(self.log.as_ref().expect("started with a log")).unwrap_or_default()
+    }
+
+    /// The pid in the last "listening on"/"taking over" line: the ftmd serving the socket now.
+    pub fn latest_pid(&self) -> Option<i32> {
+        self.log()
+            .lines()
+            .rev()
+            .filter(|l| l.contains("listening on") || l.contains("taking over"))
+            .find_map(|l| l.rsplit_once("(pid ")?.1.split_once(')')?.0.parse().ok())
     }
 
     pub fn state_home(&self) -> &Path {
@@ -88,6 +126,15 @@ impl Drop for Daemon {
 /// Panes run `/bin/sh`, nothing FTM-related leaks in from the environment the tests run in (which may itself be an
 /// FTM pane), and the saved tree goes to a private state dir; `configure` adds the rest.
 pub fn start_daemon(name: &str, configure: impl FnOnce(&mut Command)) -> Daemon {
+    start(name, Path::new(env!("CARGO_BIN_EXE_ftmd")), false, configure)
+}
+
+/// Runs `exe` (a copy of ftmd the test may replace) with its output kept for `Daemon::log`.
+pub fn start_daemon_logged(name: &str, exe: &Path) -> Daemon {
+    start(name, exe, true, |_| {})
+}
+
+fn start(name: &str, exe: &Path, logged: bool, configure: impl FnOnce(&mut Command)) -> Daemon {
     let socket = PathBuf::from(format!("/tmp/ftmd-{}-{name}.sock", std::process::id()));
     let _ = std::fs::remove_file(&socket);
     let state_home = temp_root(&format!("{name}-state"));
@@ -107,12 +154,15 @@ pub fn start_daemon(name: &str, configure: impl FnOnce(&mut Command)) -> Daemon 
     }
     configure(&mut cmd);
     let envs: Vec<_> = cmd.get_envs().map(|(k, v)| (k.to_owned(), v.map(|v| v.to_owned()))).collect();
-    let child = Daemon::spawn(&envs, &socket);
+    let log = logged.then(|| state_home.join("ftmd.log"));
+    let child = Daemon::spawn(exe, &envs, &socket, log.as_deref());
     Daemon {
         child,
         socket,
         envs,
         state_home,
+        exe: exe.to_path_buf(),
+        log,
     }
 }
 
@@ -140,6 +190,20 @@ impl Conn {
         let mut line = String::new();
         self.read.read_line(&mut line).ok()?;
         serde_json::from_str(&line).ok()
+    }
+
+    /// macOS refuses (EINVAL) once ftmd has closed the connection, which the next read reports anyway.
+    pub fn set_read_timeout(&self, timeout: Duration) {
+        let _ = self.write.set_read_timeout(Some(timeout));
+    }
+
+    /// `None` once ftmd closes the connection (or the read times out).
+    pub fn try_line<T: serde::de::DeserializeOwned>(&mut self) -> Option<T> {
+        let mut line = String::new();
+        match self.read.read_line(&mut line) {
+            Ok(0) | Err(_) => None,
+            Ok(_) => Some(serde_json::from_str(&line).unwrap_or_else(|e| panic!("{e}: {line}"))),
+        }
     }
 
     pub fn line<T: serde::de::DeserializeOwned>(&mut self) -> T {

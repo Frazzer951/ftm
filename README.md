@@ -17,7 +17,8 @@ See [docs/design.md](docs/design.md) for the design.
 ## Install
 
 Every release ships the app with the `ftm` CLI and the `ftmd` daemon inside it. Upgrade through the package manager
-you installed with (`brew upgrade`, or the newer `.deb`, `.rpm` or `PKGBUILD`), then quit and reopen the app.
+you installed with (`brew upgrade`, or the newer `.deb`, `.rpm` or `PKGBUILD`): within a few seconds the running ftmd
+moves itself onto the new build, keeping every session, and the app asks to be reopened.
 
 **macOS** (Apple silicon and Intel), with Homebrew:
 

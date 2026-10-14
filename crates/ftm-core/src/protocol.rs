@@ -128,4 +128,8 @@ pub enum Event {
         #[serde(default)]
         reset: bool,
     },
+    /// ftmd's binary was replaced, but ftmd cannot move onto it without losing the running panes (the new build
+    /// speaks another holder protocol, or does not start). Sent on subscribe until ftmd restarts. `version` is the
+    /// new build's, when it could say.
+    UpdateBlocked { version: Option<String>, reason: String },
 }
