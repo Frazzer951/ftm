@@ -1,0 +1,19 @@
+{
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+  "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
+  "files": { "includes": ["src/**", "*.ts", "*.json", "!src-tauri"] },
+  "formatter": { "enabled": false },
+  "assist": { "enabled": false },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "recommended",
+      "style": {
+        // Short class-name and path joins read fine as string concatenation.
+        "useTemplate": "off",
+        // style.css groups rules by component, not by specificity.
+        "noDescendingSpecificity": "off"
+      }
+    }
+  }
+}

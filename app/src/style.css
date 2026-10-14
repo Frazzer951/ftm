@@ -115,7 +115,7 @@ label.inline { display: flex; gap: 4px; align-items: center; white-space: nowrap
 #font-custom { width: 100%; background: var(--bg); color: inherit; border: 1px solid var(--border-strong); border-radius: 4px; padding: 4px; }
 .stepper { display: flex; gap: 4px; align-items: center; }
 .stepper button { width: 28px; }
-.stepper input { width: 70px !important; text-align: center; }
+dialog .stepper input { width: 70px; text-align: center; }
 input[type="range"] { flex: 1; }
 #line-height-value { width: 36px; text-align: right; font-variant-numeric: tabular-nums; }
 #font-preview { padding: 8px 10px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--bg); white-space: nowrap; overflow: hidden; }

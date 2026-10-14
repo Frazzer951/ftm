@@ -78,6 +78,7 @@ let editing: Id | null = null;
 const activeTab = new Map<Id, Id>();
 const views = new Map<Id, PaneView>();
 
+// biome-ignore lint/suspicious/noExplicitAny: ftmd responses are untyped JSON whose shape depends on the op
 const request = (req: object): Promise<any> => invoke("request", { request: req });
 const send = (req: object) => invoke("send", { request: req }).catch(console.error);
 
@@ -368,7 +369,9 @@ function setupSettingsDialog() {
     $("theme-slots").hidden = !draft.follow_system;
     $("theme-dark").textContent = draft.dark;
     $("theme-light").textContent = draft.light;
-    document.querySelectorAll<HTMLButtonElement>("#theme-slots button").forEach((b) => b.classList.toggle("active", b.dataset.slot === slot));
+    document.querySelectorAll<HTMLButtonElement>("#theme-slots button").forEach((b) => {
+      b.classList.toggle("active", b.dataset.slot === slot);
+    });
     const query = themeSearch.value.trim().toLowerCase();
     const shown = themeList.filter((t) => !query || t.name.toLowerCase().includes(query));
     $("theme-count").textContent = themeList.length ? `${shown.length} of ${themeList.length}` : "";
@@ -563,7 +566,9 @@ function currentTab(): Tab | undefined {
 
 function setFocus(pane: Id) {
   focused = pane;
-  document.querySelectorAll(".slot").forEach((s) => s.classList.toggle("focused", (s as HTMLElement).dataset.pane === pane));
+  document.querySelectorAll(".slot").forEach((s) => {
+    s.classList.toggle("focused", (s as HTMLElement).dataset.pane === pane);
+  });
 }
 
 let seenTree = false;
@@ -616,13 +621,14 @@ function restoreUi(list: Workspace[]) {
 
 /// A new tab or split's pane can show up in the tree before or after its request returns; whichever is second focuses it.
 function claimPendingFocus() {
-  if (!pendingFocus) return;
+  const target = pendingFocus;
+  if (!target) return;
   for (const ws of workspaces) {
-    const tab = ws.tabs.find((t) => panesOf(t.layout).includes(pendingFocus!));
+    const tab = ws.tabs.find((t) => panesOf(t.layout).includes(target));
     if (tab) {
       selected = ws.id;
       activeTab.set(ws.id, tab.id);
-      focused = pendingFocus;
+      focused = target;
       pendingFocus = null;
       return;
     }
@@ -1034,7 +1040,7 @@ function renderPanes() {
   setFocus(focused);
   requestAnimationFrame(() => {
     fitVisible();
-    if (!editing) views.get(focused!)?.term.focus();
+    if (!editing && focused) views.get(focused)?.term.focus();
   });
 }
 
