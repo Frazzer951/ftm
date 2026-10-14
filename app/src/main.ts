@@ -130,6 +130,9 @@ function view(pane: Id): PaneView {
   }
   term.onData((d) => send({ op: "input", pane, data: encode(d) }));
   term.onBinary((d) => send({ op: "input", pane, data: btoa(d) }));
+  // xterm already turns off autocorrect, autocapitalize and spellcheck; macOS inline predictions also need these.
+  term.textarea?.setAttribute("writingsuggestions", "false");
+  term.textarea?.setAttribute("autocomplete", "off");
   term.textarea?.addEventListener("focus", () => setFocus(pane));
   const v: PaneView = { term, fit, el, cols: 0, rows: 0 };
   setLigatures(v);
