@@ -11,8 +11,12 @@ pub fn path() -> PathBuf {
     paths::socket_path().with_file_name("ftm-app.log")
 }
 
+/// Past this, the log moves to `ftm-app.log.old` at startup, so it never grows without bound but the last crash survives.
+const MAX_LOG_BYTES: u64 = 1024 * 1024;
+
 /// Appends every panic (message, location, backtrace) to [`path`], then runs the default hook as before.
 pub fn install() {
+    rotate(&path(), MAX_LOG_BYTES);
     let record = recorder(path());
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -28,6 +32,12 @@ fn recorder(log: PathBuf) -> impl Fn(&PanicHookInfo<'_>) + Send + Sync + 'static
         let thread = std::thread::current();
         let name = thread.name().unwrap_or("<unnamed>");
         append(&log, &format!("thread '{name}' {info}\n{}", Backtrace::force_capture()));
+    }
+}
+
+fn rotate(log: &Path, max_bytes: u64) {
+    if std::fs::metadata(log).is_ok_and(|m| m.len() > max_bytes) {
+        let _ = std::fs::rename(log, log.with_extension("log.old"));
     }
 }
 
@@ -66,8 +76,9 @@ mod objc_exceptions {
     use super::{Backtrace, PathBuf, append};
     use objc2::runtime::AnyObject;
     use objc2_foundation::NSException;
-    use std::sync::OnceLock;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::cell::Cell;
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock, PoisonError};
 
     type Preprocessor = unsafe extern "C" fn(*mut AnyObject) -> *mut AnyObject;
 
@@ -75,12 +86,17 @@ mod objc_exceptions {
         fn objc_setExceptionPreprocessor(preprocessor: Preprocessor) -> Option<Preprocessor>;
     }
 
-    /// Also fires for exceptions that get caught, so cap how many one run can log.
-    const MAX_LOGGED: usize = 20;
+    /// The preprocessor also sees exceptions that AppKit or WebKit throw and catch themselves, possibly over and over.
+    /// Each distinct one is logged once, so a new (possibly fatal) one is always recorded; this caps the distinct ones.
+    const MAX_DISTINCT: usize = 100;
 
     static LOG: OnceLock<PathBuf> = OnceLock::new();
     static PREVIOUS: OnceLock<Option<Preprocessor>> = OnceLock::new();
-    static LOGGED: AtomicUsize = AtomicUsize::new(0);
+    static SEEN: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+
+    thread_local! {
+        static LOGGING: Cell<bool> = const { Cell::new(false) };
+    }
 
     pub fn install(log: PathBuf) {
         if LOG.set(log).is_ok() {
@@ -89,27 +105,39 @@ mod objc_exceptions {
     }
 
     unsafe extern "C" fn preprocess(exception: *mut AnyObject) -> *mut AnyObject {
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            if LOGGED.fetch_add(1, Ordering::Relaxed) >= MAX_LOGGED {
-                return;
-            }
-            let Some(log) = LOG.get() else { return };
-            let what = match unsafe { exception.as_ref() }.and_then(|e| e.downcast_ref::<NSException>()) {
-                Some(e) => format!("{}: {}", e.name(), e.reason().map(|r| r.to_string()).unwrap_or_default()),
-                None => "a non-NSException object".into(),
-            };
-            append(
-                log,
-                &format!(
-                    "Objective-C exception thrown (it may still be caught): {what}\n{}",
-                    Backtrace::force_capture()
-                ),
-            );
-        }));
+        // An exception thrown while this one is being logged is passed on unlogged instead of recursing.
+        if !LOGGING.replace(true) {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| log(exception)));
+            LOGGING.set(false);
+        }
         match PREVIOUS.get().copied().flatten() {
             Some(previous) => unsafe { previous(exception) },
             None => exception,
         }
+    }
+
+    fn log(exception: *mut AnyObject) {
+        let Some(log) = LOG.get() else { return };
+        let what = match unsafe { exception.as_ref() }.and_then(|e| e.downcast_ref::<NSException>()) {
+            Some(e) => format!("{}: {}", e.name(), e.reason().map(|r| r.to_string()).unwrap_or_default()),
+            None => "a non-NSException object".into(),
+        };
+        if !first_sighting(&what) {
+            return;
+        }
+        append(
+            log,
+            &format!(
+                "Objective-C exception thrown (it may still be caught): {what}\n{}",
+                Backtrace::force_capture()
+            ),
+        );
+    }
+
+    pub(super) fn first_sighting(what: &str) -> bool {
+        let mut seen = SEEN.lock().unwrap_or_else(PoisonError::into_inner);
+        let seen = seen.get_or_insert_with(HashSet::new);
+        seen.len() < MAX_DISTINCT && seen.insert(what.to_string())
     }
 }
 
@@ -146,6 +174,35 @@ mod tests {
         assert!(text.contains("thread 'crash-log-test' panicked at"), "{text}");
         assert!(text.contains("crash_log.rs"), "{text}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn oversized_logs_move_aside_at_startup() {
+        let dir = std::env::temp_dir().join(format!("ftm-rotate-log-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("ftm-app.log");
+        std::fs::write(&log, "small").unwrap();
+        rotate(&log, 10);
+        assert!(log.exists());
+        std::fs::write(&log, "the last crash, and more").unwrap();
+        rotate(&log, 10);
+        assert!(!log.exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("ftm-app.log.old")).unwrap(),
+            "the last crash, and more"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn repeated_objc_exceptions_are_logged_once_and_new_ones_still_are() {
+        assert!(objc_exceptions::first_sighting("NSRangeException: noisy"));
+        for _ in 0..500 {
+            assert!(!objc_exceptions::first_sighting("NSRangeException: noisy"));
+        }
+        assert!(objc_exceptions::first_sighting("NSInternalInconsistencyException: fatal"));
     }
 
     #[cfg(target_os = "macos")]
