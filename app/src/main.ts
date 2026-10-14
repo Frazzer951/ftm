@@ -1464,7 +1464,11 @@ function dismissedRelease(): string | null {
 
 async function checkForRelease() {
   const release = await invoke<Release | null>("check_update");
-  if (!release || release.version === dismissedRelease()) return;
+  if (!release) {
+    notice("release", null);
+    return;
+  }
+  if (release.version === dismissedRelease()) return;
   const dismiss = () => {
     try {
       localStorage.setItem(DISMISSED_RELEASE, release.version);

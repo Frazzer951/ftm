@@ -91,7 +91,7 @@ fn offer(release: Release, current: &Version, own: Channel, target: Channel, ins
     }
     let script = if installable {
         let pkgbuild = release.assets.iter().find(|a| a.name == "PKGBUILD")?;
-        Some(script(&version.to_string(), target, &pkgbuild.browser_download_url)?)
+        Some(script(&version.to_string(), target, switch, &pkgbuild.browser_download_url)?)
     } else {
         None
     };
@@ -105,16 +105,20 @@ fn offer(release: Release, current: &Version, own: Channel, target: Channel, ins
 
 /// Leaves the build dir behind when anything fails, so it can be looked at. No `--noconfirm`: the pane is
 /// interactive, and with it pacman would answer no to removing the other channel's conflicting package on a switch.
-fn script(version: &str, channel: Channel, pkgbuild_url: &str) -> Option<String> {
+/// After a switch nothing asks to relaunch: the old ftmd refuses the other channel's build and the new app talks to a
+/// socket of its own.
+fn script(version: &str, channel: Channel, switch: bool, pkgbuild_url: &str) -> Option<String> {
     if !pkgbuild_url.starts_with("https://") || pkgbuild_url.contains(['\'', '\n']) {
         return None;
     }
-    let (name, done) = match channel {
-        Channel::Stable => ("FTM", "ftmd switches to it by itself; relaunch FTM when it asks."),
-        Channel::Nightly => (
-            "FTM Nightly",
-            "ftmd switches to it by itself; relaunch FTM Nightly when it asks.",
-        ),
+    let name = match channel {
+        Channel::Stable => "FTM",
+        Channel::Nightly => "FTM Nightly",
+    };
+    let done = if switch {
+        format!("Quit FTM and start {name}. Panes in this window stay on the old daemon until it exits.")
+    } else {
+        format!("ftmd switches to it by itself; relaunch {name} when it asks.")
     };
     Some(format!(
         r#"echo 'Installing {name} {version}'
@@ -275,6 +279,7 @@ mod tests {
             script.contains("makepkg -si &&") && !script.contains("--noconfirm"),
             "{script}"
         );
+        assert!(script.contains("relaunch FTM when it asks"), "{script}");
         let only_deb = release("v0.1.4", &["FTM_0.1.4_amd64.deb"]);
         assert!(offer(only_deb, &current, Stable, Stable, true).is_none());
         // Not installable here: still worth telling, without the script.
@@ -293,19 +298,35 @@ mod tests {
             script.contains("FTM Nightly 0.1.4-nightly.20261014.11 is installed"),
             "{script}"
         );
+        assert!(
+            script.contains("Quit FTM and start FTM Nightly.") && !script.contains("relaunch"),
+            "{script}"
+        );
+        let nightly = Version::parse("0.1.4-nightly.20261014.11").unwrap();
+        let update = offer(
+            release("v0.1.4-nightly.20261015.12", &["PKGBUILD"]),
+            &nightly,
+            Nightly,
+            Nightly,
+            true,
+        );
+        let script = update.unwrap().script.unwrap();
+        assert!(script.contains("relaunch FTM Nightly when it asks"), "{script}");
+        let update = offer(release("v0.1.3", &["PKGBUILD"]), &nightly, Nightly, Stable, true);
+        assert!(update.unwrap().script.unwrap().contains("Quit FTM and start FTM."));
     }
 
     #[test]
     fn script_refuses_urls_it_cannot_quote() {
-        assert!(script("0.1.4", Stable, "https://example.com/a'b").is_none());
-        assert!(script("0.1.4", Stable, "http://example.com/PKGBUILD").is_none());
+        assert!(script("0.1.4", Stable, false, "https://example.com/a'b").is_none());
+        assert!(script("0.1.4", Stable, false, "http://example.com/PKGBUILD").is_none());
     }
 
     #[test]
     fn script_keeps_the_build_dir_on_failure() {
         let dir = std::env::temp_dir().join(format!("ftm-update-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let script = script("0.1.4", Stable, "https://127.0.0.1:1/PKGBUILD").unwrap();
+        let script = script("0.1.4", Stable, false, "https://127.0.0.1:1/PKGBUILD").unwrap();
         let out = Command::new("/bin/sh")
             .args(["-c", &script])
             .env("TMPDIR", &dir)
