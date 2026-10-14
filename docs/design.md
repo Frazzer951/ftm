@@ -51,6 +51,7 @@ ftm spawn terminal|agent [--path P] [--name N] [--worktree BRANCH [--base REF] [
 ftm status working|needs-input|idle|done      # id from $FTM_WORKSPACE_ID
 ftm close [--remove-worktree]
 ftm rename NAME | --clear                     # display title only; "" also clears
+ftm pin|unpin [ID]                            # sidebar's Pinned section; top-level workspaces only
 ftm capture <pane|workspace> [--raw]          # screen + scrollback as text; --raw: last 1 MiB of output bytes
 ftm send <pane|workspace> <text> [--enter]    # type into a pane; a workspace id means its first pane
 ftm attach <pane|workspace>                   # this terminal shows the pane; Ctrl+] then d detaches
@@ -124,7 +125,7 @@ Themes are Ghostty theme files: built in, in `~/.config/ftm/themes`, or found in
 
 ## UI
 
-Sidebar with a `+` button: pick terminal or agent, pick a folder; if it is a git repo, optionally tick "worktree" and enter a branch (plus "copy my changes"). Rows nest by parent and show status, branch, and PR link. Right-click a row (or double-click its name) to rename it inline: Enter saves, Esc cancels, an empty name goes back to the spawn name. A rename sets the workspace's `title`, which is shown instead of `name`; `name` stays as spawned because it is `FTM_NAME` for every pane opened later and the agent's Claude session name (the `SendMessage` address). `ftm ls` prints `title (name)` when they differ. Each workspace has tabs; each tab splits into panes.
+Sidebar with a `+` button: pick terminal or agent, pick a folder; if it is a git repo, optionally tick "worktree" and enter a branch (plus "copy my changes"). Rows nest by parent and show status, branch, and PR link. Right-click a row (or double-click its name) to rename it inline: Enter saves, Esc cancels, an empty name goes back to the spawn name. A rename sets the workspace's `title`, which is shown instead of `name`; `name` stays as spawned because it is `FTM_NAME` for every pane opened later and the agent's Claude session name (the `SendMessage` address). `ftm ls` prints `title (name)` when they differ. Right-click a top-level row (or `ftm pin`/`ftm unpin`) to move it in or out of the Pinned section; a child stays under its parent while that parent exists, so ftmd refuses to pin it, and `ftm ls` marks pinned workspaces `(pinned)`. Each workspace has tabs; each tab splits into panes.
 
 Must run on macOS and Linux as a standalone desktop app (never inside a browser).
 

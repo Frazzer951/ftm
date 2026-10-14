@@ -394,3 +394,45 @@ fn setup_runs_in_sh_and_an_agent_that_never_starts_fails_visibly() {
     drop(daemon);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn pin_only_top_level_workspaces() {
+    let dir = temp_root("pin");
+    let daemon = start_daemon("pin", |_| {});
+    let bin = ftm_bin();
+    let socket = &daemon.socket;
+    let path = dir.to_str().unwrap();
+    let parent = ftm(&bin, socket, &["spawn", "terminal", "--path", path, "--name", "parent"]);
+    let child = ftm(
+        &bin,
+        socket,
+        &["spawn", "terminal", "--path", path, "--name", "child", "--parent", &parent],
+    );
+    let pinned = |id: &str| ls(&bin, socket).into_iter().find(|w| w.id.to_string() == id).unwrap().pinned;
+
+    ftm(&bin, socket, &["pin", &parent]);
+    assert!(pinned(&parent));
+    assert!(
+        ftm(&bin, socket, &["ls"])
+            .lines()
+            .any(|l| l.starts_with("parent ") && l.contains("(pinned)"))
+    );
+
+    let refused = Command::new(&bin)
+        .args(["pin"])
+        .env("FTM_SOCKET", socket)
+        .env("FTM_WORKSPACE_ID", &child)
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("top-level"));
+    assert!(!pinned(&child));
+
+    ftm(&bin, socket, &["unpin", &parent]);
+    assert!(!pinned(&parent));
+
+    // Once its parent is gone the child is top-level and can be pinned.
+    ftm(&bin, socket, &["close", "--id", &parent]);
+    ftm(&bin, socket, &["pin", &child]);
+    assert!(pinned(&child));
+}
