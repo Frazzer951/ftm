@@ -103,6 +103,21 @@ policy, which the system cannot activate, then becomes an accessory without a Do
 then stays hidden, so it is no use for screenshots; any launch that shows a window can take focus. Frontend errors are
 printed to the terminal running the app as `[frontend] ...`.
 
+## Repo config
+
+`~/.config/ftm/repos/<repo>.toml` sets how FTM makes worktrees of a repo:
+
+```toml
+base = "origin/main"                 # branch new worktree branches start from
+setup = "direnv allow"               # POSIX sh run in the worktree before the agent starts
+copy_ignored_exclude = ["data"]      # more names/globs to leave out of the gitignored-file copy
+```
+
+New worktrees get the source checkout's gitignored files (`.env`, `.envrc`, `.claude/`, ...) except `.venv`, `venv`,
+`node_modules`, `target`, `__pycache__`, `.pytest_cache`, `.ruff_cache`, `.mypy_cache`, `.tox` and `.DS_Store` at any
+depth. `copy_ignored = false` turns that off; `copy_ignored = [".env", "profiles.yml"]` copies only those globs. See
+[docs/design.md](docs/design.md#worktree-creation).
+
 ## Try the CLI
 
 ```sh
