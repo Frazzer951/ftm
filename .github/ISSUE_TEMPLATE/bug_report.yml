@@ -1,0 +1,78 @@
+name: Bug report
+description: Something in FTM (app, ftm CLI or ftmd) doesn't work as it should
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Spawn an agent with `ftm spawn agent --worktree fix/thing`
+        2. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: FTM version
+      description: The output of `ftm --version` (or `ftm-nightly --version` on macOS nightly), or `ftm ping` for the running daemon.
+      placeholder: ftm 0.1.4
+    validations:
+      required: true
+  - type: dropdown
+    id: channel
+    attributes:
+      label: Channel
+      options:
+        - Stable
+        - Nightly
+        - Built from source
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Install method
+      options:
+        - Homebrew cask (macOS)
+        - Release PKGBUILD (Arch)
+        - .deb
+        - .rpm
+        - .dmg from a release
+        - scripts/install.sh
+        - scripts/dev.sh
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      description: OS and version, and on Linux the distro and desktop (Wayland or X11).
+      placeholder: macOS 26.1 (Apple silicon) / Arch Linux, KDE Plasma 6 on Wayland
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        The daemon logs to `ftmd.log` and the app to `ftm-app.log`, both next to ftmd's socket:
+        - Linux: `$XDG_RUNTIME_DIR/ftm/` (nightly: `$XDG_RUNTIME_DIR/ftm-nightly/`)
+        - macOS: `~/Library/Caches/ftm/` (nightly: `~/Library/Caches/ftm-nightly/`)
+        - `scripts/dev.sh`: `ftmd-dev.log` and `ftm-app.log` in the same folder
+
+        Paste the lines around the problem. Check them for paths or repo names you'd rather not share.
+      render: text
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Screenshots, your `~/.config/ftm/config.toml` or repo config if they matter, the agent CLI in use, etc.
