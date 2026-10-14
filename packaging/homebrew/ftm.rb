@@ -11,18 +11,19 @@ cask "ftm" do
   desc "Terminal workspace manager for Claude Code agents"
   homepage "https://github.com/Frazzer951/ftm"
 
+  depends_on :macos
+
   app "FTM.app"
   binary "#{appdir}/FTM.app/Contents/MacOS/ftm"
 
   # Signed ad hoc, not notarized: without this Gatekeeper refuses to open it.
-  postflight do
-    system_command "/usr/bin/xattr",
-                   args: ["-dr", "com.apple.quarantine", "#{appdir}/FTM.app"]
+  postflight_steps do
+    run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{appdir}}/FTM.app"]
   end
 
   zap trash: [
-    "~/Library/Caches/ftm",
     "~/Library/Caches/dev.frazzer.ftm",
+    "~/Library/Caches/ftm",
     "~/Library/WebKit/dev.frazzer.ftm",
   ]
 end
