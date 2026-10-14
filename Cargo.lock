@@ -1231,6 +1231,8 @@ version = "0.1.0"
 dependencies = [
  "core-text",
  "ftm-core",
+ "objc2",
+ "objc2-web-kit",
  "serde",
  "serde_json",
  "tauri",

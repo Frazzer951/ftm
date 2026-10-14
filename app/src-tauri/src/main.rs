@@ -204,12 +204,36 @@ fn menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
 }
 
 fn main_window(app: &AppHandle, focused: bool) -> tauri::Result<()> {
-    tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
+    let builder = tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
         .title("FTM")
         .inner_size(1280.0, 820.0)
-        .focused(focused)
-        .build()
-        .map(drop)
+        .focused(focused);
+    #[cfg(target_os = "macos")]
+    let builder = match webview_configuration() {
+        Some(config) => builder.with_webview_configuration(config),
+        None => builder,
+    };
+    builder.build().map(drop)
+}
+
+/// xterm takes keystrokes through a hidden textarea, so WebKit treats the terminal as a text field and macOS 27 floats
+/// its Siri / Writing Tools affordance next to the cursor whenever typing pauses. WebKit only suppresses that when the
+/// configuration's writingToolsBehavior is None, and WKWebView copies its configuration at init, so it has to be set
+/// here rather than on the live webview.
+#[cfg(target_os = "macos")]
+fn webview_configuration() -> Option<objc2::rc::Retained<objc2_web_kit::WKWebViewConfiguration>> {
+    use objc2::{msg_send, sel};
+
+    const NS_WRITING_TOOLS_BEHAVIOR_NONE: isize = -1;
+    let mtm = objc2::MainThreadMarker::new()?;
+    let config = unsafe { objc2_web_kit::WKWebViewConfiguration::new(mtm) };
+    // macOS 15.0+; older systems have no Writing Tools to turn off.
+    let supported: bool = unsafe { msg_send![&*config, respondsToSelector: sel!(setWritingToolsBehavior:)] };
+    if !supported {
+        return None;
+    }
+    let _: () = unsafe { msg_send![&*config, setWritingToolsBehavior: NS_WRITING_TOOLS_BEHAVIOR_NONE] };
+    Some(config)
 }
 
 /// Frontend errors, so they show up in the terminal running the app.
