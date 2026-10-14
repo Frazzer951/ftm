@@ -6,6 +6,7 @@ mod fonts;
 mod open_in;
 mod sounds;
 mod themes;
+mod update;
 
 use ftm_core::config::Settings;
 use ftm_core::paths;
@@ -196,6 +197,26 @@ fn save_settings(settings: Settings) -> Result<(), String> {
     settings.save(&paths::settings_path()).map_err(|e| e.to_string())
 }
 
+/// A newer release, if the `[updates] check` setting (else whether this install can upgrade itself) asks to look.
+/// Being offline or rate limited is only logged.
+#[tauri::command]
+async fn check_update() -> Option<update::Update> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let setting = Settings::load(&paths::settings_path()).ok().and_then(|s| s.updates.check);
+        let installable = update::installable();
+        if !setting.unwrap_or(installable) {
+            return None;
+        }
+        update::check(env!("CARGO_PKG_VERSION"), installable)
+            .inspect_err(|e| eprintln!("update check: {e}"))
+            .ok()
+            .flatten()
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 #[tauri::command]
 fn git_root(path: String) -> Option<String> {
     let out = Command::new("git")
@@ -326,7 +347,8 @@ fn main() {
             open_targets,
             open_in,
             log,
-            ensure_on_screen
+            ensure_on_screen,
+            check_update
         ])
         .build(tauri::generate_context!())
         .expect("building FTM")

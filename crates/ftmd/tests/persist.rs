@@ -23,6 +23,7 @@ fn spawn_terminal(conn: &mut Conn, cwd: &Path, name: &str) -> Workspace {
         base: None,
         copy_changes: false,
         brief: None,
+        command: None,
     })) else {
         panic!("expected spawned")
     };
@@ -317,6 +318,7 @@ fn folders_and_pins_are_remembered() {
         base: None,
         copy_changes: false,
         brief: None,
+        command: None,
     })) else {
         panic!()
     };

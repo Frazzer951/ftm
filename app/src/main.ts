@@ -1165,21 +1165,51 @@ function targetPane(): Id | undefined {
   return focused && panes.includes(focused) ? focused : panes[0];
 }
 
-/** A dismissable message in the corner; showing one under a key that is already up replaces it, `null` removes it. */
-function notice(key: string, message: string | null, kind: "warning" | "error" = "warning") {
+/**
+ * A dismissable message in the corner; showing one under a key that is already up replaces it, `null` removes it.
+ * Each action is a button that also closes the notice; `onClose` runs when × closes it.
+ */
+function notice(
+  key: string,
+  message: string | null,
+  kind: "warning" | "error" | "info" = "warning",
+  actions: [string, () => void][] = [],
+  onClose?: () => void,
+) {
   const box = $("notices");
   box.querySelector(`[data-key="${key}"]`)?.remove();
   if (message === null) return;
   const el = document.createElement("div");
   el.className = `notice ${kind}`;
   el.dataset.key = key;
+  const body = document.createElement("div");
+  body.className = "notice-body";
   const text = document.createElement("span");
   text.textContent = message;
+  body.append(text);
+  if (actions.length) {
+    const row = document.createElement("div");
+    row.className = "notice-actions";
+    for (const [label, run] of actions) {
+      const button = document.createElement("button");
+      button.textContent = label;
+      button.onclick = () => {
+        el.remove();
+        run();
+      };
+      row.append(button);
+    }
+    body.append(row);
+  }
   const close = document.createElement("button");
+  close.className = "notice-close";
   close.textContent = "×";
   close.title = "Dismiss";
-  close.onclick = () => el.remove();
-  el.append(text, close);
+  close.onclick = () => {
+    el.remove();
+    onClose?.();
+  };
+  el.append(body, close);
   box.append(el);
 }
 
@@ -1376,8 +1406,12 @@ const events = listen<FtmEvent>("ftm-event", ({ payload }) => {
   }
 });
 
+/// The daemon's version as of the last (re)connect; one older than the app may not know how to run a command.
+let daemonVersion: string | null = null;
+
 // Each (re)connect of the event stream reports the daemon's version, then replays any update_blocked.
 const daemon = listen<{ version: string; app_version: string }>("ftm-daemon", ({ payload }) => {
+  daemonVersion = payload.version === payload.app_version ? payload.version : null;
   notice("update", null);
   notice(
     "version",
@@ -1387,3 +1421,74 @@ const daemon = listen<{ version: string; app_version: string }>("ftm-daemon", ({
   );
 });
 Promise.all([events, daemon]).then(() => invoke("subscribe"));
+
+interface Release {
+  version: string;
+  release_url: string;
+  script: string | null;
+}
+
+const DISMISSED_RELEASE = "ftm.dismissedRelease";
+
+function dismissedRelease(): string | null {
+  try {
+    return localStorage.getItem(DISMISSED_RELEASE);
+  } catch {
+    return null;
+  }
+}
+
+async function checkForRelease() {
+  const release = await invoke<Release | null>("check_update");
+  if (!release || release.version === dismissedRelease()) return;
+  const dismiss = () => {
+    try {
+      localStorage.setItem(DISMISSED_RELEASE, release.version);
+    } catch {}
+  };
+  if (!release.script) {
+    notice("release", `FTM ${release.version} is available. Upgrade it with your package manager.`, "info", [], dismiss);
+    return;
+  }
+  notice(
+    "release",
+    `FTM ${release.version} is available.`,
+    "info",
+    [
+      ["Update", () => installRelease(release, release.script as string)],
+      ["Dismiss", dismiss],
+    ],
+    dismiss,
+  );
+}
+
+/// Runs the install in a pane of its own, where makepkg shows its progress and sudo can ask for the password.
+async function installRelease(release: Release, script: string) {
+  // An ftmd older than this app ignores the command and would open a bare shell.
+  if (daemonVersion === null) {
+    notice("release", `To install FTM ${release.version}, run this in a terminal:\n\n${script}`, "info");
+    return;
+  }
+  try {
+    const r = await request({
+      op: "spawn",
+      kind: "terminal",
+      name: `FTM ${release.version} update`,
+      parent: null,
+      cwd: home || "/",
+      worktree_branch: null,
+      base: null,
+      copy_changes: false,
+      brief: null,
+      command: script,
+    });
+    selected = r.workspace.id;
+    render();
+  } catch (err) {
+    console.error(err);
+    notice("release", `Could not start the FTM ${release.version} update: ${err}`, "error");
+  }
+}
+
+setTimeout(() => checkForRelease().catch(console.error), 10_000);
+setInterval(() => checkForRelease().catch(console.error), 6 * 60 * 60 * 1000);

@@ -52,6 +52,7 @@ fn spawn_terminal(conn: &mut Conn, cwd: &Path) -> PaneId {
         base: None,
         copy_changes: false,
         brief: None,
+        command: None,
     })) else {
         panic!("expected spawned")
     };

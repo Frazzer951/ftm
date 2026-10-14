@@ -68,6 +68,16 @@ pub struct Settings {
     pub terminal: TerminalSettings,
     pub theme: ThemeSettings,
     pub sounds: SoundSettings,
+    pub updates: UpdateSettings,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UpdateSettings {
+    /// Look for a newer release. Unset means only when installed from the release's `PKGBUILD` (pacman `ftm-bin`),
+    /// the one install the app can upgrade by itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check: Option<bool>,
 }
 
 /// Sounds the app plays on status changes, by name from its sound list; an empty name plays nothing.
@@ -165,6 +175,7 @@ impl Settings {
         for (section, values) in ours {
             match (doc.get_mut(&section), values) {
                 (Some(toml::Value::Table(existing)), toml::Value::Table(values)) => existing.extend(values),
+                (None, toml::Value::Table(values)) if values.is_empty() => {},
                 (_, values) => {
                     doc.insert(section, values);
                 },
@@ -224,7 +235,14 @@ mod tests {
         assert!(text.contains("future = \"keep\"") && text.contains("[other]"), "{text}");
         assert!(text.contains("[theme]") && text.contains("follow_system = true"), "{text}");
         assert!(text.contains("needs_input = \"\""), "{text}");
+        assert!(!text.contains("[updates]"), "{text}");
         assert_eq!(Settings::load(&path).unwrap(), settings);
+
+        std::fs::write(&path, "[updates]\ncheck = false\n").unwrap();
+        let settings = Settings::load(&path).unwrap();
+        assert_eq!(settings.updates.check, Some(false));
+        Settings::default().save(&path).unwrap();
+        assert_eq!(Settings::load(&path).unwrap().updates.check, Some(false));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
