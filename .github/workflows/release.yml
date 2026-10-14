@@ -54,10 +54,16 @@ jobs:
           version=${GITHUB_REF_NAME#v}
           prerelease=false
           case $version in *-*) prerelease=true ;; esac
-          flags=(--draft --verify-tag --title "FTM $version" --notes-file NOTES.md)
-          [ "$prerelease" = true ] && flags+=(--prerelease)
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" "${flags[@]}"
-          id=$(gh api "repos/$GITHUB_REPOSITORY/releases" --jq ".[] | select(.tag_name == \"$GITHUB_REF_NAME\") | .id")
+          # A rerun reuses its draft. A draft just created can be missing from the listing for a while, so take the id
+          # from the create call.
+          id=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
+            --jq ".[] | select(.tag_name == \"$GITHUB_REF_NAME\") | .id" | head -n1)
+          if [ -z "$id" ]; then
+            id=$(gh api -X POST "repos/$GITHUB_REPOSITORY/releases" -f tag_name="$GITHUB_REF_NAME" \
+              -f name="FTM $version" -F body=@NOTES.md -F draft=true -F prerelease="$prerelease" --jq .id)
+          fi
+          [ -n "$id" ] || { echo "::error::no release id for $GITHUB_REF_NAME"; exit 1; }
+          echo "draft release $id"
           {
             echo "id=$id"
             echo "version=$version"
@@ -119,12 +125,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      RELEASE_ID: ${{ needs.draft.outputs.release-id }}
     steps:
       - name: Check every asset is up
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          assets=$(gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          assets=$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" --jq '.assets[].name')
           echo "$assets"
           missing=0
           for pattern in '_aarch64\.dmg$' '_x64\.dmg$' '_amd64\.deb$' '_arm64\.deb$' '\.x86_64\.rpm$' '\.aarch64\.rpm$'; do
@@ -134,7 +142,7 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release edit "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --draft=false
+        run: gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" -F draft=false --jq .html_url
 
   homebrew:
     name: homebrew cask
