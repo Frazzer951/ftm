@@ -44,14 +44,15 @@ release again.
 
 ## Nightlies
 
-`.github/workflows/nightly.yml` builds **FTM Nightly** from `main` every day at 07:23 UTC, and skips the day when
-`main` is still at the commit of the last nightly. Run it by hand from Actions → Nightly → Run workflow (on `main`);
-tick *force* to build an unchanged `main`.
+`.github/workflows/nightly.yml` builds **FTM Nightly** from `main` on every push to it. Pushes queue: one runs at a
+time, and only the newest waiting push is kept. A release pushes its version-bump commit to `main` along with the tag,
+so it also starts a nightly, built at the next patch. Run it by hand from Actions → Nightly → Run workflow (on `main`).
+A run skips the build when `main` is still at the commit of the last nightly; tick *force* to build it anyway.
 
-- **Version**: the patch after the committed version plus the UTC date, `0.1.1-nightly.20261014`, so each nightly
-  sorts above the last release and the one before it (a second run on the same day appends `.HHMM`). A committed
-  pre-release keeps its core version: `0.2.0-rc.1` gives `0.2.0-nightly.<date>`. `scripts/set-version.sh` stamps it
-  into the build; nothing is committed.
+- **Version**: the patch after the committed version, the UTC date and the workflow's run number,
+  `0.1.2-nightly.20261014.7`, so each nightly sorts above the last release and every nightly before it, however many
+  run in a day. A committed pre-release keeps its core version: `0.2.0-rc.1` gives `0.2.0-nightly.<date>.<run>`.
+  `scripts/set-version.sh` stamps it into the build; nothing is committed.
 - **Identity**: the build sets `FTM_CHANNEL=nightly`, read by `ftm-core` at compile time, and merges
   `tauri.nightly.conf.json`: the app is `FTM Nightly.app` (`dev.frazzer.ftm.nightly`) and `ftm`, `ftmd` and the app
   default to `<cache or XDG_RUNTIME_DIR>/ftm-nightly/ftmd.sock`, so it runs its own daemon, panes and session state

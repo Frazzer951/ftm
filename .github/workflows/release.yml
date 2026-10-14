@@ -139,7 +139,15 @@ jobs:
           git add Casks/ftm.rb
           if git diff --cached --quiet; then echo "cask already at $VERSION"; exit 0; fi
           git commit -m "ftm $VERSION"
-          git push origin HEAD
+          # The nightly built from this release's version-bump commit may push to the tap at the same time; it only
+          # ever touches Casks/ftm@nightly.rb.
+          for attempt in 1 2 3; do
+            git push origin HEAD && exit 0
+            echo "push $attempt refused, rebasing"
+            sleep $((attempt * 5))
+            git pull --rebase origin "$(git branch --show-current)"
+          done
+          exit 1
 
   aur:
     name: aur ftm-bin
