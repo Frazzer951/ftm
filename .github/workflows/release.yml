@@ -1,0 +1,206 @@
+name: Release
+
+# A v* tag (pushed by `cargo release`, see RELEASE.md) builds every target into a draft release, publishes it once all
+# assets are up, then updates the Homebrew cask and the AUR package. Pre-release tags (v0.1.0-rc.1) stop short of the
+# tap and the AUR: those jobs render the cask and PKGBUILD and upload them as workflow artifacts instead.
+
+on:
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  draft:
+    name: draft release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      release-id: ${{ steps.release.outputs.id }}
+      version: ${{ steps.release.outputs.version }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Check the tag matches the workspace version
+        run: |
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match the workspace version $version"
+            exit 1
+          fi
+      - uses: orhun/git-cliff-action@a9a95522b26fe6403f7bb24031f21fb573d0f5ff # v4.9.1
+        id: notes
+        with:
+          config: cliff.toml
+          args: --latest --strip header
+        env:
+          OUTPUT: NOTES.md
+      - name: Create the draft release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          prerelease=false
+          case $version in *-*) prerelease=true ;; esac
+          flags=(--draft --verify-tag --title "FTM $version" --notes-file NOTES.md)
+          [ "$prerelease" = true ] && flags+=(--prerelease)
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" "${flags[@]}"
+          id=$(gh api "repos/$GITHUB_REPOSITORY/releases" --jq ".[] | select(.tag_name == \"$GITHUB_REF_NAME\") | .id")
+          {
+            echo "id=$id"
+            echo "version=$version"
+            echo "prerelease=$prerelease"
+          } >>"$GITHUB_OUTPUT"
+
+  build:
+    name: build (${{ matrix.target }})
+    needs: draft
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, target: aarch64-apple-darwin, bundles: "app,dmg" }
+          - { os: macos-latest, target: x86_64-apple-darwin, bundles: "app,dmg" }
+          # 22.04 for an older glibc, so the .deb and .rpm run on more distros.
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, bundles: "deb,rpm" }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, bundles: "deb,rpm" }
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Tauri system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev libxdo-dev \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ matrix.target }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci
+        working-directory: app
+      - run: scripts/sidecars.sh ${{ matrix.target }}
+      - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          projectPath: app
+          releaseId: ${{ needs.draft.outputs.release-id }}
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --config src-tauri/tauri.bundle.conf.json
+          uploadUpdaterJson: false
+          retryAttempts: 1
+
+  publish:
+    name: publish release
+    needs: [draft, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check every asset is up
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          assets=$(gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          echo "$assets"
+          missing=0
+          for pattern in '_aarch64\.dmg$' '_x64\.dmg$' '_amd64\.deb$' '_arm64\.deb$' '\.x86_64\.rpm$' '\.aarch64\.rpm$'; do
+            grep -qE "$pattern" <<<"$assets" || { echo "::error::no asset matches $pattern"; missing=1; }
+          done
+          exit $missing
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --draft=false
+
+  homebrew:
+    name: homebrew cask
+    needs: [draft, publish]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.draft.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Render Casks/ftm.rb
+        run: |
+          base=https://github.com/$GITHUB_REPOSITORY/releases/download/v$VERSION
+          sha() { curl -fsSL "$base/FTM_${VERSION}_$1.dmg" | sha256sum | cut -d' ' -f1; }
+          mkdir -p out
+          sed -e "s/@VERSION@/$VERSION/" -e "s/@SHA256_ARM@/$(sha aarch64)/" -e "s/@SHA256_INTEL@/$(sha x64)/" \
+            packaging/homebrew/ftm.rb >out/ftm.rb
+          cat out/ftm.rb
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: homebrew-cask
+          path: out/ftm.rb
+      - name: Push to Frazzer951/homebrew-ftm
+        if: needs.draft.outputs.prerelease == 'false'
+        env:
+          TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          git clone "https://x-access-token:$TOKEN@github.com/Frazzer951/homebrew-ftm.git" tap
+          mkdir -p tap/Casks
+          cp out/ftm.rb tap/Casks/ftm.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/ftm.rb
+          if git diff --cached --quiet; then echo "cask already at $VERSION"; exit 0; fi
+          git commit -m "ftm $VERSION"
+          git push origin HEAD
+
+  aur:
+    name: aur ftm-bin
+    needs: [draft, publish]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.draft.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Render PKGBUILD
+        run: |
+          base=https://github.com/$GITHUB_REPOSITORY/releases/download/v$VERSION
+          sha() { curl -fsSL "$1" | sha256sum | cut -d' ' -f1; }
+          mkdir -p out
+          sed -e "s/@VERSION@/$VERSION/" \
+            -e "s/@SHA256_X86_64@/$(sha "$base/FTM_${VERSION}_amd64.deb")/" \
+            -e "s/@SHA256_AARCH64@/$(sha "$base/FTM_${VERSION}_arm64.deb")/" \
+            -e "s/@SHA256_LICENSE@/$(sha256sum LICENSE | cut -d' ' -f1)/" \
+            packaging/aur/ftm-bin/PKGBUILD >out/PKGBUILD
+          cat out/PKGBUILD
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: aur-pkgbuild
+          path: out/PKGBUILD
+      # Regenerates .SRCINFO from the PKGBUILD in an Arch container before pushing.
+      - uses: KSXGitHub/github-actions-deploy-aur@084b0d9b15415bf9cdb65d44dad1efe37a354050 # v4.2.0
+        if: needs.draft.outputs.prerelease == 'false'
+        with:
+          pkgname: ftm-bin
+          pkgbuild: out/PKGBUILD
+          commit_username: Luke Eltiste
+          commit_email: luke343279@gmail.com
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: ftm-bin ${{ needs.draft.outputs.version }}

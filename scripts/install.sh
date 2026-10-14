@@ -22,6 +22,8 @@ REPO=$(cd "$(dirname "$0")/.." && pwd -P)
 # shellcheck source=scripts/lib.sh
 . "$REPO/scripts/lib.sh"
 TARGET=${CARGO_TARGET_DIR:-$REPO/target}
+TRIPLE=$(rustc -vV | sed -n 's/^host: //p')
+SIDECARS=$REPO/app/src-tauri/binaries
 
 PREFIX="" BIN_DIR=$HOME/.local/bin LAUNCH=1 DRY=0 SOCKET=$(default_socket)
 while [ $# -gt 0 ]; do
@@ -67,20 +69,25 @@ restart() {
   stop_ftmd "$SOCKET" "$ftm"
 }
 
+# The app and ftmd look for ftmd and ftm next to their own executable, so they ship as Tauri sidecars. Pass a bundle
+# type to make, or nothing for the bare binaries.
+build() {
+  echo "==> building"
+  "$REPO/scripts/sidecars.sh" "$TRIPLE"
+  ensure_app_deps "$REPO/app"
+  local args=(--config src-tauri/tauri.bundle.conf.json)
+  if [ -n "${1:-}" ]; then args+=(--bundles "$1"); else args+=(--no-bundle); fi
+  (cd "$REPO/app" && npm run tauri build -- "${args[@]}")
+}
+
 install_macos() {
   if [ -z "$PREFIX" ]; then
     PREFIX=/Applications
     [ -w "$PREFIX" ] || PREFIX=$HOME/Applications
   fi
   local built=$TARGET/release/bundle/macos/FTM.app app=$PREFIX/FTM.app
-  echo "==> building"
-  cargo build --release --manifest-path "$REPO/Cargo.toml" -p ftmd -p ftm
-  ensure_app_deps "$REPO/app"
-  (cd "$REPO/app" && npm run tauri build -- --bundles app)
-
-  # The app and ftmd look for ftmd and ftm next to their own executable.
-  echo "==> assembling $built"
-  cp "$TARGET/release/ftm" "$TARGET/release/ftmd" "$built/Contents/MacOS/"
+  build app
+  echo "==> signing $built"
   codesign --force --deep --sign - "$built"
   codesign --verify --deep --strict "$built"
 
@@ -103,13 +110,10 @@ install_macos() {
 
 install_linux() {
   local lib=${PREFIX:-$HOME/.local/lib/ftm} f
-  echo "==> building"
-  cargo build --release --manifest-path "$REPO/Cargo.toml" -p ftmd -p ftm
-  ensure_app_deps "$REPO/app"
-  (cd "$REPO/app" && npm run tauri build -- --no-bundle)
-
+  build
   run mkdir -p "$lib"
-  for f in ftm ftmd ftm-app; do run cp "$TARGET/release/$f" "$lib/.$f.new"; done
+  run cp "$TARGET/release/ftm-app" "$lib/.ftm-app.new"
+  for f in ftm ftmd; do run cp "$SIDECARS/$f-$TRIPLE" "$lib/.$f.new"; done
   run cp "$REPO/app/src-tauri/icons/128x128.png" "$lib/ftm.png"
   restart "$lib/ftm-app" "$lib/.ftm.new"
   echo "==> installing $lib"

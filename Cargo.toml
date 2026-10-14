@@ -8,3 +8,10 @@ edition = "2024"
 license = "MIT"
 repository = "https://github.com/Frazzer951/ftm"
 version = "0.1.0"
+
+[workspace.metadata.release]
+shared-version = true
+consolidate-commits = true
+publish = false
+tag-name = "v{{version}}"
+pre-release-commit-message = "chore(release): prepare for release {{version}}"
