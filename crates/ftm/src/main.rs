@@ -9,6 +9,7 @@ use ftm_core::model::{Kind, PaneId, Status, Workspace, WorkspaceId};
 use ftm_core::protocol::{Request, Response, SpawnRequest};
 use std::io::Write;
 use std::path::PathBuf;
+use std::time::Duration;
 
 #[derive(Parser)]
 #[command(version, about = "Frazzer's Terminal Manager")]
@@ -174,19 +175,36 @@ fn main() -> Result<()> {
             return Ok(());
         },
         Command::Attach { target } => return attach::run(resolve_pane(target)?),
-        Command::Send { target, text, enter } => {
-            let text = if enter { text + "\r" } else { text };
-            Request::Input {
-                pane: resolve_pane(target)?,
-                data: B64.encode(text),
-            }
-        },
+        Command::Send { target, text, enter } => return send(resolve_pane(target)?, &text, enter),
     };
 
     match client::send(&request)? {
         Response::Pong { version } => println!("ftmd {version}"),
         Response::Spawned { workspace } => println!("{}", workspace.id),
         _ => {},
+    }
+    Ok(())
+}
+
+/// Claude Code takes a longer burst of input as a paste, CR included, so Enter goes in its own write once the TUI has
+/// had time to take in the text.
+const ENTER_DELAY: Duration = Duration::from_millis(100);
+
+fn send(pane: PaneId, text: &str, enter: bool) -> Result<()> {
+    let input = |data: &str| {
+        client::send(&Request::Input {
+            pane,
+            data: B64.encode(data),
+        })
+    };
+    if !text.is_empty() {
+        input(text)?;
+        if enter {
+            std::thread::sleep(ENTER_DELAY);
+        }
+    }
+    if enter {
+        input("\r")?;
     }
     Ok(())
 }
