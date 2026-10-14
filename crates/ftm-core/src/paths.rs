@@ -1,14 +1,31 @@
 use std::path::{Path, PathBuf};
 
-/// `$XDG_RUNTIME_DIR/ftm/ftmd.sock` on Linux; macOS has no runtime dir, so it falls back to the cache dir.
+/// The dir the default socket lives in: `ftm`, or `ftm-nightly` in a build made with `FTM_CHANNEL=nightly`, so a
+/// nightly install runs its own daemon next to the stable one.
+pub const SOCKET_DIR_NAME: &str = socket_dir_name(option_env!("FTM_CHANNEL"));
+
+const fn socket_dir_name(channel: Option<&str>) -> &'static str {
+    match channel {
+        None => "ftm",
+        Some(c) if c.is_empty() => "ftm",
+        Some(c) if c.eq_ignore_ascii_case("nightly") => "ftm-nightly",
+        Some(_) => panic!("FTM_CHANNEL must be unset or \"nightly\""),
+    }
+}
+
+/// `$XDG_RUNTIME_DIR/<SOCKET_DIR_NAME>/ftmd.sock` on Linux; macOS has no runtime dir, so it falls back to the cache dir.
 pub fn socket_path() -> PathBuf {
     if let Ok(p) = std::env::var(crate::ENV_SOCKET) {
         return PathBuf::from(p);
     }
+    default_socket_path()
+}
+
+fn default_socket_path() -> PathBuf {
     let base = dirs::runtime_dir()
         .or_else(dirs::cache_dir)
         .unwrap_or_else(std::env::temp_dir);
-    base.join("ftm").join("ftmd.sock")
+    base.join(SOCKET_DIR_NAME).join("ftmd.sock")
 }
 
 /// `$XDG_CONFIG_HOME/ftm`, else `~/.config/ftm` on both platforms.
@@ -81,9 +98,9 @@ pub fn private_dir(dir: &Path, ours: bool) -> std::io::Result<()> {
     Ok(())
 }
 
-/// The default socket lives in a dir named `ftm` that FTM owns; an overridden one may not.
+/// The default socket lives in a dir named [`SOCKET_DIR_NAME`] that FTM owns; an overridden one may not.
 pub fn socket_dir_is_ours(dir: &Path) -> bool {
-    dir.file_name().is_some_and(|n| n == "ftm")
+    dir.file_name().is_some_and(|n| n == SOCKET_DIR_NAME)
 }
 
 #[cfg(test)]
@@ -113,8 +130,28 @@ mod tests {
         private_dir(&shared, true).unwrap();
         assert_eq!(mode(&shared), 0o700);
 
-        assert!(socket_dir_is_ours(Path::new("/Users/x/Library/Caches/ftm")));
+        assert!(socket_dir_is_ours(
+            &Path::new("/Users/x/Library/Caches").join(SOCKET_DIR_NAME)
+        ));
         assert!(!socket_dir_is_ours(Path::new("/tmp")));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn nightly_builds_default_to_their_own_socket_dir() {
+        assert_eq!(socket_dir_name(None), "ftm");
+        assert_eq!(socket_dir_name(Some("")), "ftm");
+        assert_eq!(socket_dir_name(Some("nightly")), "ftm-nightly");
+
+        let (ours, other) = match option_env!("FTM_CHANNEL") {
+            Some("nightly") => ("ftm-nightly", "ftm"),
+            _ => ("ftm", "ftm-nightly"),
+        };
+        let socket = default_socket_path();
+        assert_eq!(socket.file_name().unwrap(), "ftmd.sock");
+        let dir = socket.parent().unwrap();
+        assert_eq!(dir.file_name().unwrap(), ours);
+        assert!(socket_dir_is_ours(dir));
+        assert!(!socket_dir_is_ours(&dir.with_file_name(other)));
     }
 }

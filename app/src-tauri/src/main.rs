@@ -175,7 +175,7 @@ fn menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::menu::{Menu, PredefinedMenuItem as Item, Submenu};
     let app_menu = Submenu::with_items(
         app,
-        "FTM",
+        &app.package_info().name,
         true,
         &[
             &Item::about(app, None, None)?,
@@ -205,7 +205,7 @@ fn menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
 
 fn main_window(app: &AppHandle, focused: bool) -> tauri::Result<()> {
     let builder = tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
-        .title("FTM")
+        .title(&app.package_info().name)
         .inner_size(1280.0, 820.0)
         .focused(focused);
     #[cfg(target_os = "macos")]
