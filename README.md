@@ -29,6 +29,13 @@ This installs `FTM.app` and links `ftm` onto `PATH`. The app is signed ad hoc, n
 quarantine flag so it opens. If you take the `.dmg` from the [releases](https://github.com/Frazzer951/ftm/releases)
 instead, run `xattr -dr com.apple.quarantine /Applications/FTM.app` after copying it.
 
+A nightly build of `main` installs next to it as `FTM Nightly.app`, with its own daemon and the CLI linked as
+`ftm-nightly`:
+
+```sh
+brew install --cask frazzer951/ftm/ftm@nightly
+```
+
 **Arch Linux** (x86_64 and aarch64): `ftm-bin` is not yet published to the AUR. Each release carries its
 `PKGBUILD`, which repackages the release's `.deb`:
 

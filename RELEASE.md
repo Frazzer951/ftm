@@ -25,7 +25,7 @@ The tag starts `.github/workflows/release.yml`:
 
 - **draft**: checks the tag matches the workspace version and creates a draft release whose notes are git-cliff's
   section for that tag.
-- **build**: macOS aarch64 and x86_64 (`.dmg`, signed ad hoc), Linux x86_64 and aarch64 on Ubuntu 22.04 (`.deb`,
+- **build** (`.github/workflows/build.yml`, shared with the nightly): macOS aarch64 and x86_64 (`.dmg`, signed ad hoc), Linux x86_64 and aarch64 on Ubuntu 22.04 (`.deb`,
   `.rpm`). `scripts/sidecars.sh` builds `ftm` and `ftmd` for the target first, and `tauri.bundle.conf.json` bundles
   them next to `ftm-app`: in `FTM.app/Contents/MacOS` and in `/usr/bin`.
 - **publish**: once every asset is up, makes the release public.
@@ -42,13 +42,41 @@ pre-release too). Use one to try the pipeline.
 If a build fails, fix it on `main`, delete the draft release and the tag (`git push origin :v<version>`), and cut the
 release again.
 
+## Nightlies
+
+`.github/workflows/nightly.yml` builds **FTM Nightly** from `main` every day at 07:23 UTC, and skips the day when
+`main` is still at the commit of the last nightly. Run it by hand from Actions → Nightly → Run workflow (on `main`);
+tick *force* to build an unchanged `main`.
+
+- **Version**: the patch after the committed version plus the UTC date, `0.1.1-nightly.20261014`, so each nightly
+  sorts above the last release and the one before it (a second run on the same day appends `.HHMM`). A committed
+  pre-release keeps its core version: `0.2.0-rc.1` gives `0.2.0-nightly.<date>`. `scripts/set-version.sh` stamps it
+  into the build; nothing is committed.
+- **Identity**: the build sets `FTM_CHANNEL=nightly`, read by `ftm-core` at compile time, and merges
+  `tauri.nightly.conf.json`: the app is `FTM Nightly.app` (`dev.frazzer.ftm.nightly`) and `ftm`, `ftmd` and the app
+  default to `<cache or XDG_RUNTIME_DIR>/ftm-nightly/ftmd.sock`, so it runs its own daemon, panes and session state
+  next to the stable one. `FTM_SOCKET` still overrides it. `~/.config/ftm` (settings, themes, repo setup) and the
+  worktrees dir are shared.
+- **Release**: a GitHub pre-release tagged `v<version>`, never marked latest. Only the newest 5 are kept; older ones
+  and their tags are deleted, as are drafts left by failed runs.
+- **Homebrew**: renders `packaging/homebrew/ftm@nightly.rb` and pushes it to the tap as `Casks/ftm@nightly.rb`
+  (`brew install --cask frazzer951/ftm/ftm@nightly`), which links the CLI as `ftm-nightly`. It never touches
+  `Casks/ftm.rb`, the PKGBUILD or the AUR.
+
+The Linux `.deb` and `.rpm` are attached too, but they install the same `/usr/bin` paths as stable, so they replace
+it rather than sit next to it.
+
+To build one locally: `scripts/set-version.sh <version>`, then with `FTM_CHANNEL=nightly` exported run
+`scripts/sidecars.sh` and `npx tauri build --config src-tauri/tauri.bundle.conf.json --config
+src-tauri/tauri.nightly.conf.json` in `app`. Revert the stamped manifests afterwards.
+
 ## Secrets
 
 Repository secrets in Settings → Secrets and variables → Actions:
 
 | Secret | What |
 |---|---|
-| `HOMEBREW_TAP_TOKEN` | A fine-grained token with Contents: read and write on `Frazzer951/homebrew-ftm` only |
+| `HOMEBREW_TAP_TOKEN` | A fine-grained token with Contents: read and write on `Frazzer951/homebrew-ftm` only, used by the release and nightly workflows |
 
 ## Publishing to the AUR (not yet on)
 

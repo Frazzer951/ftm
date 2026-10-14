@@ -1,0 +1,193 @@
+name: Nightly
+
+# Builds FTM Nightly from main once a day, unless main hasn't moved since the last nightly, into a GitHub pre-release
+# tagged v<next patch>-nightly.<YYYYMMDD> that is never marked latest. Then pushes Casks/ftm@nightly.rb to the tap and
+# deletes all but the newest KEEP nightlies. Nothing here touches the stable cask or the PKGBUILD. See RELEASE.md.
+
+on:
+  schedule:
+    - cron: "23 7 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Build even if main hasn't changed since the last nightly
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}
+
+permissions:
+  contents: read
+
+env:
+  KEEP: 5
+
+jobs:
+  plan:
+    name: plan nightly
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      build: ${{ steps.plan.outputs.build }}
+      release-id: ${{ steps.draft.outputs.id }}
+      version: ${{ steps.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Pick the version, or skip
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force || false }}
+        run: |
+          last=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
+            --jq '.[] | select(.draft == false and (.tag_name | test("-nightly\\."))) | .tag_name' | head -n1)
+          if [ -n "$last" ]; then
+            last_sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$last" --jq .sha)
+            echo "last nightly $last at $last_sha"
+            if [ "$last_sha" = "$GITHUB_SHA" ] && [ "$FORCE" != true ]; then
+              echo "main is still at $GITHUB_SHA: nothing to build"
+              echo "build=false" >>"$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          # The patch after the committed version, so a nightly sorts above the last release and below the next one.
+          # A committed pre-release (0.2.0-rc.1) is already ahead of the last release: keep its core version.
+          current=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          IFS=. read -r major minor patch <<<"${current%%-*}"
+          case $current in *-*) ;; *) patch=$((patch + 1)) ;; esac
+          version="$major.$minor.$patch-nightly.$(date -u +%Y%m%d)"
+          # A second run on the same day (workflow_dispatch) still has to sort higher.
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$version" >/dev/null 2>&1; then
+            version="$version.$(date -u +%H%M)"
+          fi
+          echo "building $version from $GITHUB_SHA"
+          {
+            echo "build=true"
+            echo "version=$version"
+          } >>"$GITHUB_OUTPUT"
+      - name: Create the draft pre-release
+        id: draft
+        if: steps.plan.outputs.build == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          # Only this workflow makes nightly drafts and runs one at a time, so any left over are from failed runs.
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
+            --jq '.[] | select(.draft and (.tag_name | test("-nightly\\."))) | .id' |
+            while read -r stale; do gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$stale"; done
+          body="Nightly build of $GITHUB_SHA from main. Not a release: \`brew install --cask frazzer951/ftm/ftm@nightly\`."
+          id=$(gh api -X POST "repos/$GITHUB_REPOSITORY/releases" -f tag_name="v$VERSION" \
+            -f target_commitish="$GITHUB_SHA" -f name="FTM Nightly $VERSION" -f body="$body" \
+            -F draft=true -F prerelease=true -f make_latest=false --jq .id)
+          [ -n "$id" ] || { echo "::error::no release id for v$VERSION"; exit 1; }
+          echo "draft release $id"
+          echo "id=$id" >>"$GITHUB_OUTPUT"
+
+  build:
+    name: build
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/build.yml
+    with:
+      release-id: ${{ needs.plan.outputs.release-id }}
+      channel: nightly
+      version: ${{ needs.plan.outputs.version }}
+
+  publish:
+    name: publish pre-release
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      RELEASE_ID: ${{ needs.plan.outputs.release-id }}
+    steps:
+      - name: Check every asset is up
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          assets=$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" --jq '.assets[].name')
+          echo "$assets"
+          missing=0
+          for pattern in '_aarch64\.dmg$' '_x64\.dmg$' '_amd64\.deb$' '_arm64\.deb$' '\.x86_64\.rpm$' '\.aarch64\.rpm$'; do
+            grep -qE "$pattern" <<<"$assets" || { echo "::error::no asset matches $pattern"; missing=1; }
+          done
+          exit $missing
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            -F draft=false -F prerelease=true -f make_latest=false --jq .html_url
+
+  homebrew:
+    name: homebrew cask
+    needs: [plan, publish]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # GitHub turns the space in "FTM Nightly_<version>_<arch>.dmg" into a dot.
+      - name: Render Casks/ftm@nightly.rb
+        run: |
+          base=https://github.com/$GITHUB_REPOSITORY/releases/download/v$VERSION
+          sha() { curl -fsSL "$base/FTM.Nightly_${VERSION}_$1.dmg" | sha256sum | cut -d' ' -f1; }
+          arm=$(sha aarch64)
+          intel=$(sha x64)
+          mkdir -p out
+          sed -e "s/@VERSION@/$VERSION/" -e "s/@SHA256_ARM@/$arm/" -e "s/@SHA256_INTEL@/$intel/" \
+            packaging/homebrew/ftm@nightly.rb >out/ftm@nightly.rb
+          cat out/ftm@nightly.rb
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: homebrew-cask-nightly
+          path: out/ftm@nightly.rb
+      - name: Push to Frazzer951/homebrew-ftm
+        env:
+          TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          git clone "https://x-access-token:$TOKEN@github.com/Frazzer951/homebrew-ftm.git" tap
+          mkdir -p tap/Casks
+          cp out/ftm@nightly.rb tap/Casks/ftm@nightly.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/ftm@nightly.rb
+          if git diff --cached --quiet; then echo "cask already at $VERSION"; exit 0; fi
+          git commit -m "ftm@nightly $VERSION"
+          # A stable release may push to the tap at the same time; it only ever touches Casks/ftm.rb.
+          for attempt in 1 2 3; do
+            git push origin HEAD && exit 0
+            echo "push $attempt refused, rebasing"
+            sleep $((attempt * 5))
+            git pull --rebase origin "$(git branch --show-current)"
+          done
+          exit 1
+
+  prune:
+    name: prune old nightlies
+    needs: [plan, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Keep the newest ${{ env.KEEP }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
+            --jq '.[] | select(.draft == false and (.tag_name | test("-nightly\\."))) | [.created_at, .id, .tag_name] | @tsv' |
+            sort -r | tail -n +$((KEEP + 1)) |
+            while IFS=$'\t' read -r _ id tag; do
+              echo "deleting $tag"
+              gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$id"
+              gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$tag" || true
+            done

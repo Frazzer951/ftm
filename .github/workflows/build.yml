@@ -1,0 +1,86 @@
+name: Build
+
+# Builds every target and uploads the bundles to a draft release. Called by release.yml and nightly.yml.
+
+on:
+  workflow_call:
+    inputs:
+      release-id:
+        description: The draft release to upload the bundles to
+        required: true
+        type: string
+      channel:
+        description: Empty for stable; "nightly" builds FTM Nightly (see RELEASE.md)
+        required: false
+        type: string
+        default: ""
+      version:
+        description: Stamped into the workspace before building; empty keeps the committed version
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, target: aarch64-apple-darwin, bundles: "app,dmg" }
+          - { os: macos-latest, target: x86_64-apple-darwin, bundles: "app,dmg" }
+          # 22.04 for an older glibc, so the .deb and .rpm run on more distros.
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, bundles: "deb,rpm" }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, bundles: "deb,rpm" }
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    env:
+      # Read at compile time by ftm-core: a nightly ftm, ftmd and app default to their own daemon socket.
+      FTM_CHANNEL: ${{ inputs.channel }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Tauri system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev libxdo-dev \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ matrix.target }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci
+        working-directory: app
+      - name: Stamp the version
+        if: inputs.version != ''
+        run: scripts/set-version.sh "$VERSION"
+        env:
+          VERSION: ${{ inputs.version }}
+      - run: scripts/sidecars.sh ${{ matrix.target }}
+      - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          projectPath: app
+          releaseId: ${{ inputs.release-id }}
+          args: >-
+            --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --config src-tauri/tauri.bundle.conf.json
+            ${{ inputs.channel == 'nightly' && '--config src-tauri/tauri.nightly.conf.json' || '' }}
+          uploadUpdaterJson: false
+          retryAttempts: 1
