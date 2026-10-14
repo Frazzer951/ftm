@@ -57,6 +57,7 @@ button:hover { background: var(--hover); }
 .dot.needs_input { background: var(--status-needs-input); }
 .dot.idle { background: var(--status-idle); }
 .dot.done { background: transparent; border: 1.5px solid var(--status-done); }
+.dot.failed { background: transparent; border: 1.5px solid var(--status-needs-input); }
 .dot.unseen { background: var(--status-unseen); border: none; }
 .badge { flex: none; min-width: 16px; padding: 0 4px; border-radius: 8px; font-size: 10px; line-height: 16px; text-align: center; color: #fff; background: var(--status-needs-input); }
 

@@ -44,6 +44,10 @@ struct Pane {
     buffer: Vec<u8>,
     /// Headless emulator fed the same output, so the current screen and scrollback can be read back as text.
     screen: vt100::Parser<TitleWatch>,
+    /// Opened by `spawn` to run the workspace's setup and agent.
+    startup: bool,
+    /// Its holder is gone but it stays on screen, showing why its agent never started.
+    exited: bool,
 }
 
 /// Collects the terminal titles (OSC 0/2) a pane sets, in order, until read.
@@ -197,7 +201,12 @@ impl State {
         };
         for (key, _) in std::env::vars_os() {
             let key = key.to_string_lossy();
-            if key == "CLAUDECODE" || key == "FTM_BRIEF" || key.starts_with("CLAUDE_CODE_") || key.starts_with("SUPACODE_") {
+            if key == "CLAUDECODE"
+                || key == "FTM_BRIEF"
+                || key == "FTM_SETUP"
+                || key.starts_with("CLAUDE_CODE_")
+                || key.starts_with("SUPACODE_")
+            {
                 cmd.env_remove(key.as_ref());
             }
         }
@@ -211,6 +220,9 @@ impl State {
             .env("FTM_BIN", crate::hooks::ftm_binary());
         if let Some(brief) = startup.and_then(|s| s.brief) {
             cmd.env("FTM_BRIEF", brief);
+        }
+        if let Some(setup) = startup.and_then(|s| s.setup) {
+            cmd.env("FTM_SETUP", setup);
         }
         if let Some(settings) = &self.claude_settings {
             cmd.env("FTM_CLAUDE_SETTINGS", settings);
@@ -240,7 +252,7 @@ impl State {
             std::thread::sleep(Duration::from_millis(10));
         };
         std::thread::spawn(move || holder.wait());
-        self.attach_holder(shared, workspace, id, holder_socket, stream)?;
+        self.attach_holder(shared, workspace, id, holder_socket, stream, startup.is_some())?;
         Ok(id)
     }
 
@@ -251,6 +263,7 @@ impl State {
         id: PaneId,
         holder_socket: PathBuf,
         stream: UnixStream,
+        startup: bool,
     ) -> Result<()> {
         let mut read = stream.try_clone()?;
         read.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -269,6 +282,8 @@ impl State {
                 holder_socket,
                 buffer: Vec::new(),
                 screen: vt100::Parser::new_with_callbacks(rows, cols, SCROLLBACK, TitleWatch::default()),
+                startup,
+                exited: false,
             },
         );
         let shared = shared.clone();
@@ -315,7 +330,7 @@ pub fn load(shared: &Shared) -> Result<()> {
         let holder_socket = state.holders.join(format!("{pane}.sock"));
         let attached = UnixStream::connect(&holder_socket)
             .map_err(eyre::Report::from)
-            .and_then(|stream| state.attach_holder(shared, ws, pane, holder_socket.clone(), stream));
+            .and_then(|stream| state.attach_holder(shared, ws, pane, holder_socket.clone(), stream, false));
         match attached {
             Ok(()) => kept += 1,
             Err(e) => {
@@ -342,9 +357,14 @@ fn shell() -> String {
 }
 
 /// Runs under the user's login shell, which may be fish, so it sticks to syntax fish, zsh and bash share: optional
-/// arguments are decided here rather than with `${VAR:+...}`, and values come in through quoted variables.
+/// arguments are decided here rather than with `${VAR:+...}`, and values come in through quoted variables. The repo's
+/// setup is POSIX sh whatever the login shell, so it runs in its own `sh` from `$FTM_SETUP`.
 fn script(startup: Startup, settings: bool) -> Option<String> {
-    let setup = startup.setup.map(|s| format!("{s}; ")).unwrap_or_default();
+    let setup = if startup.setup.is_some() {
+        r#"/bin/sh -c "$FTM_SETUP"; "#
+    } else {
+        ""
+    };
     if startup.agent {
         let agent = std::env::var(ENV_AGENT_CMD).ok().filter(|c| !c.trim().is_empty());
         let mut line = agent.unwrap_or_else(|| "claude".to_string());
@@ -398,7 +418,37 @@ fn read_loop(shared: Shared, id: PaneId, mut holder: UnixStream) {
             state.emit_workspaces();
         }
     }
-    close_pane(&shared, id);
+    pane_exited(&shared, id);
+}
+
+/// An agent whose startup pane exits before Claude reports any status never started (setup the shell could not
+/// parse, no `claude`): the pane stays with what it printed and the workspace turns `failed`. Any other pane closes.
+fn pane_exited(shared: &Shared, id: PaneId) {
+    {
+        let mut guard = lock(shared);
+        let state = &mut *guard;
+        let Some(pane) = state.panes.get_mut(&id) else { return };
+        if let Some(ws) = state.workspaces.get_mut(&pane.workspace)
+            && pane.startup
+            && ws.kind == Kind::Agent
+            && ws.status == Status::Starting
+        {
+            tracing::warn!("agent {} exited before starting:\n{}", ws.name, screen_text(&mut pane.screen));
+            const NOTE: &[u8] = b"\r\n\x1b[31m[ftm] the agent exited before it started\x1b[0m\r\n";
+            pane.exited = true;
+            pane.buffer.extend_from_slice(NOTE);
+            pane.screen.process(NOTE);
+            set_status(ws, Status::Failed);
+            let _ = state.events.send(Event::Output {
+                pane: id,
+                data: B64.encode(NOTE),
+                reset: false,
+            });
+            state.emit_workspaces();
+            return;
+        }
+    }
+    close_pane(shared, id);
 }
 
 /// Idempotent: a pane that exits on its own and a `ClosePane` for it race to get here.
@@ -711,15 +761,25 @@ fn capture(shared: &Shared, pane: PaneId, raw: bool) -> Result<Response> {
 
 fn resize(shared: &Shared, pane: PaneId, cols: u16, rows: u16) -> Result<Response> {
     let mut state = lock(shared);
-    state.pane_mut(pane)?.screen.screen_mut().set_size(rows, cols);
-    state.send_to_holder(pane, &Frame::Resize { rows, cols })?;
+    let p = state.pane_mut(pane)?;
+    p.screen.screen_mut().set_size(rows, cols);
+    if !p.exited {
+        state.send_to_holder(pane, &Frame::Resize { rows, cols })?;
+    }
     Ok(Response::Ok)
 }
 
 /// Written outside the state lock: a pane that is not reading its input must not stall every other request.
 fn input(shared: &Shared, pane: PaneId, data: &str) -> Result<Response> {
     let bytes = B64.decode(data).wrap_err("input is not base64")?;
-    let holder = lock(shared).pane(pane)?.holder.clone();
+    let holder = {
+        let state = lock(shared);
+        let p = state.pane(pane)?;
+        if p.exited {
+            return Ok(Response::Ok);
+        }
+        p.holder.clone()
+    };
     let mut holder = holder.lock().unwrap_or_else(PoisonError::into_inner);
     frame::write(&mut *holder, &Frame::Input(bytes)).wrap_err("writing to pane holder")?;
     Ok(Response::Ok)
