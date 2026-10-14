@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.1.1] - 2026-10-14
+
+### App
+
+- App: FTM Nightly identity: FTM_CHANNEL=nightly builds default to an ftm-nightly socket dir, tauri.nightly.conf.json names the app and bundle id
+
+### CI and releases
+
+- Release: daily nightly pre-release and ftm@nightly cask, sharing the build with release.yml; keep nightly tags out of release notes
+
+### Other
+
+- fix(app): stop the macOS Siri / Writing Tools glyph over the terminal
+- fix(ftmd): repaint panes when a terminal attaches at their current size
+- fix(app): log panics and Objective-C exceptions to ftm-app.log
+- fix(app): dedupe logged Objective-C exceptions and cap ftm-app.log
+- feat(ftmd): move onto a replaced binary by itself, keeping every pane
+
 ## [0.1.0-rc.2] - 2026-10-14
 
 ### Daemon
