@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.3] - 2026-10-14
+
+### Other
+
+- fix(packaging): use postflight_steps in the Homebrew casks
+- fix(cli): press Enter in its own write in ftm send --enter
+- feat(cli): add ftm pin and ftm unpin
+- feat(app): open a workspace's folder in VS Code, GitKraken or Finder
+- feat(cli): add ftm gc for merged worktrees
+- feat(worktree): copy gitignored files into new worktrees by default
+- fix(worktree): copy gitignored files best effort
+
 ## [0.1.2] - 2026-10-14
 
 ### Docs
