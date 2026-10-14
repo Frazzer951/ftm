@@ -634,13 +634,7 @@ pub fn handle(shared: &Shared, request: Request) -> Response {
         },
         Request::Close { id, remove_worktree } => close(shared, id, remove_worktree),
         Request::Rename { id, name } => rename(shared, id, &name),
-        Request::Pin { id, pinned } => {
-            let mut state = lock(shared);
-            state.workspace_mut(id).map(|ws| ws.pinned = pinned).map(|()| {
-                state.emit_workspaces();
-                Response::Ok
-            })
-        },
+        Request::Pin { id, pinned } => pin(shared, id, pinned),
         Request::MarkSeen { id } => {
             let mut state = lock(shared);
             state
@@ -802,6 +796,18 @@ fn rename(shared: &Shared, id: WorkspaceId, name: &str) -> Result<Response> {
     };
     let mut state = lock(shared);
     state.workspace_mut(id)?.title = title;
+    state.emit_workspaces();
+    Ok(Response::Ok)
+}
+
+/// Only top-level workspaces can be pinned: a child stays under its parent in the sidebar while that parent exists.
+fn pin(shared: &Shared, id: WorkspaceId, pinned: bool) -> Result<Response> {
+    let mut state = lock(shared);
+    let parent = state.workspace_mut(id)?.parent;
+    if pinned && parent.is_some_and(|p| state.workspaces.contains_key(&p)) {
+        bail!("workspace {id} is nested under another workspace; only top-level workspaces can be pinned");
+    }
+    state.workspace_mut(id)?.pinned = pinned;
     state.emit_workspaces();
     Ok(Response::Ok)
 }

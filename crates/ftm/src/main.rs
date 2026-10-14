@@ -77,6 +77,16 @@ enum Command {
         #[arg(long, env = ENV_WORKSPACE_ID)]
         id: Option<WorkspaceId>,
     },
+    /// Pin a top-level workspace to the sidebar's Pinned section
+    Pin {
+        #[arg(env = ENV_WORKSPACE_ID)]
+        id: WorkspaceId,
+    },
+    /// Remove a workspace from the sidebar's Pinned section
+    Unpin {
+        #[arg(env = ENV_WORKSPACE_ID)]
+        id: WorkspaceId,
+    },
     /// Print a pane's screen and scrollback as text, or with --raw its buffered output bytes (last 1 MiB)
     Capture {
         /// Pane id, or a workspace id for the first pane of its first tab
@@ -165,6 +175,8 @@ fn main() -> Result<()> {
                 .ok_or_else(|| eyre::eyre!("no workspace: pass --id or run inside an FTM workspace (${ENV_WORKSPACE_ID})"))?,
             name: name.unwrap_or_default(),
         },
+        Command::Pin { id } => Request::Pin { id, pinned: true },
+        Command::Unpin { id } => Request::Pin { id, pinned: false },
         Command::Capture { target, raw } => {
             let pane = resolve_pane(target)?;
             let Response::Output { data } = client::send(&Request::Capture { pane, raw })? else {
@@ -224,7 +236,7 @@ fn print_tree(ws: &Workspace, all: &[Workspace], depth: usize) {
         None => ws.cwd.display().to_string(),
     };
     println!(
-        "{:indent$}{} {:?} {:?}{} {}  {}",
+        "{:indent$}{} {:?} {:?}{}{} {}  {}",
         "",
         match ws.display_name() {
             shown if shown != ws.name => format!("{shown} ({})", ws.name),
@@ -233,6 +245,7 @@ fn print_tree(ws: &Workspace, all: &[Workspace], depth: usize) {
         ws.kind,
         ws.status,
         if ws.unseen { " (unseen)" } else { "" },
+        if ws.pinned { " (pinned)" } else { "" },
         location,
         ws.id,
         indent = depth * 2
