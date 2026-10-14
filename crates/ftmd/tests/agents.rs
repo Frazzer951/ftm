@@ -2,9 +2,10 @@
 
 mod common;
 
-use common::{Conn, alive, ftm_bin, git, start_daemon, temp_root, wait_for};
+use base64::{Engine, engine::general_purpose::STANDARD as B64};
+use common::{Conn, alive, ftm_bin, git, start_daemon, temp_root, wait_for, wait_until};
 use ftm_core::model::{Kind, Status, Workspace, WorkspaceId};
-use ftm_core::protocol::Request;
+use ftm_core::protocol::{Request, Response};
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -289,5 +290,107 @@ fn agents_nest_report_status_and_clean_up() {
     assert!(ls(&bin, &socket).is_empty());
     drop(daemon);
     wait_for("child agent to die with ftmd", Duration::from_secs(1), || !alive(child_pid));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The repo's setup is POSIX sh even when the login shell is fish, and an agent that exits before it ever reports a
+/// status leaves its pane on screen and its workspace `failed` rather than an empty sidebar row.
+#[test]
+fn setup_runs_in_sh_and_an_agent_that_never_starts_fails_visibly() {
+    let bin = ftm_bin();
+    let root = temp_root("failed");
+    let (out, repo, config) = (root.join("out"), root.join("failrepo"), root.join("config"));
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::create_dir_all(config.join("ftm/repos")).unwrap();
+    std::fs::create_dir_all(root.join("home")).unwrap();
+    std::fs::write(
+        config.join("ftm/repos/failrepo.toml"),
+        format!(
+            "setup = '''if [ -n \"$FTM_NAME\" ]; then touch \"{}\"; fi'''\n",
+            out.join("setup-ran").display()
+        ),
+    )
+    .unwrap();
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ],
+    );
+
+    let shell = ["/usr/bin/fish", "/bin/fish", "/opt/homebrew/bin/fish"]
+        .into_iter()
+        .find(|s| Path::new(s).exists())
+        .unwrap_or("/bin/sh");
+    let daemon = start_daemon("failed", |c| {
+        c.env("HOME", root.join("home"))
+            .env("SHELL", shell)
+            .env("XDG_CONFIG_HOME", &config)
+            .env("XDG_DATA_HOME", root.join("data"))
+            .env("FTM_AGENT_CMD", "/bin/sh -c 'echo no-claude-here; kill -9 $PPID'");
+    });
+    let socket = daemon.socket.clone();
+
+    let id: WorkspaceId = ftm(
+        &bin,
+        &socket,
+        &[
+            "spawn",
+            "agent",
+            "--name",
+            "doomed",
+            "--path",
+            repo.to_str().unwrap(),
+            "--worktree",
+            "feat/doomed",
+        ],
+    )
+    .parse()
+    .unwrap();
+    let mut conn = Conn::open(&socket);
+    wait_until(&mut conn, "agent to fail", |all| {
+        all.iter().any(|w| w.id == id && w.status == Status::Failed)
+    });
+    assert!(out.join("setup-ran").exists(), "setup did not run under {shell}");
+
+    let ws = conn.list().into_iter().find(|w| w.id == id).unwrap();
+    assert_eq!(ws.tabs.len(), 1);
+    let pane = ws.tabs[0].layout.panes()[0];
+    let Response::Output { data } = conn.send(&Request::Capture { pane, raw: false }) else {
+        panic!("capture failed")
+    };
+    let screen = String::from_utf8(B64.decode(data).unwrap()).unwrap();
+    assert!(screen.contains("no-claude-here"), "{screen}");
+    assert!(screen.contains("exited before it started"), "{screen}");
+
+    // The dead pane takes typing and resizes without errors, and closes like any other.
+    conn.type_in(pane, "hello\r");
+    assert!(matches!(
+        conn.send(&Request::Resize {
+            pane,
+            cols: 100,
+            rows: 30
+        }),
+        Response::Ok
+    ));
+    conn.send(&Request::ClosePane { pane });
+    wait_until(&mut conn, "pane to close", |all| {
+        all.iter().any(|w| w.id == id && w.tabs.is_empty())
+    });
+    conn.send(&Request::Close {
+        id,
+        remove_worktree: false,
+    });
+    drop(daemon);
     let _ = std::fs::remove_dir_all(&root);
 }

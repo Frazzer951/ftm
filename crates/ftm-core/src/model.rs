@@ -21,6 +21,8 @@ pub enum Status {
     NeedsInput,
     Idle,
     Done,
+    /// The agent's first pane exited before Claude reported anything.
+    Failed,
 }
 
 impl Status {

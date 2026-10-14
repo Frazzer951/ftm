@@ -95,7 +95,14 @@ pub fn start_daemon(name: &str, configure: impl FnOnce(&mut Command)) -> Daemon 
     cmd.env("FTM_SOCKET", &socket)
         .env("SHELL", "/bin/sh")
         .env("XDG_STATE_HOME", &state_home);
-    for key in ["FTM_WORKSPACE_ID", "FTM_PANE_ID", "FTM_NAME", "FTM_BRIEF", "FTM_AGENT_CMD"] {
+    for key in [
+        "FTM_WORKSPACE_ID",
+        "FTM_PANE_ID",
+        "FTM_NAME",
+        "FTM_BRIEF",
+        "FTM_SETUP",
+        "FTM_AGENT_CMD",
+    ] {
         cmd.env_remove(key);
     }
     configure(&mut cmd);
