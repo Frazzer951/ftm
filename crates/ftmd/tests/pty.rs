@@ -143,3 +143,52 @@ fn close_kills_foreground_job_and_removes_worktree() {
     assert!(git(&repo, &["branch", "--list", "chore/wt"]).is_empty());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A relaunched app resizes to the size the pane already has, which on its own would not make a TUI repaint over the
+/// replay it drew at another size. The pane gets a narrower size and then its own back, each a real SIGWINCH.
+#[test]
+fn resize_to_the_same_size_makes_the_pane_repaint() {
+    let dir = temp_root("redraw");
+    let daemon = start_daemon("redraw", |c| {
+        c.env("XDG_DATA_HOME", &dir);
+    });
+    let mut req = Conn::open(&daemon.socket);
+    let Response::Spawned { workspace } = req.send(&Request::Spawn(SpawnRequest {
+        kind: Kind::Terminal,
+        name: None,
+        parent: None,
+        cwd: dir.clone(),
+        worktree_branch: None,
+        base: None,
+        copy_changes: false,
+        brief: None,
+    })) else {
+        panic!("expected spawned")
+    };
+    let Layout::Pane { id: pane } = workspace.tabs[0].layout else {
+        panic!("expected one pane")
+    };
+    let mut events = Conn::open(&daemon.socket);
+    events.send(&Request::Subscribe);
+    let resize = |req: &mut Conn| {
+        assert!(matches!(
+            req.send(&Request::Resize {
+                pane,
+                cols: 120,
+                rows: 40
+            }),
+            Response::Ok
+        ));
+    };
+    resize(&mut req);
+
+    req.type_in(
+        pane,
+        "sh -c 'trap \"echo w\\$(stty size)w\" WINCH; echo ready-$((1+1)); while :; do sleep 0.02; done'\n",
+    );
+    wait_for_output(&mut events, pane, "ready-2");
+    resize(&mut req);
+    let out = wait_for_output(&mut events, pane, "w40 120w");
+    assert!(out.contains("w40 119w"), "no narrower size first: {out:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
