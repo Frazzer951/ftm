@@ -806,11 +806,37 @@ function workspaceRow(ws: Workspace): HTMLElement {
     if (!ws.parent || !workspaces.some((w) => w.id === ws.parent)) {
       items.push([ws.pinned ? "Unpin" : "Pin", () => request({ op: "pin", id: ws.id, pinned: !ws.pinned }).catch(console.error)]);
     }
-    items.push(["Close", () => closeWorkspace(ws.id)]);
+    items.push(...openInItems(ws.cwd), ["Close", () => closeWorkspace(ws.id)]);
     showMenu(e.clientX, e.clientY, items);
   };
   return row;
 }
+
+interface OpenTarget {
+  id: string;
+  name: string;
+  label: string;
+}
+
+/// Installed apps a folder can be opened in, detected once by the backend.
+let openTargets: OpenTarget[] = [];
+invoke<OpenTarget[]>("open_targets")
+  .then((list) => {
+    openTargets = list;
+    renderTabs();
+  })
+  .catch(console.error);
+
+function openIn(target: string, path: string) {
+  invoke("open_in", { target, path })
+    .then(() => notice("open-in", null))
+    .catch((err) => {
+      console.error(err);
+      notice("open-in", `Could not open ${tilde(path)}: ${err}`, "error");
+    });
+}
+
+const openInItems = (path: string): [string, () => void][] => openTargets.map((t) => [t.label, () => openIn(t.id, path)]);
 
 function closeWorkspace(id: Id) {
   request({ op: "close", id, remove_worktree: false }).catch(console.error);
@@ -855,6 +881,7 @@ function folderRow(folder: Folder): HTMLLIElement {
   row.oncontextmenu = (e) => {
     e.preventDefault();
     showMenu(e.clientX, e.clientY, [
+      ...openInItems(folder.path),
       ["Remove from list", () => request({ op: "remove_folder", path: folder.path }).catch(console.error)],
     ]);
   };
@@ -1041,6 +1068,34 @@ function renderTabs() {
   add.title = "New tab";
   add.onclick = newTab;
   nav.append(add);
+  const control = openInControl(ws.cwd);
+  if (control) nav.append(control);
+}
+
+const OPEN_ICON =
+  '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M9 2.5h4.5V7M13.5 2.5 7.5 8.5M12 9.5v3a1 1 0 0 1-1 1H3.5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+/// The main click opens VS Code (or the first installed target without it); the chevron lists every target.
+function openInControl(path: string): HTMLElement | null {
+  const main = openTargets.find((t) => t.id === "vscode") ?? openTargets[0];
+  if (!main) return null;
+  const group = document.createElement("div");
+  group.className = "open-in";
+  const button = document.createElement("button");
+  button.innerHTML = OPEN_ICON;
+  button.append(main.name);
+  button.title = `Open ${tilde(path)} in ${main.name}`;
+  button.onclick = () => openIn(main.id, path);
+  const more = document.createElement("button");
+  more.className = "chevron";
+  more.textContent = "▾";
+  more.title = "Open in…";
+  more.onclick = () => {
+    const r = group.getBoundingClientRect();
+    showMenu(r.left, r.bottom + 2, openInItems(path));
+  };
+  group.append(button, more);
+  return group;
 }
 
 function renderPanes() {
