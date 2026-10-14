@@ -14,7 +14,7 @@ perl -pi -e '$in = /^\[workspace\.package\]/ if /^\[/; s/^version = "[^"]*"/vers
 for manifest in crates/ftm/Cargo.toml crates/ftmd/Cargo.toml app/src-tauri/Cargo.toml; do
   perl -pi -e 's/^(ftm-core = \{ version = )"[^"]*"/$1"'"$VERSION"'"/' "$REPO/$manifest"
 done
-cargo update --manifest-path "$REPO/Cargo.toml" --workspace --offline --quiet
+cargo update --manifest-path "$REPO/Cargo.toml" --workspace --quiet
 
 actual=$(cargo metadata --manifest-path "$REPO/Cargo.toml" --locked --format-version 1 --no-deps |
   jq -r '[.packages[].version] | unique | join(" ")')
