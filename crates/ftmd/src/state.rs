@@ -195,7 +195,7 @@ impl State {
         paths::private_dir(&self.holders, true).wrap_err_with(|| format!("creating {}", self.holders.display()))?;
         let holder_socket = self.holders.join(format!("{id}.sock"));
 
-        let mut cmd = std::process::Command::new(std::env::current_exe().wrap_err("locating ftmd")?);
+        let mut cmd = std::process::Command::new(own_exe()?);
         cmd.arg("pty-holder")
             .arg(&holder_socket)
             .args(["24", "80"])
@@ -441,6 +441,15 @@ pub fn load(shared: &Shared) -> Result<()> {
     );
     state.emit_workspaces();
     Ok(())
+}
+
+/// The build to start pane holders from. Once a package update renames a new file over ftmd's path, Linux reports
+/// that path as `... (deleted)`, but `/proc/self/exe` still opens the build that is running.
+fn own_exe() -> Result<PathBuf> {
+    if cfg!(target_os = "linux") {
+        return Ok(PathBuf::from("/proc/self/exe"));
+    }
+    std::env::current_exe().wrap_err("locating ftmd")
 }
 
 fn shell() -> String {
