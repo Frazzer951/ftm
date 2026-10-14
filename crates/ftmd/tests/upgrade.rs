@@ -170,6 +170,44 @@ fn a_build_with_another_frame_version_does_not_take_over() {
 }
 
 #[test]
+fn a_build_from_another_channel_does_not_take_over() {
+    let dir = temp_root("upgrade-channel");
+    let exe = copy_ftmd(&dir);
+    let mut daemon = start_daemon_logged("upgrade-channel", &exe);
+    let mut conn = Conn::open(&daemon.socket);
+    let mut events = Conn::open(&daemon.socket);
+    assert!(matches!(events.send(&Request::Subscribe), Response::Ok));
+    let pane = spawn_terminal(&mut conn, &dir);
+    echo(&mut conn, pane, "before");
+
+    let frame = frame_version();
+    let other = if ftm_core::paths::CHANNEL == "nightly" {
+        "stable"
+    } else {
+        "nightly"
+    };
+    replace_with_script(
+        &exe,
+        &format!(
+            r#"if [ "$1" = --handshake ]; then echo '{{"version":"9.9.9","frame":{frame},"channel":"{other}"}}'; else touch "$0.started"; sleep 30; fi"#
+        ),
+    );
+
+    let reason = wait_blocked(&mut events);
+    assert!(reason.contains(&format!("{other} build")), "{reason}");
+    assert!(daemon.child().try_wait().unwrap().is_none(), "ftmd exited:\n{}", daemon.log());
+    assert!(
+        !exe.with_file_name("ftmd.started").exists(),
+        "the other channel's ftmd was started"
+    );
+    ping(&mut conn);
+    echo(&mut conn, pane, "after");
+
+    drop(daemon);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_new_ftmd_that_fails_to_start_leaves_the_old_one_serving() {
     let dir = temp_root("upgrade-fail");
     let exe = copy_ftmd(&dir);

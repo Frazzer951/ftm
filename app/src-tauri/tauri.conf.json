@@ -21,8 +21,16 @@
     "shortDescription": "Terminal workspace manager for Claude Code agents",
     "longDescription": "FTM runs Claude Code agents and shells across repos and git worktrees, with agents nested under the agent that spawned them. Ships the ftm CLI and the ftmd daemon next to the app.",
     "linux": {
-      "deb": { "depends": ["gstreamer1.0-plugins-good"] },
-      "rpm": { "depends": ["gstreamer1-plugins-good"] }
+      "deb": {
+        "depends": ["gstreamer1.0-plugins-good"],
+        "conflicts": ["ftm-nightly"],
+        "replaces": ["ftm-nightly"]
+      },
+      "rpm": {
+        "depends": ["gstreamer1-plugins-good"],
+        "conflicts": ["ftm-nightly"],
+        "obsoletes": ["ftm-nightly"]
+      }
     },
     "macOS": { "signingIdentity": "-" }
   }

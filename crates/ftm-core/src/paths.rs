@@ -4,6 +4,16 @@ use std::path::{Path, PathBuf};
 /// nightly install runs its own daemon next to the stable one.
 pub const SOCKET_DIR_NAME: &str = socket_dir_name(option_env!("FTM_CHANNEL"));
 
+/// The release channel this build was made for: `stable`, or `nightly` with `FTM_CHANNEL=nightly`.
+pub const CHANNEL: &str = channel_name(option_env!("FTM_CHANNEL"));
+
+const fn channel_name(channel: Option<&str>) -> &'static str {
+    match socket_dir_name(channel).as_bytes() {
+        b"ftm" => "stable",
+        _ => "nightly",
+    }
+}
+
 const fn socket_dir_name(channel: Option<&str>) -> &'static str {
     match channel {
         None => "ftm",
@@ -142,6 +152,9 @@ mod tests {
         assert_eq!(socket_dir_name(None), "ftm");
         assert_eq!(socket_dir_name(Some("")), "ftm");
         assert_eq!(socket_dir_name(Some("nightly")), "ftm-nightly");
+        assert_eq!(channel_name(None), "stable");
+        assert_eq!(channel_name(Some("")), "stable");
+        assert_eq!(channel_name(Some("nightly")), "nightly");
 
         let (ours, other) = match option_env!("FTM_CHANNEL") {
             Some("nightly") => ("ftm-nightly", "ftm"),
