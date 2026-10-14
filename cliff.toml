@@ -2,7 +2,7 @@
 # the changelog groups by that prefix.
 
 [changelog]
-header = "# Changelog\n"
+header = "# Changelog\n\n"
 body = """
 {% if version %}\
     ## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
