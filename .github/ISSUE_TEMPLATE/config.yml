@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Design notes
+    url: https://github.com/Frazzer951/ftm/blob/main/docs/design.md
+    about: How FTM's daemon, panes, worktrees and agents fit together.
+  - name: Contributing guide
+    url: https://github.com/Frazzer951/ftm/blob/main/CONTRIBUTING.md
+    about: Dev setup, checks and commit style.

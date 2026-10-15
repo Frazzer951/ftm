@@ -16,7 +16,8 @@ Pass a level (`patch`, `minor`, `major`) in place of the version if you like. Wi
 
 1. sets the version in every crate and in `Cargo.lock`,
 2. runs `scripts/release.sh`, which syncs `app/package.json` and `app/package-lock.json` and writes `CHANGELOG.md`
-   with git-cliff (`cliff.toml` groups commits by their `Component:` prefix),
+   with git-cliff (`cliff.toml` groups commits by the scope in `type(scope):`, see
+   [CONTRIBUTING.md](CONTRIBUTING.md#commits)),
 3. commits `chore(release): prepare for release <version>`, tags `v<version>` and pushes both.
 
 Nothing is published to crates.io.
