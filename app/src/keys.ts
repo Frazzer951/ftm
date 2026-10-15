@@ -8,6 +8,13 @@ const textEditKeys: Record<string, { alt?: string; meta?: string }> = {
   Delete: { alt: "\x1bd" },
 };
 
+/// What Linux terminal users expect from Ctrl+Backspace and Ctrl+Delete; xterm sends `^H` and `\e[3;5~`, which
+/// bash's readline does not bind. Ctrl+arrows stay `\e[1;5D`: distro inputrcs, fish, zsh and editors all know it.
+const ctrlEditKeys: Record<string, string> = {
+  Backspace: "\x17",
+  Delete: "\x1bd",
+};
+
 export interface KeyContext {
   mac: boolean;
   /// Whether the Option held for this event is Meta rather than a key that composes characters (macOS only).
@@ -41,4 +48,5 @@ export function paneKey(e: PaneKeyEvent, ctx: KeyContext): string | undefined {
   if (ctx.kitty.flags) return ctx.mac && e.metaKey ? undefined : ctx.kitty.encode(e, ctx.altIsMeta);
   // What Claude Code's /terminal-setup makes iTerm2 and VS Code send; Alt+Enter already sends it too.
   if (e.key === "Enter" && only(e, "shiftKey")) return "\x1b\r";
+  if (!ctx.mac && only(e, "ctrlKey")) return ctrlEditKeys[e.key];
 }

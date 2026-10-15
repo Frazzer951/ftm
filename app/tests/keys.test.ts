@@ -220,3 +220,18 @@ test("Linux copy and paste keys", () => {
   assert.equal(clipboardKey({ ...down("C", "KeyC", { ctrlKey: true, shiftKey: true }), type: "keyup" }, false), undefined);
   assert.equal(clipboardKey(down("C", "KeyC", { ctrlKey: true, shiftKey: true }), true), undefined);
 });
+
+test("Linux word editing keys, and the protocol's encoding when it is on", () => {
+  const ctx = { mac: false, altIsMeta: true, kitty: noKitty };
+  assert.equal(paneKey(down("Backspace", "Backspace", { ctrlKey: true }), ctx), "\x17");
+  assert.equal(paneKey(down("Delete", "Delete", { ctrlKey: true }), ctx), "\x1bd");
+  assert.equal(paneKey(down("ArrowLeft", "ArrowLeft", { ctrlKey: true }), ctx), undefined);
+  assert.equal(paneKey(down("Backspace", "Backspace", { altKey: true }), ctx), undefined);
+  assert.equal(paneKey(down("Backspace", "Backspace", { ctrlKey: true, shiftKey: true }), ctx), undefined);
+  assert.equal(paneKey(down("Backspace", "Backspace", { ctrlKey: true }), { ...ctx, mac: true, altIsMeta: false }), undefined);
+  const t = fakeTerm();
+  t.seq(">", 1);
+  const kctx = { ...ctx, kitty: t.kitty };
+  assert.equal(paneKey(down("Backspace", "Backspace", { ctrlKey: true }), kctx), "\x1b[127;5u");
+  assert.equal(paneKey(down("Delete", "Delete", { ctrlKey: true }), kctx), undefined);
+});
