@@ -29,6 +29,8 @@ pub struct State {
     workspaces: BTreeMap<WorkspaceId, Workspace>,
     /// Most recently used first.
     folders: Vec<Folder>,
+    /// The sidebar's order, set by dragging: every path in `folders`, exactly once.
+    folder_order: Vec<PathBuf>,
     panes: HashMap<PaneId, Pane>,
     events: broadcast::Sender<Event>,
     socket: PathBuf,
@@ -77,6 +79,8 @@ struct Saved {
     workspaces: Vec<Workspace>,
     #[serde(default)]
     folders: Vec<Folder>,
+    #[serde(default)]
+    folder_order: Vec<PathBuf>,
 }
 
 /// What the first command in a pane runs before handing over to a login shell.
@@ -96,6 +100,7 @@ impl State {
         Arc::new(Mutex::new(State {
             workspaces: BTreeMap::new(),
             folders: Vec::new(),
+            folder_order: Vec::new(),
             panes: HashMap::new(),
             events: broadcast::channel(1024).0,
             holders: paths::holders_dir(&socket),
@@ -118,10 +123,16 @@ impl State {
         }
     }
 
-    fn emit_folders(&self) {
-        let _ = self.events.send(Event::Folders {
+    fn folders_event(&self) -> Event {
+        Event::Folders {
             folders: self.folders.clone(),
-        });
+            order: self.folder_order.clone(),
+        }
+    }
+
+    fn emit_folders(&mut self) {
+        self.folder_order = folder_order(std::mem::take(&mut self.folder_order), &self.folders);
+        let _ = self.events.send(self.folders_event());
         if let Err(e) = self.save() {
             tracing::warn!("saving {}: {e:#}", self.state_file.display());
         }
@@ -152,6 +163,7 @@ impl State {
         let saved = Saved {
             workspaces: self.list(),
             folders: self.folders.clone(),
+            folder_order: self.folder_order.clone(),
         };
         std::fs::write(&tmp, serde_json::to_vec_pretty(&saved)?)?;
         std::fs::rename(&tmp, &self.state_file)?;
@@ -395,6 +407,21 @@ pub fn freeze(shared: &Shared) -> Result<MutexGuard<'_, State>> {
     Ok(state)
 }
 
+/// `order` cut down to the paths in `folders`, each once, then the folders it lacks (new ones, or all of them from a
+/// state file that predates the order) by name, the order the sidebar used before it could be rearranged.
+fn folder_order(order: Vec<PathBuf>, folders: &[Folder]) -> Vec<PathBuf> {
+    let known: std::collections::HashSet<&PathBuf> = folders.iter().map(|f| &f.path).collect();
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<PathBuf> = order
+        .into_iter()
+        .filter(|p| known.contains(p) && seen.insert(p.clone()))
+        .collect();
+    let mut rest: Vec<&PathBuf> = folders.iter().map(|f| &f.path).filter(|p| !seen.contains(*p)).collect();
+    rest.sort_by_key(|p| (p.file_name().map(|n| n.to_string_lossy().to_lowercase()), p.to_path_buf()));
+    out.extend(rest.into_iter().cloned());
+    out
+}
+
 pub fn update_blocked(shared: &Shared, version: Option<String>, reason: String) {
     let mut state = lock(shared);
     let event = Event::UpdateBlocked { version, reason };
@@ -412,6 +439,7 @@ pub fn load(shared: &Shared) -> Result<()> {
     for ws in saved.workspaces {
         state.workspaces.insert(ws.id, ws);
     }
+    state.folder_order = folder_order(saved.folder_order, &saved.folders);
     state.folders = saved.folders;
     let ids: Vec<WorkspaceId> = state.workspaces.keys().copied().collect();
     for ws in state.workspaces.values_mut() {
@@ -591,9 +619,7 @@ pub fn subscribe(shared: &Shared) -> (broadcast::Receiver<Event>, Vec<Event>) {
         Event::Workspaces {
             workspaces: state.list(),
         },
-        Event::Folders {
-            folders: state.folders.clone(),
-        },
+        state.folders_event(),
     ];
     replay.extend(state.panes.iter().map(|(id, pane)| Event::Output {
         pane: *id,
@@ -667,12 +693,22 @@ pub fn handle(shared: &Shared, request: Request) -> Response {
                     Response::Ok
                 })
         },
-        Request::Folders => Ok(Response::Folders {
-            folders: lock(shared).folders.clone(),
-        }),
+        Request::Folders => {
+            let state = lock(shared);
+            Ok(Response::Folders {
+                folders: state.folders.clone(),
+                order: state.folder_order.clone(),
+            })
+        },
         Request::RemoveFolder { path } => {
             let mut state = lock(shared);
             state.folders.retain(|f| f.path != path);
+            state.emit_folders();
+            Ok(Response::Ok)
+        },
+        Request::ReorderFolders { paths } => {
+            let mut state = lock(shared);
+            state.folder_order = paths;
             state.emit_folders();
             Ok(Response::Ok)
         },
@@ -923,6 +959,60 @@ fn input(shared: &Shared, pane: PaneId, data: &str) -> Result<Response> {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    fn folder(path: &str) -> Folder {
+        Folder {
+            path: path.into(),
+            last_used: 0,
+        }
+    }
+
+    fn paths(list: &[&str]) -> Vec<PathBuf> {
+        list.iter().map(PathBuf::from).collect()
+    }
+
+    #[test]
+    fn folder_order_keeps_known_paths_and_appends_the_rest_by_name() {
+        let folders = [folder("/x/zeta"), folder("/y/Alpha"), folder("/x/mid")];
+        assert_eq!(folder_order(vec![], &folders), paths(&["/y/Alpha", "/x/mid", "/x/zeta"]));
+        assert_eq!(
+            folder_order(paths(&["/x/zeta", "/gone", "/x/zeta", "/y/Alpha"]), &folders),
+            paths(&["/x/zeta", "/y/Alpha", "/x/mid"]),
+        );
+    }
+
+    #[test]
+    fn folder_order_survives_mru_bumps_and_puts_new_folders_last() {
+        let dir = std::env::temp_dir().join(format!("ftmd-order-{}", std::process::id()));
+        let shared = State::new(dir.join("ftmd.sock"), None);
+        let mut state = lock(&shared);
+        state.state_file = dir.join("state.json");
+        for p in ["/b", "/a", "/c"] {
+            state.remember_folder(p.into());
+        }
+        assert_eq!(state.folder_order, paths(&["/b", "/a", "/c"]));
+        state.folder_order = paths(&["/c", "/a"]);
+        state.emit_folders();
+        assert_eq!(state.folder_order, paths(&["/c", "/a", "/b"]));
+        state.remember_folder("/b".into());
+        state.remember_folder("/0".into());
+        assert_eq!(state.folders[0].path, PathBuf::from("/0"));
+        assert_eq!(state.folder_order, paths(&["/c", "/a", "/b", "/0"]));
+        state.folders.retain(|f| f.path != Path::new("/a"));
+        state.emit_folders();
+        assert_eq!(state.folder_order, paths(&["/c", "/b", "/0"]));
+
+        let saved: Saved = serde_json::from_slice(&std::fs::read(&state.state_file).unwrap()).unwrap();
+        assert_eq!(saved.folder_order, state.folder_order);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn state_files_without_a_folder_order_still_load() {
+        let saved: Saved = serde_json::from_str(r#"{"workspaces":[],"folders":[{"path":"/b","last_used":1}]}"#).unwrap();
+        assert!(saved.folder_order.is_empty());
+        assert_eq!(folder_order(saved.folder_order, &saved.folders), paths(&["/b"]));
+    }
 
     #[test]
     fn task_title_drops_the_status_glyph() {

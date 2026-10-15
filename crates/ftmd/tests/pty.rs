@@ -294,7 +294,7 @@ fn terminal_command_runs_then_leaves_a_shell() {
     req.type_in(pane, "echo after-$((2+1))\n");
     wait_for_output(&mut events, pane, "after-3");
 
-    let Response::Folders { folders } = req.send(&Request::Folders) else {
+    let Response::Folders { folders, .. } = req.send(&Request::Folders) else {
         panic!("expected folders")
     };
     assert!(folders.is_empty(), "{folders:?}");

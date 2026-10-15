@@ -43,7 +43,7 @@ interface Folder {
 }
 type FtmEvent =
   | { event: "workspaces"; workspaces: Workspace[] }
-  | { event: "folders"; folders: Folder[] }
+  | { event: "folders"; folders: Folder[]; order?: string[] }
   | { event: "output"; pane: Id; data: string; reset: boolean }
   | { event: "update_blocked"; version: string | null; reason: string };
 
@@ -75,6 +75,8 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getEleme
 let workspaces: Workspace[] = [];
 /// Most recently used first.
 let folders: Folder[] = [];
+/// The sidebar's order, rearranged by dragging; empty from an ftmd that predates it.
+let folderOrder: string[] = [];
 let selected: Id | null = null;
 /// Restored from the last run once the daemon's tree arrives; ftmd keeps the sessions, this keeps where you were.
 let restoredUi = false;
@@ -750,6 +752,7 @@ function toggleSection(key: string) {
 function renderSidebar() {
   if (editing && workspaces.some((w) => w.id === editing)) return;
   editing = null;
+  if (folderDrag?.moved) return;
   const ids = new Set(workspaces.map((w) => w.id));
   const top = workspaces.filter((w) => !w.parent || !ids.has(w.parent));
   const sections: [string, string, HTMLElement[]][] = [
@@ -759,7 +762,7 @@ function renderSidebar() {
     [
       "folders",
       "Folders",
-      [...folders].sort((a, b) => basename(a.path).localeCompare(basename(b.path))).map(folderRow),
+      sidebarFolders().map(folderRow),
     ],
   ];
   $("sections").replaceChildren(
@@ -883,10 +886,80 @@ function closeWorkspace(id: Id) {
   request({ op: "close", id, remove_worktree: false }).catch(console.error);
 }
 
+function sidebarFolders(): Folder[] {
+  const byName = (a: Folder, b: Folder) => basename(a.path).localeCompare(basename(b.path));
+  const byPath = new Map(folders.map((f) => [f.path, f]));
+  const ranked = folderOrder.flatMap((p) => byPath.get(p) ?? []);
+  const listed = new Set(folderOrder);
+  return [...ranked, ...folders.filter((f) => !listed.has(f.path)).sort(byName)];
+}
+
+/// A folder row being dragged to a new place in the Folders section. Pointer events rather than HTML5 drag and drop,
+/// which Tauri's native file-drop handler intercepts.
+let folderDrag: { path: string; x: number; y: number; moved: boolean; target: number } | null = null;
+/// Set between the end of a drag and the click that follows it, so dropping a folder does not also open its menu.
+let swallowFolderClick = false;
+
+function folderRows(): HTMLElement[] {
+  return [...document.querySelectorAll<HTMLElement>("#sections .ws.folder")];
+}
+
+/// Index among the folder rows the dragged one would be dropped before, and the indicator shown there.
+function markFolderDrop(y: number): number {
+  const rows = folderRows();
+  let target = rows.findIndex((r) => {
+    const box = r.getBoundingClientRect();
+    return y < box.top + box.height / 2;
+  });
+  if (target < 0) target = rows.length;
+  rows.forEach((r, i) => {
+    r.classList.toggle("drop-before", i === target);
+    r.classList.toggle("drop-after", target === rows.length && i === rows.length - 1);
+  });
+  return target;
+}
+
+function startFolderDrag(row: HTMLElement, path: string) {
+  row.onpointerdown = (e) => {
+    if (e.button !== 0 || (e.target as HTMLElement).closest("button")) return;
+    folderDrag = { path, x: e.clientX, y: e.clientY, moved: false, target: -1 };
+    row.setPointerCapture(e.pointerId);
+  };
+  row.onpointermove = (e) => {
+    if (!folderDrag || folderDrag.path !== path) return;
+    if (!folderDrag.moved && Math.hypot(e.clientX - folderDrag.x, e.clientY - folderDrag.y) < 4) return;
+    folderDrag.moved = true;
+    row.classList.add("dragging");
+    folderDrag.target = markFolderDrop(e.clientY);
+  };
+  const end = (drop: boolean) => {
+    const drag = folderDrag;
+    if (!drag || drag.path !== path) return;
+    folderDrag = null;
+    if (!drag.moved) return;
+    const order = sidebarFolders().map((f) => f.path);
+    const from = order.indexOf(path);
+    if (drop && from >= 0) {
+      order.splice(from, 1);
+      order.splice(drag.target > from ? drag.target - 1 : drag.target, 0, path);
+      folderOrder = order;
+      request({ op: "reorder_folders", paths: order }).catch(console.error);
+    }
+    swallowFolderClick = true;
+    setTimeout(() => {
+      swallowFolderClick = false;
+      renderSidebar();
+    });
+  };
+  row.onpointerup = () => end(true);
+  row.onpointercancel = () => end(false);
+}
+
 function folderRow(folder: Folder): HTMLLIElement {
   const li = document.createElement("li");
   const row = document.createElement("div");
   row.className = "ws folder";
+  startFolderDrag(row, folder.path);
   row.title = folder.path;
   const icon = document.createElement("span");
   icon.className = "folder-icon";
@@ -918,7 +991,10 @@ function folderRow(folder: Folder): HTMLLIElement {
     const r = add.getBoundingClientRect();
     menu(r.left, r.bottom);
   };
-  row.onclick = (e) => menu(e.clientX, e.clientY);
+  row.onclick = (e) => {
+    if (swallowFolderClick) return;
+    menu(e.clientX, e.clientY);
+  };
   row.oncontextmenu = (e) => {
     e.preventDefault();
     showMenu(e.clientX, e.clientY, [
@@ -1435,6 +1511,7 @@ const events = listen<FtmEvent>("ftm-event", ({ payload }) => {
     onWorkspaces(payload.workspaces);
   } else if (payload.event === "folders") {
     folders = payload.folders;
+    folderOrder = payload.order ?? [];
     refreshGit(folders.map((f) => f.path).filter((p) => !gitInfo.has(p))).catch(console.error);
     renderSidebar();
   } else if (payload.event === "update_blocked") {
