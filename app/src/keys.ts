@@ -20,6 +20,16 @@ type PaneKeyEvent = KeyEvent & Pick<KeyboardEvent, "type">;
 const only = (e: PaneKeyEvent, mod: "shiftKey" | "altKey" | "ctrlKey" | "metaKey") =>
   e[mod] && ["shiftKey", "altKey", "ctrlKey", "metaKey"].every((m) => m === mod || !e[m as typeof mod]);
 
+/// Linux terminals' copy and paste keys; macOS has Cmd+C/V in its Edit menu.
+export function clipboardKey(e: PaneKeyEvent, mac: boolean): "copy" | "paste" | undefined {
+  if (mac || e.type !== "keydown") return;
+  if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey) {
+    const key = e.key.toLowerCase();
+    return key === "c" ? "copy" : key === "v" ? "paste" : undefined;
+  }
+  if (e.key === "Insert" && only(e, "shiftKey")) return "paste";
+}
+
 /// The bytes to send instead of xterm's own encoding of a key, if any.
 export function paneKey(e: PaneKeyEvent, ctx: KeyContext): string | undefined {
   if (e.type !== "keydown" || e.isComposing) return;

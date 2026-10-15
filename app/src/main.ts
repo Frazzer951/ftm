@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { homeDir } from "@tauri-apps/api/path";
+import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { open } from "@tauri-apps/plugin-dialog";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { FitAddon } from "@xterm/addon-fit";
@@ -9,7 +10,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { chromeColors } from "./colors";
-import { paneKey } from "./keys.ts";
+import { clipboardKey, paneKey } from "./keys.ts";
 import { type KeyProtocol, kittyKeyboard } from "./kitty.ts";
 import { loadSounds, play, type SoundEntry, type SoundSettings } from "./sounds";
 import "./style.css";
@@ -140,6 +141,13 @@ function view(pane: Id): PaneView {
     if (!v.replaying) send({ op: "input", pane, data: encode(d) });
   });
   term.attachCustomKeyEventHandler((e) => {
+    const clip = clipboardKey(e, isMac);
+    if (clip) {
+      e.preventDefault();
+      if (clip === "paste") readText().then((text) => text && term.paste(text), console.error);
+      else if (term.hasSelection()) writeText(term.getSelection()).catch(console.error);
+      return false;
+    }
     const seq = paneKey(e, { mac: isMac, altIsMeta: !isMac, kitty });
     if (seq === undefined) return true;
     e.preventDefault();

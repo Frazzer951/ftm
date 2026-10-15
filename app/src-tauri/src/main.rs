@@ -319,6 +319,7 @@ fn main() {
     #[cfg(target_os = "macos")]
     let builder = builder.menu(menu).activate_ignoring_other_apps(!background);
     builder
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())

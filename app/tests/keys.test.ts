@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { paneKey } from "../src/keys.ts";
+import { clipboardKey, paneKey } from "../src/keys.ts";
 import { DISAMBIGUATE, encodeKey, kittyKeyboard, type KeyEvent } from "../src/kitty.ts";
 
 type Handler = (params: (number | number[])[]) => boolean;
@@ -208,4 +208,15 @@ test("Cmd is never sent as Super on macOS", () => {
   t.seq(">", 1);
   assert.equal(paneKey(down("c", "KeyC", { metaKey: true }), { mac: true, altIsMeta: false, kitty: t.kitty }), undefined);
   assert.equal(paneKey(down("c", "KeyC", { metaKey: true }), { mac: false, altIsMeta: true, kitty: t.kitty }), "\x1b[99;9u");
+});
+
+test("Linux copy and paste keys", () => {
+  assert.equal(clipboardKey(down("C", "KeyC", { ctrlKey: true, shiftKey: true }), false), "copy");
+  assert.equal(clipboardKey(down("V", "KeyV", { ctrlKey: true, shiftKey: true }), false), "paste");
+  assert.equal(clipboardKey(down("Insert", "Insert", { shiftKey: true }), false), "paste");
+  assert.equal(clipboardKey(down("c", "KeyC", { ctrlKey: true }), false), undefined);
+  assert.equal(clipboardKey(down("v", "KeyV", { ctrlKey: true }), false), undefined);
+  assert.equal(clipboardKey(down("Insert", "Insert", { shiftKey: true, ctrlKey: true }), false), undefined);
+  assert.equal(clipboardKey({ ...down("C", "KeyC", { ctrlKey: true, shiftKey: true }), type: "keyup" }, false), undefined);
+  assert.equal(clipboardKey(down("C", "KeyC", { ctrlKey: true, shiftKey: true }), true), undefined);
 });
