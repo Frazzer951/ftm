@@ -10,6 +10,7 @@ export interface SoundSettings {
   needs_input: string;
   completed: string;
   volume: number;
+  wait_for_subagents: boolean;
 }
 
 let list: Promise<SoundEntry[]> | null = null;

@@ -14,6 +14,9 @@ pub enum Request {
     SetStatus {
         id: WorkspaceId,
         status: Status,
+        /// Background subagents the agent still has running (from Claude Code's `Stop` hook input).
+        #[serde(default)]
+        background_agents: u32,
     },
     Close {
         id: WorkspaceId,

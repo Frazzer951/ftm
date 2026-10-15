@@ -61,6 +61,9 @@ enum Command {
         status: StatusArg,
         #[arg(long, env = ENV_WORKSPACE_ID)]
         id: WorkspaceId,
+        /// Read the Claude Code hook's JSON input from stdin
+        #[arg(long)]
+        hook: bool,
     },
     /// Close a workspace
     Close {
@@ -172,8 +175,13 @@ fn main() -> Result<()> {
                 command: None,
             })
         },
-        Command::Status { status, id } => Request::SetStatus {
+        Command::Status { status, id, hook } => Request::SetStatus {
             id,
+            background_agents: if hook {
+                running_subagents(&std::io::read_to_string(std::io::stdin()).unwrap_or_default())
+            } else {
+                0
+            },
             status: match status {
                 StatusArg::Working => Status::Working,
                 StatusArg::NeedsInput => Status::NeedsInput,
@@ -233,6 +241,18 @@ fn send(pane: PaneId, text: &str, enter: bool) -> Result<()> {
     Ok(())
 }
 
+/// Background subagents still running, from a Claude Code hook's input. Background shells never count: they can run
+/// for good (a dev server, a log watcher).
+fn running_subagents(hook_input: &str) -> u32 {
+    let input: serde_json::Value = serde_json::from_str(hook_input).unwrap_or_default();
+    input["background_tasks"].as_array().map_or(0, |tasks| {
+        tasks
+            .iter()
+            .filter(|t| t["type"] == "subagent" && t["status"] == "running")
+            .count() as u32
+    })
+}
+
 fn resolve_pane(target: PaneId) -> Result<PaneId> {
     let Response::Workspaces { workspaces } = client::send(&Request::List)? else {
         bail!("unexpected response from ftmd");
@@ -282,5 +302,20 @@ fn print_tree(ws: &Workspace, all: &[Workspace], depth: usize) {
     );
     for child in all.iter().filter(|c| c.parent == Some(ws.id)) {
         print_tree(child, all, depth + 1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::running_subagents;
+
+    #[test]
+    fn counts_running_background_subagents_only() {
+        let input = r#"{"background_tasks":[{"type":"subagent","status":"running"},{"type":"subagent","status":"running"},
+            {"type":"subagent","status":"completed"},{"type":"shell","status":"running"}]}"#;
+        assert_eq!(running_subagents(input), 2);
+        assert_eq!(running_subagents(r#"{"background_tasks":[]}"#), 0);
+        assert_eq!(running_subagents(r#"{"hook_event_name":"Stop"}"#), 0);
+        assert_eq!(running_subagents(""), 0);
     }
 }

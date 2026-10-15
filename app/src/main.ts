@@ -36,6 +36,7 @@ interface Workspace {
   worktree: { repo: string; branch: string } | null;
   status: string;
   unseen: boolean;
+  background_agents: number;
   tabs: Tab[];
 }
 interface Folder {
@@ -306,7 +307,7 @@ interface FontFamily {
 
 let fontList: Promise<FontFamily[]> | null = null;
 
-let soundSettings: SoundSettings = { needs_input: "Nudge", completed: "Chime", volume: 0.7 };
+let soundSettings: SoundSettings = { needs_input: "Nudge", completed: "Chime", volume: 0.7, wait_for_subagents: false };
 
 type Channel = "stable" | "nightly";
 /// Unset (`null`) means automatic: check only on a pacman install, on this build's own channel.
@@ -528,6 +529,7 @@ function setupSettingsDialog() {
       select.value = soundList.find((s) => s.name.toLowerCase() === current.toLowerCase())?.name ?? current;
     }
     volume.value = String(soundDraft.volume);
+    $<HTMLInputElement>("sound-wait-subagents").checked = soundDraft.wait_for_subagents;
     $("sound-volume-value").textContent = `${Math.round(soundDraft.volume * 100)}%`;
   };
   for (const event of events) {
@@ -542,6 +544,9 @@ function setupSettingsDialog() {
   volume.oninput = () => {
     soundDraft.volume = Number(volume.value);
     $("sound-volume-value").textContent = `${Math.round(soundDraft.volume * 100)}%`;
+  };
+  $<HTMLInputElement>("sound-wait-subagents").onchange = (e) => {
+    soundDraft.wait_for_subagents = (e.target as HTMLInputElement).checked;
   };
 
   $("open-settings").onclick = () => {
@@ -1142,10 +1147,19 @@ function descendantsNeedingInput(id: Id): number {
 
 const lastStatus = new Map<Id, string>();
 const lastUnseen = new Set<Id>();
+const heldFinish = new Set<Id>();
+let heldTimer: ReturnType<typeof setTimeout> | undefined;
+
+/// How long `wait_for_subagents` holds the finished sound: two subagents finishing together can leave the second
+/// hand-back queued behind a turn that ended with none running.
+const FINISH_HOLD_MS = 1500;
+
+const finishCounts = (w: Workspace) => w.id !== selected || !document.hasFocus();
 
 /// A transition into needs_input plays its sound and sends a desktop notification. A turn finishing (ftmd marking the
 /// workspace unseen) plays the other sound, unless it is the workspace on screen: render() then marks it seen at once.
-/// The first tree after startup only records state.
+/// With `wait_for_subagents`, a turn that ends with background subagents still running stays quiet, and the sound
+/// waits `FINISH_HOLD_MS` for the workspace to stay finished. The first tree after startup only records state.
 function onStatusChanges(list: Workspace[], initial: boolean) {
   const waiting = list.filter((w) => w.kind === "agent" && w.status === "needs_input" && lastStatus.get(w.id) !== "needs_input");
   const finished = list.filter((w) => w.unseen && !lastUnseen.has(w.id));
@@ -1159,8 +1173,17 @@ function onStatusChanges(list: Workspace[], initial: boolean) {
   if (waiting.length) {
     playSound(soundSettings.needs_input);
     notifyNeedsInput(waiting).catch(console.error);
-  } else if (finished.some((w) => w.id !== selected || !document.hasFocus())) {
-    playSound(soundSettings.completed);
+  } else if (!soundSettings.wait_for_subagents) {
+    if (finished.some(finishCounts)) playSound(soundSettings.completed);
+  } else {
+    const done = finished.filter((w) => !w.background_agents);
+    if (!done.length) return;
+    for (const w of done) heldFinish.add(w.id);
+    clearTimeout(heldTimer);
+    heldTimer = setTimeout(() => {
+      if (workspaces.some((w) => heldFinish.has(w.id) && w.unseen && finishCounts(w))) playSound(soundSettings.completed);
+      heldFinish.clear();
+    }, FINISH_HOLD_MS);
   }
 }
 

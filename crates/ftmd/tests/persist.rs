@@ -71,6 +71,7 @@ fn ftmd_restart_keeps_sessions() {
     req.send(&Request::SetStatus {
         id: ws.id,
         status: Status::Working,
+        background_agents: 0,
     });
     let mut events = Conn::open(&daemon.socket);
     events.send(&Request::Subscribe);
@@ -390,7 +391,14 @@ fn finishing_a_turn_marks_the_workspace_unseen_until_looked_at() {
     let mut req = Conn::open(&daemon.socket);
     let id = spawn_terminal(&mut req, &dir, "agent").id;
     let set = |req: &mut Conn, status| {
-        assert!(matches!(req.send(&Request::SetStatus { id, status }), Response::Ok));
+        assert!(matches!(
+            req.send(&Request::SetStatus {
+                id,
+                status,
+                background_agents: 0,
+            }),
+            Response::Ok
+        ));
         req.list().into_iter().find(|w| w.id == id).unwrap().unseen
     };
     assert!(!set(&mut req, Status::Idle), "starting to idle is not a finished turn");
