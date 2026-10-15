@@ -26,6 +26,10 @@ button:hover { background: var(--hover); }
 .ws .name { font-size: 13.5px; font-weight: 500; color: var(--text-strong); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ws .sub { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ws.selected .sub { color: var(--muted); }
+.ws.folder { user-select: none; -webkit-user-select: none; }
+.ws.folder.dragging { opacity: 0.5; }
+.ws.folder.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
+.ws.folder.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
 .ws .close { visibility: hidden; padding: 0 5px; }
 .ws:hover .close { visibility: visible; }
 :root {

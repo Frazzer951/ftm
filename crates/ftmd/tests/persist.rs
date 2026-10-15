@@ -328,7 +328,7 @@ fn rename_broadcasts_and_survives_restart() {
 
 fn folders(conn: &mut Conn) -> Vec<std::path::PathBuf> {
     match conn.send(&Request::Folders) {
-        Response::Folders { folders } => folders.into_iter().map(|f| f.path).collect(),
+        Response::Folders { folders, .. } => folders.into_iter().map(|f| f.path).collect(),
         r => panic!("{r:?}"),
     }
 }
@@ -369,7 +369,7 @@ fn folders_and_pins_are_remembered() {
     let mut events = Conn::open(&daemon.socket);
     events.send(&Request::Subscribe);
     assert!(matches!(events.line(), Event::Workspaces { .. }));
-    let Event::Folders { folders: seen } = events.line() else {
+    let Event::Folders { folders: seen, .. } = events.line() else {
         panic!("expected folders")
     };
     assert_eq!(seen.len(), 2);

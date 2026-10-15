@@ -39,6 +39,10 @@ pub enum Request {
     RemoveFolder {
         path: PathBuf,
     },
+    /// Sets the sidebar order of the remembered folders. Paths it leaves out keep their place after the listed ones.
+    ReorderFolders {
+        paths: Vec<PathBuf>,
+    },
     NewTab {
         workspace: WorkspaceId,
     },
@@ -100,6 +104,9 @@ pub enum Response {
     },
     Folders {
         folders: Vec<Folder>,
+        /// Every folder's path in sidebar order; empty from daemons that predate it.
+        #[serde(default)]
+        order: Vec<PathBuf>,
     },
     Spawned {
         workspace: Workspace,
@@ -123,7 +130,12 @@ pub enum Event {
     /// Full tree, sent on subscribe and after every change.
     Workspaces { workspaces: Vec<Workspace> },
     /// Remembered folders, most recently used first; sent on subscribe and after every change.
-    Folders { folders: Vec<Folder> },
+    /// `order` is every folder's path in sidebar order; empty from daemons that predate it.
+    Folders {
+        folders: Vec<Folder>,
+        #[serde(default)]
+        order: Vec<PathBuf>,
+    },
     /// `data` is base64. On subscribe (and after the subscriber falls behind) each live pane's buffered output
     /// arrives with `reset` set: clear the terminal before writing it.
     Output {
@@ -156,5 +168,17 @@ mod tests {
             panic!()
         };
         assert_eq!(req.command.as_deref(), Some("true"));
+    }
+
+    #[test]
+    fn folders_without_an_order_still_parse() {
+        let old = r#"{"event":"folders","folders":[{"path":"/a","last_used":1}]}"#;
+        let Event::Folders { folders, order } = serde_json::from_str(old).unwrap() else {
+            panic!()
+        };
+        assert_eq!(folders.len(), 1);
+        assert!(order.is_empty());
+        let req: Request = serde_json::from_str(r#"{"op":"reorder_folders","paths":["/b","/a"]}"#).unwrap();
+        assert!(matches!(req, Request::ReorderFolders { paths } if paths.len() == 2));
     }
 }
