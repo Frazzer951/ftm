@@ -14,6 +14,7 @@ import { clipboardKey, type OptionAsMeta, optionIsMeta, paneKey } from "./keys.t
 import { type KeyProtocol, kittyKeyboard } from "./kitty.ts";
 import { loadSounds, play, type SoundEntry, type SoundSettings } from "./sounds";
 import "./style.css";
+import { type AppScroll, type AppWheel, appWheel } from "./wheel.ts";
 
 type Id = string;
 type Layout =
@@ -52,6 +53,7 @@ interface PaneView {
   fit: FitAddon;
   ligatures?: LigaturesAddon;
   kitty: KeyProtocol;
+  wheel: AppWheel;
   /// Replays of the daemon's buffer in flight; queries in them (DA, DSR, kitty's `CSI ? u`) were answered long ago,
   /// so nothing xterm sends meanwhile reaches the pane.
   replaying: number;
@@ -142,6 +144,7 @@ function view(pane: Id): PaneView {
   term.onData((d) => input(encode(d)));
   term.onBinary((d) => input(btoa(d)));
   const kitty = kittyKeyboard(term, (d) => input(encode(d)));
+  const wheel = appWheel(term, () => settings.app_scroll, (d) => input(encode(d)));
   term.attachCustomKeyEventHandler((e) => {
     const clip = clipboardKey(e, isMac);
     if (clip) {
@@ -162,7 +165,7 @@ function view(pane: Id): PaneView {
   term.textarea?.setAttribute("writingsuggestions", "false");
   term.textarea?.setAttribute("autocomplete", "off");
   term.textarea?.addEventListener("focus", () => setFocus(pane));
-  const v: PaneView = { term, fit, kitty, replaying: 0, el, cols: 0, rows: 0 };
+  const v: PaneView = { term, fit, kitty, wheel, replaying: 0, el, cols: 0, rows: 0 };
   setLigatures(v);
   views.set(pane, v);
   return v;
@@ -236,6 +239,7 @@ interface TerminalSettings {
   ligatures: boolean;
   line_height: number;
   option_as_meta: OptionAsMeta;
+  app_scroll: AppScroll;
 }
 
 let settings: TerminalSettings = {
@@ -244,6 +248,7 @@ let settings: TerminalSettings = {
   ligatures: false,
   line_height: 1,
   option_as_meta: "both",
+  app_scroll: "rows",
 };
 
 /// Which Option keys are down, for Option as Meta on one side only; key events only say that some Alt is held.
@@ -569,6 +574,7 @@ function setupSettingsDialog() {
     field("ligatures").checked = settings.ligatures;
     $("keyboard-settings").hidden = !isMac;
     $<HTMLSelectElement>("option-as-meta").value = settings.option_as_meta;
+    $<HTMLSelectElement>("app-scroll").value = settings.app_scroll;
     $<HTMLSelectElement>("update-check").value = updateSettings.check === null ? "" : String(updateSettings.check);
     $<HTMLSelectElement>("update-channel").value = updateSettings.channel ?? "";
     $("settings-error").textContent = "";
@@ -597,6 +603,7 @@ function setupSettingsDialog() {
       line_height: Number(field("line_height").value) || settings.line_height,
       ligatures: field("ligatures").checked,
       option_as_meta: $<HTMLSelectElement>("option-as-meta").value as OptionAsMeta,
+      app_scroll: $<HTMLSelectElement>("app-scroll").value as AppScroll,
     };
     const check = $<HTMLSelectElement>("update-check").value;
     const updates: UpdateSettings = {
@@ -1448,6 +1455,7 @@ const events = listen<FtmEvent>("ftm-event", ({ payload }) => {
     if (payload.reset) {
       v.term.reset();
       v.kitty.reset();
+      v.wheel.reset();
       v.replaying++;
       v.term.write(decode(payload.data), () => v.replaying--);
     } else {

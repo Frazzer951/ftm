@@ -159,6 +159,9 @@ pub struct TerminalSettings {
     pub line_height: f32,
     /// Which macOS Option keys send Meta (`ESC` + key) instead of composing characters like `∫`.
     pub option_as_meta: OptionAsMeta,
+    /// How the wheel scrolls programs that read the mouse or run on the alternate screen (Claude Code's fullscreen
+    /// mode, vim, less).
+    pub app_scroll: AppScroll,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -171,6 +174,16 @@ pub enum OptionAsMeta {
     Off,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AppScroll {
+    /// A step per row of wheel travel, as native terminals send.
+    #[default]
+    Rows,
+    /// xterm.js's own steps: at most one per wheel event.
+    Xterm,
+}
+
 impl Default for TerminalSettings {
     fn default() -> Self {
         TerminalSettings {
@@ -179,6 +192,7 @@ impl Default for TerminalSettings {
             ligatures: false,
             line_height: 1.0,
             option_as_meta: OptionAsMeta::Both,
+            app_scroll: AppScroll::Rows,
         }
     }
 }
@@ -264,11 +278,13 @@ mod tests {
         assert_eq!(settings.terminal.font_size, 15.0);
         assert!(!settings.terminal.ligatures);
         assert_eq!(settings.terminal.option_as_meta, OptionAsMeta::Both);
+        assert_eq!(settings.terminal.app_scroll, AppScroll::Rows);
 
         assert_eq!(settings.theme.name, "Supacode Dark");
         settings.terminal.font_family = "FiraCode Nerd Font Mono".into();
         settings.terminal.ligatures = true;
         settings.terminal.option_as_meta = OptionAsMeta::Left;
+        settings.terminal.app_scroll = AppScroll::Xterm;
         settings.theme = ThemeSettings {
             name: "Dracula".into(),
             follow_system: true,
@@ -281,6 +297,7 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("future = \"keep\"") && text.contains("[other]"), "{text}");
         assert!(text.contains("option_as_meta = \"left\""), "{text}");
+        assert!(text.contains("app_scroll = \"xterm\""), "{text}");
         assert!(text.contains("[theme]") && text.contains("follow_system = true"), "{text}");
         assert!(text.contains("needs_input = \"\""), "{text}");
         assert!(!text.contains("[updates]"), "{text}");
