@@ -166,7 +166,7 @@ channel = "nightly"      # or "stable"; unset means this build's own
 
 `[updates]` keys are left out while unset, so Save removes one set back to automatic (and the section if that empties it).
 
-Themes are Ghostty theme files: built in, in `~/.config/ftm/themes`, or found in Ghostty's and Supacode's theme folders. Sounds come from the app's built-ins (`app/src-tauri/sounds`, synthesized by `scripts/gen-sounds.py`), `~/.config/ftm/sounds` (wav, aiff, ogg/oga, mp3, m4a, caf, flac; named by file stem), macOS `/System/Library/Sounds` and freedesktop `/usr/share/sounds/freedesktop/stereo`; on a name clash yours win over built-ins over the system's. The webview plays them (the bytes come over IPC), and the picker hides formats it cannot play: WKWebView has no Ogg Vorbis, and WebKitGTK plays what its GStreamer plugins decode. Picking a sound in the dropdown plays it; ▶ replays it.
+Themes are Ghostty theme files: built in, in `~/.config/ftm/themes`, or found in Ghostty's and Supacode's theme folders. Sounds come from the app's built-ins (`app/src-tauri/sounds`, synthesized by `scripts/gen-sounds.py`), `~/.config/ftm/sounds` (wav, aiff, ogg/oga, mp3, m4a, caf, flac; named by file stem), macOS `/System/Library/Sounds` and freedesktop `/usr/share/sounds/freedesktop/stereo`; on a name clash yours win over built-ins over the system's. The webview decodes and plays them with Web Audio (the bytes come over IPC), never a media element, so FTM never becomes the system's Now Playing app and never takes the media keys. WKWebView decodes every listed format; WebKitGTK decodes what its GStreamer plugins handle, and a sound it cannot decode is logged and plays nothing. Picking a sound in the dropdown plays it; ▶ replays it.
 
 ## UI
 

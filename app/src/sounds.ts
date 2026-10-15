@@ -12,48 +12,54 @@ export interface SoundSettings {
   volume: number;
 }
 
-/// Each listed type and the spellings WebKit may recognize it by; the first one `canPlayType` accepts labels the blob.
-const ALIASES: Record<string, string[]> = {
-  "audio/wav": ["audio/wav", "audio/x-wav", "audio/wave"],
-  "audio/aiff": ["audio/aiff", "audio/x-aiff"],
-  "audio/ogg": ['audio/ogg; codecs="vorbis"', "audio/ogg"],
-  "audio/x-caf": ["audio/x-caf"],
-};
-
-const probe = document.createElement("audio");
-const playableType = (mime: string) => (ALIASES[mime] ?? [mime]).find((m) => probe.canPlayType(m) !== "");
-
 let list: Promise<SoundEntry[]> | null = null;
 
-/// Sounds this webview can play (WKWebView has no Ogg Vorbis; webkitgtk's formats depend on the GStreamer plugins).
-export const loadSounds = () =>
-  (list ??= invoke<SoundEntry[]>("list_sounds").then((all) => all.filter((s) => playableType(s.mime))));
+export const loadSounds = () => (list ??= invoke<SoundEntry[]>("list_sounds"));
 
-const urls = new Map<string, Promise<string>>();
+// Web Audio rather than an HTMLMediaElement: WebKit makes any app that plays a media element the system's Now Playing
+// app, which hands it the media keys.
+let ctx: AudioContext | null = null;
+const audio = () => (ctx ??= new AudioContext());
 
-function url(sound: SoundEntry): Promise<string> {
+const buffers = new Map<string, Promise<AudioBuffer>>();
+
+function buffer(sound: SoundEntry): Promise<AudioBuffer> {
   const key = sound.name.toLowerCase();
-  let u = urls.get(key);
-  if (!u) {
-    u = invoke<ArrayBuffer>("sound_data", { name: sound.name }).then((bytes) =>
-      URL.createObjectURL(new Blob([bytes], { type: playableType(sound.mime) ?? sound.mime })),
-    );
-    u.catch(() => urls.delete(key));
-    urls.set(key, u);
+  let b = buffers.get(key);
+  if (!b) {
+    b = invoke<ArrayBuffer>("sound_data", { name: sound.name }).then((bytes) => audio().decodeAudioData(bytes));
+    b.catch(() => buffers.delete(key));
+    buffers.set(key, b);
   }
-  return u;
+  return b;
 }
 
-let playing: HTMLAudioElement | null = null;
+let playing: AudioBufferSourceNode | null = null;
 
 /// Plays the named sound, cutting off whatever is still playing; an empty or unknown name plays nothing.
 export async function play(name: string, volume: number) {
   if (!name) return;
   const sound = (await loadSounds()).find((s) => s.name.toLowerCase() === name.toLowerCase());
   if (!sound) return;
-  const audio = new Audio(await url(sound));
-  audio.volume = Math.min(1, Math.max(0, volume));
-  playing?.pause();
-  playing = audio;
-  await audio.play();
+  const data = await buffer(sound);
+  const ac = audio();
+  // Unconditional: a suspend from the last sound ending can still be pending while the state reads "running".
+  await ac.resume();
+  const gain = ac.createGain();
+  gain.gain.value = Math.min(1, Math.max(0, volume));
+  gain.connect(ac.destination);
+  const source = ac.createBufferSource();
+  source.buffer = data;
+  source.connect(gain);
+  source.onended = () => {
+    source.disconnect();
+    gain.disconnect();
+    if (playing !== source) return;
+    playing = null;
+    // A running context holds the output device open and keeps waking the audio thread.
+    ac.suspend();
+  };
+  playing?.stop();
+  playing = source;
+  source.start();
 }
