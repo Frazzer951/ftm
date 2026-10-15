@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { clipboardKey, paneKey } from "../src/keys.ts";
+import { clipboardKey, optionIsMeta, paneKey } from "../src/keys.ts";
 import { DISAMBIGUATE, encodeKey, kittyKeyboard, type KeyEvent } from "../src/kitty.ts";
 
 type Handler = (params: (number | number[])[]) => boolean;
@@ -234,4 +234,24 @@ test("Linux word editing keys, and the protocol's encoding when it is on", () =>
   const kctx = { ...ctx, kitty: t.kitty };
   assert.equal(paneKey(down("Backspace", "Backspace", { ctrlKey: true }), kctx), "\x1b[127;5u");
   assert.equal(paneKey(down("Delete", "Delete", { ctrlKey: true }), kctx), undefined);
+});
+
+test("Option as Meta by side", () => {
+  const left = new Set(["AltLeft"]);
+  const right = new Set(["AltRight"]);
+  assert.equal(optionIsMeta("both", left), true);
+  assert.equal(optionIsMeta("both", new Set()), true);
+  assert.equal(optionIsMeta("off", left), false);
+  assert.equal(optionIsMeta("left", left), true);
+  assert.equal(optionIsMeta("left", right), false);
+  assert.equal(optionIsMeta("right", right), true);
+  assert.equal(optionIsMeta("right", left), false);
+});
+
+test("a Meta Option goes through the protocol as Alt on macOS, a composing one types its character", () => {
+  const t = fakeTerm();
+  t.seq(">", 1);
+  const b = down("∫", "KeyB", { altKey: true });
+  assert.equal(paneKey(b, { mac: true, altIsMeta: true, kitty: t.kitty }), "\x1b[98;3u");
+  assert.equal(paneKey(b, { mac: true, altIsMeta: false, kitty: t.kitty }), undefined);
 });

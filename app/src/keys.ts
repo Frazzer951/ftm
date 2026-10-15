@@ -15,6 +15,14 @@ const ctrlEditKeys: Record<string, string> = {
   Delete: "\x1bd",
 };
 
+export type OptionAsMeta = "both" | "left" | "right" | "off";
+
+/// Whether the Option key held now is Meta, given which sides are down (`AltLeft`, `AltRight`).
+export function optionIsMeta(setting: OptionAsMeta, held: ReadonlySet<string>): boolean {
+  if (setting === "both" || setting === "off") return setting === "both";
+  return held.has(setting === "left" ? "AltLeft" : "AltRight");
+}
+
 export interface KeyContext {
   mac: boolean;
   /// Whether the Option held for this event is Meta rather than a key that composes characters (macOS only).

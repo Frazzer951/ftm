@@ -10,7 +10,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { chromeColors } from "./colors";
-import { clipboardKey, paneKey } from "./keys.ts";
+import { clipboardKey, type OptionAsMeta, optionIsMeta, paneKey } from "./keys.ts";
 import { type KeyProtocol, kittyKeyboard } from "./kitty.ts";
 import { loadSounds, play, type SoundEntry, type SoundSettings } from "./sounds";
 import "./style.css";
@@ -148,7 +148,9 @@ function view(pane: Id): PaneView {
       else if (term.hasSelection()) writeText(term.getSelection()).catch(console.error);
       return false;
     }
-    const seq = paneKey(e, { mac: isMac, altIsMeta: !isMac, kitty });
+    const altIsMeta = !isMac || optionIsMeta(settings.option_as_meta, optionsDown);
+    if (isMac && e.type === "keydown") term.options.macOptionIsMeta = altIsMeta;
+    const seq = paneKey(e, { mac: isMac, altIsMeta, kitty });
     if (seq === undefined) return true;
     e.preventDefault();
     term.input(seq);
@@ -231,6 +233,7 @@ interface TerminalSettings {
   font_size: number;
   ligatures: boolean;
   line_height: number;
+  option_as_meta: OptionAsMeta;
 }
 
 let settings: TerminalSettings = {
@@ -238,7 +241,20 @@ let settings: TerminalSettings = {
   font_size: 13,
   ligatures: false,
   line_height: 1,
+  option_as_meta: "both",
 };
+
+/// Which Option keys are down, for Option as Meta on one side only; key events only say that some Alt is held.
+const optionsDown = new Set<string>();
+for (const type of ["keydown", "keyup"] as const)
+  window.addEventListener(
+    type,
+    (e) => {
+      if (e.code === "AltLeft" || e.code === "AltRight") optionsDown[type === "keydown" ? "add" : "delete"](e.code);
+    },
+    true,
+  );
+window.addEventListener("blur", () => optionsDown.clear());
 
 /// A bare family name gets quoted and a monospace fallback; a CSS list is used as written.
 const cssFamily = (family: string) => (/[,"']/.test(family) ? family : `"${family.trim()}", Menlo, monospace`);
@@ -549,6 +565,8 @@ function setupSettingsDialog() {
     field("font_size").value = String(settings.font_size);
     field("line_height").value = String(settings.line_height);
     field("ligatures").checked = settings.ligatures;
+    $("keyboard-settings").hidden = !isMac;
+    $<HTMLSelectElement>("option-as-meta").value = settings.option_as_meta;
     $<HTMLSelectElement>("update-check").value = updateSettings.check === null ? "" : String(updateSettings.check);
     $<HTMLSelectElement>("update-channel").value = updateSettings.channel ?? "";
     $("settings-error").textContent = "";
@@ -576,6 +594,7 @@ function setupSettingsDialog() {
       font_size: Number(field("font_size").value) || settings.font_size,
       line_height: Number(field("line_height").value) || settings.line_height,
       ligatures: field("ligatures").checked,
+      option_as_meta: $<HTMLSelectElement>("option-as-meta").value as OptionAsMeta,
     };
     const check = $<HTMLSelectElement>("update-check").value;
     const updates: UpdateSettings = {

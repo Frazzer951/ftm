@@ -157,6 +157,18 @@ pub struct TerminalSettings {
     pub ligatures: bool,
     /// Multiple of the font's natural line height.
     pub line_height: f32,
+    /// Which macOS Option keys send Meta (`ESC` + key) instead of composing characters like `∫`.
+    pub option_as_meta: OptionAsMeta,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OptionAsMeta {
+    #[default]
+    Both,
+    Left,
+    Right,
+    Off,
 }
 
 impl Default for TerminalSettings {
@@ -166,6 +178,7 @@ impl Default for TerminalSettings {
             font_size: 13.0,
             ligatures: false,
             line_height: 1.0,
+            option_as_meta: OptionAsMeta::Both,
         }
     }
 }
@@ -250,10 +263,12 @@ mod tests {
         let mut settings = Settings::load(&path).unwrap();
         assert_eq!(settings.terminal.font_size, 15.0);
         assert!(!settings.terminal.ligatures);
+        assert_eq!(settings.terminal.option_as_meta, OptionAsMeta::Both);
 
         assert_eq!(settings.theme.name, "Supacode Dark");
         settings.terminal.font_family = "FiraCode Nerd Font Mono".into();
         settings.terminal.ligatures = true;
+        settings.terminal.option_as_meta = OptionAsMeta::Left;
         settings.theme = ThemeSettings {
             name: "Dracula".into(),
             follow_system: true,
@@ -265,6 +280,7 @@ mod tests {
         settings.save(&path).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("future = \"keep\"") && text.contains("[other]"), "{text}");
+        assert!(text.contains("option_as_meta = \"left\""), "{text}");
         assert!(text.contains("[theme]") && text.contains("follow_system = true"), "{text}");
         assert!(text.contains("needs_input = \"\""), "{text}");
         assert!(!text.contains("[updates]"), "{text}");
