@@ -39,7 +39,9 @@ pub fn run(args: &[String]) -> Result<()> {
     let [socket, rows, cols, cwd, program, rest @ ..] = args else {
         bail!("usage: ftmd pty-holder <socket> <rows> <cols> <cwd> <program> [args...]");
     };
+    tracing_subscriber::fmt().with_writer(std::io::stderr).init();
     let socket = PathBuf::from(socket);
+    let pane: Arc<str> = socket.file_stem().unwrap_or_default().to_string_lossy().into();
     let (rows, cols): (u16, u16) = (rows.parse()?, cols.parse()?);
     let _ = std::fs::remove_file(&socket);
     let listener = UnixListener::bind(&socket).wrap_err_with(|| format!("binding {}", socket.display()))?;
@@ -57,6 +59,7 @@ pub fn run(args: &[String]) -> Result<()> {
     cmd.cwd(cwd);
     let child = pair.slave.spawn_command(cmd).map_err(|e| eyre!("starting {program}: {e}"))?;
     drop(pair.slave);
+    tracing::info!("pane {pane}: started {program} as pid {:?}", child.process_id());
     let reader = pair.master.try_clone_reader().map_err(|e| eyre!("{e}"))?;
     let writer = Arc::new(Mutex::new(pair.master.take_writer().map_err(|e| eyre!("{e}"))?));
     let master = Arc::new(Mutex::new(pair.master));
@@ -71,8 +74,8 @@ pub fn run(args: &[String]) -> Result<()> {
     }));
 
     {
-        let (shared, child, socket) = (shared.clone(), child.clone(), socket.clone());
-        std::thread::spawn(move || pump_output(reader, &shared, &child, &socket));
+        let (pane, shared, child, socket) = (pane.clone(), shared.clone(), child.clone(), socket.clone());
+        std::thread::spawn(move || pump_output(&pane, reader, &shared, &child, &socket));
     }
 
     for conn in listener.incoming() {
@@ -94,8 +97,9 @@ pub fn run(args: &[String]) -> Result<()> {
                 let _ = old.shutdown(std::net::Shutdown::Both);
             }
         }
-        let (shared, writer, master, child) = (shared.clone(), writer.clone(), master.clone(), child.clone());
-        std::thread::spawn(move || serve(conn, &shared, &writer, &master, &child));
+        let (pane, shared, writer, master, child) =
+            (pane.clone(), shared.clone(), writer.clone(), master.clone(), child.clone());
+        std::thread::spawn(move || serve(&pane, conn, &shared, &writer, &master, &child));
     }
     Ok(())
 }
@@ -104,6 +108,7 @@ pub fn run(args: &[String]) -> Result<()> {
 /// live stream neither overlap nor gap. Draining continues while processes are being killed, so none of them block on
 /// a full terminal. At end of stream every process on the terminal is gone: reap and exit, once an ftmd has the output.
 fn pump_output(
+    pane: &str,
     mut reader: Box<dyn Read + Send>,
     shared: &Mutex<Shared>,
     child: &Mutex<Box<dyn Child + Send + Sync>>,
@@ -138,11 +143,18 @@ fn pump_output(
         let _ = killing.join();
     }
     let _ = std::fs::remove_file(socket);
-    let _ = lock(child).wait();
+    match lock(child).wait() {
+        Ok(status) => match status.signal() {
+            Some(signal) => tracing::info!("pane {pane}: shell exited on {signal}"),
+            None => tracing::info!("pane {pane}: shell exited with status {}", status.exit_code()),
+        },
+        Err(e) => tracing::warn!("pane {pane}: reaping the shell: {e}"),
+    }
     std::process::exit(0);
 }
 
 fn serve(
+    pane: &str,
     mut conn: UnixStream,
     shared: &Mutex<Shared>,
     writer: &Mutex<Box<dyn Write + Send>>,
@@ -168,8 +180,8 @@ fn serve(
             Frame::Kill => {
                 let mut s = lock(shared);
                 if s.killing.is_none() {
-                    let (master, child) = (master.clone(), child.clone());
-                    s.killing = Some(std::thread::spawn(move || terminate(&master, &child)));
+                    let (pane, master, child) = (pane.to_string(), master.clone(), child.clone());
+                    s.killing = Some(std::thread::spawn(move || terminate(&pane, &master, &child)));
                 }
             },
             Frame::Hello { .. } | Frame::Output(_) => {},
@@ -179,32 +191,98 @@ fn serve(
 
 /// Hangs up the shell's process group and the terminal's foreground group, then SIGKILLs whatever is left. An agent
 /// started by an interactive shell runs in its own group and Claude Code ignores SIGHUP, so signalling the shell alone
-/// leaves it running.
-fn terminate(master: &Mutex<Box<dyn MasterPty + Send>>, child: &Mutex<Box<dyn Child + Send + Sync>>) {
-    let mut groups: Vec<libc::pid_t> = lock(child).process_id().map(|pid| pid as libc::pid_t).into_iter().collect();
-    if let Some(fg) = lock(master).process_group_leader()
-        && fg > 0
-        && !groups.contains(&fg)
-    {
-        groups.push(fg);
-    }
-    signal_groups(&groups, libc::SIGHUP);
+/// leaves it running. A group id is free for reuse once its processes are gone, so the shell stays unreaped until this
+/// is done and the foreground group is only signalled while it is still in the pane's session.
+fn terminate(pane: &str, master: &Mutex<Box<dyn MasterPty + Send>>, child: &Mutex<Box<dyn Child + Send + Sync>>) {
+    let Some(shell) = lock(child).process_id().map(|pid| pid as libc::pid_t) else {
+        return;
+    };
+    let fg = lock(master).process_group_leader().filter(|&g| g > 0 && g != shell);
+    tracing::info!("pane {pane}: hanging up shell group {shell} and foreground group {fg:?}");
+    signal_groups(shell, fg, libc::SIGHUP);
     let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        let _ = lock(child).try_wait();
-        if !groups.iter().any(|&g| unsafe { libc::kill(-g, 0) } == 0) {
-            break;
-        }
+    while running(shell) || fg.is_some_and(|g| in_session(g, shell)) {
         if Instant::now() > deadline {
-            signal_groups(&groups, libc::SIGKILL);
+            tracing::warn!("pane {pane}: still running 2s after SIGHUP; sending SIGKILL");
+            signal_groups(shell, fg, libc::SIGKILL);
             break;
         }
         std::thread::sleep(Duration::from_millis(50));
     }
 }
 
-fn signal_groups(groups: &[libc::pid_t], signal: libc::c_int) {
-    for &group in groups {
-        unsafe { libc::kill(-group, signal) };
+fn signal_groups(shell: libc::pid_t, fg: Option<libc::pid_t>, signal: libc::c_int) {
+    unsafe { libc::kill(-shell, signal) };
+    if let Some(fg) = fg
+        && in_session(fg, shell)
+    {
+        unsafe { libc::kill(-fg, signal) };
+    }
+}
+
+/// Whether `group` is still a process group of the session `session` leads. A group whose leader has exited but whose
+/// members remain keeps its id, so its id cannot have been reused.
+fn in_session(group: libc::pid_t, session: libc::pid_t) -> bool {
+    match unsafe { libc::getsid(group) } {
+        -1 => std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) && unsafe { libc::kill(-group, 0) } == 0,
+        sid => sid == session,
+    }
+}
+
+/// Whether the (unreaped) child `pid` has not exited yet, without reaping it.
+fn running(pid: libc::pid_t) -> bool {
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let flags = libc::WEXITED | libc::WNOHANG | libc::WNOWAIT;
+    if unsafe { libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, flags) } != 0 {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    let exited = unsafe { info.si_pid() };
+    #[cfg(not(target_os = "linux"))]
+    let exited = info.si_pid;
+    exited == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::process::CommandExt;
+    use std::process::Command;
+
+    fn session_leader() -> std::process::Child {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30");
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        cmd.spawn().unwrap()
+    }
+
+    #[test]
+    fn an_exited_child_stops_running_but_stays_unreaped() {
+        let mut child = session_leader();
+        let pid = child.id() as libc::pid_t;
+        assert!(running(pid));
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while running(pid) {
+            assert!(Instant::now() < deadline, "child did not exit");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(child.try_wait().unwrap().is_some(), "still there to reap");
+    }
+
+    #[test]
+    fn groups_count_only_while_in_the_session() {
+        let mut child = session_leader();
+        let pid = child.id() as libc::pid_t;
+        assert!(in_session(pid, pid));
+        assert!(!in_session(pid, unsafe { libc::getsid(0) }));
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        child.wait().unwrap();
+        assert!(!in_session(pid, pid), "a reaped group's id may be reused");
     }
 }

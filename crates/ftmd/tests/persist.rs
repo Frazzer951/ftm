@@ -3,7 +3,7 @@
 mod common;
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
-use common::{Conn, alive, ftm_bin, start_daemon, temp_root, wait_for, wait_for_output};
+use common::{Conn, alive, ftm_bin, start_daemon, start_daemon_logged, temp_root, wait_for, wait_for_output};
 use ftm_core::model::{Kind, PaneId, SplitDir, Status, Workspace, WorkspaceId};
 use ftm_core::protocol::{Event, Request, Response, SpawnRequest};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
@@ -415,4 +415,29 @@ fn finishing_a_turn_marks_the_workspace_unseen_until_looked_at() {
         }),
         Some(Response::Error { .. })
     ));
+}
+
+/// Every pane's end is in ftmd's log with its cause, so a pane that dies unexpectedly leaves a trace.
+#[test]
+fn pane_exits_are_logged_with_their_cause() {
+    let dir = temp_root("exitlog");
+    let daemon = start_daemon_logged("exitlog", Path::new(env!("CARGO_BIN_EXE_ftmd")));
+    let mut req = Conn::open(&daemon.socket);
+    let ws = spawn_terminal(&mut req, &dir, "logged");
+    let pane = ws.tabs[0].layout.panes()[0];
+    let Response::Pane { pane: closed } = req.send(&Request::NewTab { workspace: ws.id }) else {
+        panic!()
+    };
+    req.type_in(pane, "exit 3\n");
+    req.send(&Request::ClosePane { pane: closed });
+    wait_for("both exits in the log", Duration::from_secs(10), || {
+        let log = daemon.log();
+        log.contains(&format!("closing pane {pane} of logged: its holder hung up"))
+            && log.contains(&format!("pane {pane}: shell exited with status 3"))
+            && log.contains(&format!("closing pane {closed} of logged: ClosePane requested"))
+            && log.contains(&format!("pane {closed}: hanging up shell group"))
+    });
+    let log = daemon.log();
+    let request = format!("ClosePane {{ pane: {closed} }} from pid {}", std::process::id());
+    assert!(log.contains(&request), "{log}");
 }
