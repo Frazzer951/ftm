@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.1.4] - 2026-10-14
+## [0.1.5] - 2026-10-15
 
 ### Daemon
 
@@ -11,10 +11,20 @@
 - ftmd: run repo setup in sh, keep a failed agent start on screen
 - ftmd: keep a fast-dying pane's output until ftmd attaches; apply the replay before a pane is visible
 - ftmd: mark the agent pane before applying the holder's replay
+- fix(ftmd): repaint panes when a terminal attaches at their current size
+- feat(ftmd): move onto a replaced binary by itself, keeping every pane
+- fix(ftmd): start pane holders from the running build on Linux
+- feat(worktree): copy gitignored files into new worktrees by default
+- fix(worktree): copy gitignored files best effort
+- fix(ftmd): never signal a recycled process group, and log pane exits
+- test(ftmd): check pane exits are logged with their cause
 
 ### CLI
 
 - ftm: canonicalize --path
+- fix(cli): press Enter in its own write in ftm send --enter
+- feat(cli): add ftm pin and ftm unpin
+- feat(cli): add ftm gc for merged worktrees
 
 ### App
 
@@ -27,7 +37,22 @@
 - Settings: theme picker
 - Sounds: built-in tones, system and user sound listing, [sounds] settings
 - App: yellow dot for finished-but-unseen agents, status sounds with a settings picker
+- fix(app): stop the macOS Siri / Writing Tools glyph over the terminal
 - App: FTM Nightly identity: FTM_CHANNEL=nightly builds default to an ftm-nightly socket dir, tauri.nightly.conf.json names the app and bundle id
+- fix(app): log panics and Objective-C exceptions to ftm-app.log
+- fix(app): dedupe logged Objective-C exceptions and cap ftm-app.log
+- feat(app): macOS text-editing keys in terminal panes
+- feat(app): open a workspace's folder in VS Code, GitKraken or Finder
+- feat(app): check for a newer release and install it from its PKGBUILD
+- feat(app): pick the update channel and switch between stable and nightly
+- fix(app): say how to finish a channel switch, and clear the notice when nothing is offered
+- fix(app): make the update script's build dir under TMPDIR on BSD mktemp too
+- fix(app): show the font preview under the font fields in Settings
+- feat(app): kitty keyboard protocol in panes, and Shift+Enter as ESC CR without it
+- feat(app): Ctrl+Shift+C/V and Shift+Insert copy and paste in Linux panes
+- feat(app): word editing keys in Linux panes
+- feat(app): Option as Meta on macOS, with a setting for one side or off
+- fix(app): don't answer terminal queries replayed from the daemon's buffer
 
 ### Scripts
 
@@ -40,6 +65,7 @@
 - Docs: unseen status, sounds and the settings file
 - docs: on Linux, install the nightly or the stable package, not both
 - docs: describe the update check and a terminal's spawn command
+- docs: add issue forms, a PR template and CONTRIBUTING.md
 
 ### CI and releases
 
@@ -50,6 +76,11 @@
 - Release: AUR push behind the AUR_PUBLISH variable; attach the PKGBUILD to each release
 - Release: take the draft's id from the create call; publish by id
 - Release: daily nightly pre-release and ftm@nightly cask, sharing the build with release.yml; keep nightly tags out of release notes
+- ci(nightly): build a nightly on every push to main
+- fix(release): let set-version.sh resolve the index on a cold runner
+- feat(packaging): make the Linux nightly and stable packages replace each other
+- fix(packaging): use postflight_steps in the Homebrew casks
+- fix(release): group changelog entries by a conventional commit's scope
 
 ### Other
 
@@ -68,26 +99,7 @@
 - Linux fixes: fish-safe agent startup, WebKitGTK DMA-BUF workaround, DOM renderer on Linux
 - cliff: blank line after the changelog header
 - Frontend: declare Vite client types so CSS side-effect imports type-check
-- fix(app): stop the macOS Siri / Writing Tools glyph over the terminal
-- fix(ftmd): repaint panes when a terminal attaches at their current size
-- fix(app): log panics and Objective-C exceptions to ftm-app.log
-- fix(app): dedupe logged Objective-C exceptions and cap ftm-app.log
-- feat(ftmd): move onto a replaced binary by itself, keeping every pane
-- feat(app): macOS text-editing keys in terminal panes
-- ci(nightly): build a nightly on every push to main
-- fix(release): let set-version.sh resolve the index on a cold runner
-- feat(packaging): make the Linux nightly and stable packages replace each other
-- fix(ftmd): start pane holders from the running build on Linux
-- fix(packaging): use postflight_steps in the Homebrew casks
-- fix(cli): press Enter in its own write in ftm send --enter
-- feat(cli): add ftm pin and ftm unpin
-- feat(app): open a workspace's folder in VS Code, GitKraken or Finder
-- feat(cli): add ftm gc for merged worktrees
-- feat(worktree): copy gitignored files into new worktrees by default
-- fix(worktree): copy gitignored files best effort
-- feat(app): check for a newer release and install it from its PKGBUILD
-- feat(app): pick the update channel and switch between stable and nightly
-- fix(app): say how to finish a channel switch, and clear the notice when nothing is offered
-- fix(app): make the update script's build dir under TMPDIR on BSD mktemp too
+- Deps: Bump core-text from 20.1.0 to 22.0.0
+- Deps: Bump typescript from 5.9.3 to 7.0.2 in /app
 
 <!-- generated by git-cliff -->
