@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.8] - 2026-10-15
+
+### App
+
+- feat(app): option to hold the finished sound until background subagents are done
+
 ## [0.1.7] - 2026-10-15
 
 ### App

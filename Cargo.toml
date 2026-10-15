@@ -8,7 +8,7 @@ edition = "2024"
 license = "MIT"
 repository = "https://github.com/Frazzer951/ftm"
 publish = false
-version = "0.1.7"
+version = "0.1.8"
 
 [workspace.metadata.release]
 shared-version = true
