@@ -9,6 +9,8 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { chromeColors } from "./colors";
+import { paneKey } from "./keys.ts";
+import { type KeyProtocol, kittyKeyboard } from "./kitty.ts";
 import { loadSounds, play, type SoundEntry, type SoundSettings } from "./sounds";
 import "./style.css";
 
@@ -48,25 +50,15 @@ interface PaneView {
   term: Terminal;
   fit: FitAddon;
   ligatures?: LigaturesAddon;
+  kitty: KeyProtocol;
+  /// Replays of the daemon's buffer in flight; queries in them were answered long ago, so they get no reply now.
+  replaying: number;
   el: HTMLElement;
   cols: number;
   rows: number;
 }
 
 const isMac = navigator.userAgent.includes("Mac");
-
-/// iTerm2's "Natural Text Editing": what shells' emacs keymaps understand, unlike xterm's `\e[1;3D` and friends.
-const textEditKeys: Record<string, { alt?: string; meta?: string }> = {
-  ArrowLeft: { alt: "\x1bb", meta: "\x01" },
-  ArrowRight: { alt: "\x1bf", meta: "\x05" },
-  Backspace: { alt: "\x17", meta: "\x15" },
-  Delete: { alt: "\x1bd" },
-};
-
-function textEditKey(e: KeyboardEvent): string | undefined {
-  if (e.type !== "keydown" || e.isComposing || e.shiftKey || e.ctrlKey || e.altKey === e.metaKey) return;
-  return textEditKeys[e.key]?.[e.altKey ? "alt" : "meta"];
-}
 
 const report = (message: string) => invoke("log", { message }).catch(() => {});
 const consoleError = console.error.bind(console);
@@ -144,19 +136,21 @@ function view(pane: Id): PaneView {
   }
   term.onData((d) => send({ op: "input", pane, data: encode(d) }));
   term.onBinary((d) => send({ op: "input", pane, data: btoa(d) }));
-  if (isMac)
-    term.attachCustomKeyEventHandler((e) => {
-      const seq = textEditKey(e);
-      if (seq === undefined) return true;
-      e.preventDefault();
-      term.input(seq);
-      return false;
-    });
+  const kitty = kittyKeyboard(term, (d) => {
+    if (!v.replaying) send({ op: "input", pane, data: encode(d) });
+  });
+  term.attachCustomKeyEventHandler((e) => {
+    const seq = paneKey(e, { mac: isMac, altIsMeta: !isMac, kitty });
+    if (seq === undefined) return true;
+    e.preventDefault();
+    term.input(seq);
+    return false;
+  });
   // xterm already turns off autocorrect, autocapitalize and spellcheck; macOS inline predictions also need these.
   term.textarea?.setAttribute("writingsuggestions", "false");
   term.textarea?.setAttribute("autocomplete", "off");
   term.textarea?.addEventListener("focus", () => setFocus(pane));
-  const v: PaneView = { term, fit, el, cols: 0, rows: 0 };
+  const v: PaneView = { term, fit, kitty, replaying: 0, el, cols: 0, rows: 0 };
   setLigatures(v);
   views.set(pane, v);
   return v;
@@ -1422,8 +1416,14 @@ const events = listen<FtmEvent>("ftm-event", ({ payload }) => {
     );
   } else if (live.has(payload.pane)) {
     const v = view(payload.pane);
-    if (payload.reset) v.term.reset();
-    v.term.write(decode(payload.data));
+    if (payload.reset) {
+      v.term.reset();
+      v.kitty.reset();
+      v.replaying++;
+      v.term.write(decode(payload.data), () => v.replaying--);
+    } else {
+      v.term.write(decode(payload.data));
+    }
   }
 });
 
