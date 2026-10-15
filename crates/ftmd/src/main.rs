@@ -105,6 +105,7 @@ async fn daemon(inherited: Option<upgrade::Inherited>) -> Result<()> {
 }
 
 async fn serve(stream: UnixStream, state: Shared) -> Result<()> {
+    let peer = stream.peer_cred().ok().and_then(|c| c.pid());
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
     while let Some(line) = lines.next_line().await? {
@@ -122,6 +123,10 @@ async fn serve(stream: UnixStream, state: Shared) -> Result<()> {
         }
         if let Request::Attach { pane } = request {
             return stream_pane(&mut write, &state, pane).await;
+        }
+        // Killing a pane leaves no other trace of who asked.
+        if matches!(request, Request::Close { .. } | Request::ClosePane { .. }) {
+            tracing::info!("{request:?} from pid {}", peer.map_or("?".into(), |p| p.to_string()));
         }
         let shared = state.clone();
         let response = tokio::task::spawn_blocking(move || state::handle(&shared, request)).await?;

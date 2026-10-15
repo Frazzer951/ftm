@@ -503,20 +503,26 @@ fn lock(shared: &Shared) -> MutexGuard<'_, State> {
 /// The first `Output` after (re)connecting is the holder's whole buffer, which rebuilds the screen after a restart.
 /// The holder going away means the pane's processes are gone.
 fn read_loop(shared: Shared, id: PaneId, mut holder: UnixStream) {
-    while let Ok(Some(frame)) = frame::read(&mut holder) {
-        let Frame::Output(bytes) = frame else { continue };
-        let mut state = lock(&shared);
-        if !state.panes.contains_key(&id) {
-            return;
+    let ended = loop {
+        match frame::read(&mut holder) {
+            Ok(Some(Frame::Output(bytes))) => {
+                let mut state = lock(&shared);
+                if !state.panes.contains_key(&id) {
+                    return;
+                }
+                state.pane_output(id, &bytes);
+            },
+            Ok(Some(_)) => {},
+            Ok(None) => break "its holder hung up".to_string(),
+            Err(e) => break format!("reading from its holder failed: {e}"),
         }
-        state.pane_output(id, &bytes);
-    }
-    pane_exited(&shared, id);
+    };
+    pane_exited(&shared, id, &ended);
 }
 
 /// An agent whose startup pane exits before Claude reports any status never started (setup the shell could not
 /// parse, no `claude`): the pane stays with what it printed and the workspace turns `failed`. Any other pane closes.
-fn pane_exited(shared: &Shared, id: PaneId) {
+fn pane_exited(shared: &Shared, id: PaneId, why: &str) {
     {
         let mut guard = lock(shared);
         let state = &mut *guard;
@@ -526,7 +532,11 @@ fn pane_exited(shared: &Shared, id: PaneId) {
             && ws.kind == Kind::Agent
             && ws.status == Status::Starting
         {
-            tracing::warn!("agent {} exited before starting:\n{}", ws.name, screen_text(&mut pane.screen));
+            tracing::warn!(
+                "agent {} exited before starting ({why}):\n{}",
+                ws.name,
+                screen_text(&mut pane.screen)
+            );
             const NOTE: &[u8] = b"\r\n\x1b[31m[ftm] the agent exited before it started\x1b[0m\r\n";
             pane.exited = true;
             pane.buffer.extend_from_slice(NOTE);
@@ -541,14 +551,16 @@ fn pane_exited(shared: &Shared, id: PaneId) {
             return;
         }
     }
-    close_pane(shared, id);
+    close_pane(shared, id, why);
 }
 
 /// Idempotent: a pane that exits on its own and a `ClosePane` for it race to get here.
-fn close_pane(shared: &Shared, id: PaneId) {
+fn close_pane(shared: &Shared, id: PaneId, why: &str) {
     let pane = {
         let mut state = lock(shared);
         let Some(pane) = state.panes.remove(&id) else { return };
+        let name = state.workspaces.get(&pane.workspace).map_or("?", |w| w.name.as_str());
+        tracing::info!("closing pane {id} of {name}: {why}");
         state.detach(pane.workspace, id);
         state.emit_workspaces();
         pane
@@ -667,7 +679,7 @@ pub fn handle(shared: &Shared, request: Request) -> Response {
         Request::NewTab { workspace } => new_tab(shared, workspace),
         Request::Split { pane, dir } => split(shared, pane, dir),
         Request::ClosePane { pane } => {
-            close_pane(shared, pane);
+            close_pane(shared, pane, "ClosePane requested");
             Ok(Response::Ok)
         },
         Request::Input { pane, data } => input(shared, pane, &data),
@@ -788,6 +800,7 @@ fn close(shared: &Shared, id: WorkspaceId, remove_worktree: bool) -> Result<Resp
             .map(|(k, _)| *k)
             .collect();
         let panes: Vec<Pane> = ids.iter().filter_map(|k| state.panes.remove(k)).collect();
+        tracing::info!("closing workspace {} ({id}) and its panes {ids:?}", ws.name);
         state.emit_workspaces();
         (ws, panes)
     };
@@ -842,7 +855,7 @@ fn split(shared: &Shared, target: PaneId, dir: SplitDir) -> Result<Response> {
     let ws = state.workspace_mut(workspace)?;
     if !ws.tabs.iter_mut().any(|t| t.layout.split(target, pane, dir)) {
         drop(state);
-        close_pane(shared, pane);
+        close_pane(shared, pane, "its split had no tab");
         bail!("pane {target} is not in a tab");
     }
     state.emit_workspaces();
