@@ -43,7 +43,8 @@ export async function play(name: string, volume: number) {
   if (!sound) return;
   const data = await buffer(sound);
   const ac = audio();
-  if (ac.state === "suspended") await ac.resume();
+  // Unconditional: a suspend from the last sound ending can still be pending while the state reads "running".
+  await ac.resume();
   const gain = ac.createGain();
   gain.gain.value = Math.min(1, Math.max(0, volume));
   gain.connect(ac.destination);
@@ -53,7 +54,10 @@ export async function play(name: string, volume: number) {
   source.onended = () => {
     source.disconnect();
     gain.disconnect();
-    if (playing === source) playing = null;
+    if (playing !== source) return;
+    playing = null;
+    // A running context holds the output device open and keeps waking the audio thread.
+    ac.suspend();
   };
   playing?.stop();
   playing = source;
