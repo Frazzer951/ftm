@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.7] - 2026-10-15
+
+### App
+
+- fix(app): smooth wheel scrolling in full-screen apps such as Claude Code's fullscreen mode
+
 ## [0.1.6] - 2026-10-15
 
 ### App
