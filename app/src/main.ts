@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { homeDir } from "@tauri-apps/api/path";
+import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { open } from "@tauri-apps/plugin-dialog";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { FitAddon } from "@xterm/addon-fit";
@@ -9,6 +10,8 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { chromeColors } from "./colors";
+import { clipboardKey, type OptionAsMeta, optionIsMeta, paneKey } from "./keys.ts";
+import { type KeyProtocol, kittyKeyboard } from "./kitty.ts";
 import { loadSounds, play, type SoundEntry, type SoundSettings } from "./sounds";
 import "./style.css";
 
@@ -48,25 +51,16 @@ interface PaneView {
   term: Terminal;
   fit: FitAddon;
   ligatures?: LigaturesAddon;
+  kitty: KeyProtocol;
+  /// Replays of the daemon's buffer in flight; queries in them (DA, DSR, kitty's `CSI ? u`) were answered long ago,
+  /// so nothing xterm sends meanwhile reaches the pane.
+  replaying: number;
   el: HTMLElement;
   cols: number;
   rows: number;
 }
 
 const isMac = navigator.userAgent.includes("Mac");
-
-/// iTerm2's "Natural Text Editing": what shells' emacs keymaps understand, unlike xterm's `\e[1;3D` and friends.
-const textEditKeys: Record<string, { alt?: string; meta?: string }> = {
-  ArrowLeft: { alt: "\x1bb", meta: "\x01" },
-  ArrowRight: { alt: "\x1bf", meta: "\x05" },
-  Backspace: { alt: "\x17", meta: "\x15" },
-  Delete: { alt: "\x1bd" },
-};
-
-function textEditKey(e: KeyboardEvent): string | undefined {
-  if (e.type !== "keydown" || e.isComposing || e.shiftKey || e.ctrlKey || e.altKey === e.metaKey) return;
-  return textEditKeys[e.key]?.[e.altKey ? "alt" : "meta"];
-}
 
 const report = (message: string) => invoke("log", { message }).catch(() => {});
 const consoleError = console.error.bind(console);
@@ -142,21 +136,33 @@ function view(pane: Id): PaneView {
       console.warn("webgl unavailable, using the DOM renderer", e);
     }
   }
-  term.onData((d) => send({ op: "input", pane, data: encode(d) }));
-  term.onBinary((d) => send({ op: "input", pane, data: btoa(d) }));
-  if (isMac)
-    term.attachCustomKeyEventHandler((e) => {
-      const seq = textEditKey(e);
-      if (seq === undefined) return true;
+  const input = (data: string) => {
+    if (!v.replaying) send({ op: "input", pane, data });
+  };
+  term.onData((d) => input(encode(d)));
+  term.onBinary((d) => input(btoa(d)));
+  const kitty = kittyKeyboard(term, (d) => input(encode(d)));
+  term.attachCustomKeyEventHandler((e) => {
+    const clip = clipboardKey(e, isMac);
+    if (clip) {
       e.preventDefault();
-      term.input(seq);
+      if (clip === "paste") readText().then((text) => text && term.paste(text), console.error);
+      else if (term.hasSelection()) writeText(term.getSelection()).catch(console.error);
       return false;
-    });
+    }
+    const altIsMeta = !isMac || optionIsMeta(settings.option_as_meta, optionsDown);
+    if (isMac && e.type === "keydown") term.options.macOptionIsMeta = altIsMeta;
+    const seq = paneKey(e, { mac: isMac, altIsMeta, kitty });
+    if (seq === undefined) return true;
+    e.preventDefault();
+    term.input(seq);
+    return false;
+  });
   // xterm already turns off autocorrect, autocapitalize and spellcheck; macOS inline predictions also need these.
   term.textarea?.setAttribute("writingsuggestions", "false");
   term.textarea?.setAttribute("autocomplete", "off");
   term.textarea?.addEventListener("focus", () => setFocus(pane));
-  const v: PaneView = { term, fit, el, cols: 0, rows: 0 };
+  const v: PaneView = { term, fit, kitty, replaying: 0, el, cols: 0, rows: 0 };
   setLigatures(v);
   views.set(pane, v);
   return v;
@@ -229,6 +235,7 @@ interface TerminalSettings {
   font_size: number;
   ligatures: boolean;
   line_height: number;
+  option_as_meta: OptionAsMeta;
 }
 
 let settings: TerminalSettings = {
@@ -236,7 +243,20 @@ let settings: TerminalSettings = {
   font_size: 13,
   ligatures: false,
   line_height: 1,
+  option_as_meta: "both",
 };
+
+/// Which Option keys are down, for Option as Meta on one side only; key events only say that some Alt is held.
+const optionsDown = new Set<string>();
+for (const type of ["keydown", "keyup"] as const)
+  window.addEventListener(
+    type,
+    (e) => {
+      if (e.code === "AltLeft" || e.code === "AltRight") optionsDown[type === "keydown" ? "add" : "delete"](e.code);
+    },
+    true,
+  );
+window.addEventListener("blur", () => optionsDown.clear());
 
 /// A bare family name gets quoted and a monospace fallback; a CSS list is used as written.
 const cssFamily = (family: string) => (/[,"']/.test(family) ? family : `"${family.trim()}", Menlo, monospace`);
@@ -547,6 +567,8 @@ function setupSettingsDialog() {
     field("font_size").value = String(settings.font_size);
     field("line_height").value = String(settings.line_height);
     field("ligatures").checked = settings.ligatures;
+    $("keyboard-settings").hidden = !isMac;
+    $<HTMLSelectElement>("option-as-meta").value = settings.option_as_meta;
     $<HTMLSelectElement>("update-check").value = updateSettings.check === null ? "" : String(updateSettings.check);
     $<HTMLSelectElement>("update-channel").value = updateSettings.channel ?? "";
     $("settings-error").textContent = "";
@@ -574,6 +596,7 @@ function setupSettingsDialog() {
       font_size: Number(field("font_size").value) || settings.font_size,
       line_height: Number(field("line_height").value) || settings.line_height,
       ligatures: field("ligatures").checked,
+      option_as_meta: $<HTMLSelectElement>("option-as-meta").value as OptionAsMeta,
     };
     const check = $<HTMLSelectElement>("update-check").value;
     const updates: UpdateSettings = {
@@ -1422,8 +1445,14 @@ const events = listen<FtmEvent>("ftm-event", ({ payload }) => {
     );
   } else if (live.has(payload.pane)) {
     const v = view(payload.pane);
-    if (payload.reset) v.term.reset();
-    v.term.write(decode(payload.data));
+    if (payload.reset) {
+      v.term.reset();
+      v.kitty.reset();
+      v.replaying++;
+      v.term.write(decode(payload.data), () => v.replaying--);
+    } else {
+      v.term.write(decode(payload.data));
+    }
   }
 });
 

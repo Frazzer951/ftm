@@ -149,6 +149,7 @@ font_family = "Menlo"
 font_size = 13
 ligatures = false
 line_height = 1.0
+option_as_meta = "both"  # macOS Option keys that send Meta: "left", "right" or "off" to type ∫ ƒ é with them
 
 [theme]
 name = "Supacode Dark"   # or follow_system = true with dark/light
@@ -182,6 +183,8 @@ Must run on macOS and Linux as a standalone desktop app (never inside a browser)
 | libghostty | Ghostty | Ghostty's own frontends are Swift (macOS) and GTK (Linux): two UIs to build. Not worth it for a cross-platform app. |
 
 The daemon/CLI are independent of this choice; the app is just another socket client plus a PTY stream consumer.
+
+**Keyboard.** Pane keys go through xterm.js, with a custom key handler (`app/src/keys.ts`) in front. It implements the kitty keyboard protocol (`app/src/kitty.ts`) because xterm.js 6.0 lacks it; 6.1 adds it as `vtExtensions.kittyKeyboard`, which can replace the module once 6.1 is stable. Only the "disambiguate" and "report alternate keys" flags are supported, and a `CSI ? u` query reports just those; each screen has its own flags and stack, and the alternate screen's are cleared when it is entered. Claude Code and fish both turn it on, so Shift+Enter reaches them as `CSI 13;2u`. Without the protocol, Shift+Enter sends `ESC CR`, as Claude Code's `/terminal-setup` makes iTerm2 send. A replay of the daemon's buffer (`reset: true`) gets no query replies, since the program asked long ago; the flags it pushed are rebuilt from the replay, so a program whose push has scrolled out of the last 1 MiB falls back to legacy keys until it pushes again. On Linux, Ctrl+Shift+C copies the selection (nothing without one), and Ctrl+Shift+V and Shift+Insert paste through `term.paste`, so bracketed paste applies; both go through `tauri-plugin-clipboard-manager`, since WebKitGTK refuses `navigator.clipboard` outside a gesture and asks for confirmation within one. macOS keeps Cmd+C/V from its Edit menu. Without the protocol, Linux Ctrl+Backspace sends `^W` and Ctrl+Delete `ESC d` (xterm's `^H` and `\e[3;5~` are unbound in bash's readline); Ctrl+arrows keep xterm's `\e[1;5D`/`\e[1;5C`, which distro inputrcs, fish, zsh and editors bind, and Alt+Backspace is already `ESC DEL`. With it on, they get the protocol's encoding. macOS has iTerm2's "Natural Text Editing" instead: Option/Cmd+arrows and Option/Cmd+Backspace send the emacs keys, protocol or not. Option is Meta by default (xterm's `macOptionIsMeta`, set per keydown from which Option keys are down, since `[terminal] option_as_meta` can pick one side); a composing Option is not a modifier under the protocol either. Linux Alt+key already sends `ESC` + key.
 
 ## PTY persistence
 
