@@ -52,7 +52,8 @@ interface PaneView {
   fit: FitAddon;
   ligatures?: LigaturesAddon;
   kitty: KeyProtocol;
-  /// Replays of the daemon's buffer in flight; queries in them were answered long ago, so they get no reply now.
+  /// Replays of the daemon's buffer in flight; queries in them (DA, DSR, kitty's `CSI ? u`) were answered long ago,
+  /// so nothing xterm sends meanwhile reaches the pane.
   replaying: number;
   el: HTMLElement;
   cols: number;
@@ -135,11 +136,12 @@ function view(pane: Id): PaneView {
       console.warn("webgl unavailable, using the DOM renderer", e);
     }
   }
-  term.onData((d) => send({ op: "input", pane, data: encode(d) }));
-  term.onBinary((d) => send({ op: "input", pane, data: btoa(d) }));
-  const kitty = kittyKeyboard(term, (d) => {
-    if (!v.replaying) send({ op: "input", pane, data: encode(d) });
-  });
+  const input = (data: string) => {
+    if (!v.replaying) send({ op: "input", pane, data });
+  };
+  term.onData((d) => input(encode(d)));
+  term.onBinary((d) => input(btoa(d)));
+  const kitty = kittyKeyboard(term, (d) => input(encode(d)));
   term.attachCustomKeyEventHandler((e) => {
     const clip = clipboardKey(e, isMac);
     if (clip) {
