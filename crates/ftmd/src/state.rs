@@ -569,7 +569,7 @@ fn pane_exited(shared: &Shared, id: PaneId, why: &str) {
             pane.exited = true;
             pane.buffer.extend_from_slice(NOTE);
             pane.screen.process(NOTE);
-            set_status(ws, Status::Failed);
+            set_status(ws, Status::Failed, 0);
             let _ = state.events.send(Event::Output {
                 pane: id,
                 data: B64.encode(NOTE),
@@ -671,12 +671,19 @@ pub fn handle(shared: &Shared, request: Request) -> Response {
             workspaces: lock(shared).list(),
         }),
         Request::Spawn(req) => spawn(shared, req),
-        Request::SetStatus { id, status } => {
+        Request::SetStatus {
+            id,
+            status,
+            background_agents,
+        } => {
             let mut state = lock(shared);
-            state.workspace_mut(id).map(|ws| set_status(ws, status)).map(|()| {
-                state.emit_workspaces();
-                Response::Ok
-            })
+            state
+                .workspace_mut(id)
+                .map(|ws| set_status(ws, status, background_agents))
+                .map(|()| {
+                    state.emit_workspaces();
+                    Response::Ok
+                })
         },
         Request::Close { id, remove_worktree } => close(shared, id, remove_worktree),
         Request::Rename { id, name } => rename(shared, id, &name),
@@ -728,13 +735,14 @@ pub fn handle(shared: &Shared, request: Request) -> Response {
     })
 }
 
-fn set_status(ws: &mut Workspace, status: Status) {
+fn set_status(ws: &mut Workspace, status: Status, background_agents: u32) {
     if ws.status.completes(status) {
         ws.unseen = true;
     } else if matches!(status, Status::Starting | Status::Working | Status::NeedsInput) {
         ws.unseen = false;
     }
     ws.status = status;
+    ws.background_agents = background_agents;
 }
 
 fn spawn(shared: &Shared, req: SpawnRequest) -> Result<Response> {
@@ -789,6 +797,7 @@ fn spawn(shared: &Shared, req: SpawnRequest) -> Result<Response> {
             worktree,
             status: Status::Starting,
             unseen: false,
+            background_agents: 0,
             tabs: Vec::new(),
         },
     );

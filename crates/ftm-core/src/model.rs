@@ -156,6 +156,9 @@ pub struct Workspace {
     /// and when it starts working again.
     #[serde(default)]
     pub unseen: bool,
+    /// Background subagents still running as of the last status report; their hand-backs start more turns.
+    #[serde(default)]
+    pub background_agents: u32,
     pub tabs: Vec<Tab>,
 }
 

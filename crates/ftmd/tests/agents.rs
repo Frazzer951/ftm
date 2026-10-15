@@ -7,6 +7,7 @@ use common::{Conn, alive, ftm_bin, git, start_daemon, temp_root, wait_for, wait_
 use ftm_core::model::{Kind, Status, Workspace, WorkspaceId};
 use ftm_core::protocol::{Request, Response};
 use std::collections::HashMap;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
@@ -248,6 +249,32 @@ fn agents_nest_report_status_and_clean_up() {
         assert_eq!(now.status, status, "after {event}");
         assert_eq!(now.unseen, matches!(event, "Stop" | "SessionEnd"), "unseen after {event}");
     }
+    // The Stop hook reads Claude's input: running background subagents are kept, finished ones and shells are not.
+    let stop = settings["hooks"]["Stop"][0]["hooks"][0]["command"].as_str().unwrap();
+    let stop_with = |input: &str| {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", stop])
+            .env("FTM_SOCKET", &socket)
+            .env("FTM_WORKSPACE_ID", leader.to_string())
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+        assert!(child.wait().unwrap().success());
+        ls(&bin, &socket).into_iter().find(|w| w.id == leader).unwrap()
+    };
+    let tasks = r#"{"hook_event_name":"Stop","background_tasks":[
+        {"id":"a","type":"subagent","status":"running"},{"id":"b","type":"subagent","status":"running"},
+        {"id":"c","type":"subagent","status":"completed"},{"id":"d","type":"shell","status":"running"}]}"#;
+    let now = stop_with(tasks);
+    assert_eq!((now.status, now.background_agents), (Status::Idle, 2));
+    assert_eq!(stop_with(r#"{"background_tasks":[]}"#).background_agents, 0);
+    assert_eq!(stop_with(tasks).background_agents, 2);
+    assert_eq!(
+        stop_with("not json").background_agents,
+        0,
+        "unreadable input still reports idle"
+    );
     let idle_prompt = settings["hooks"]["Notification"]
         .as_array()
         .unwrap()

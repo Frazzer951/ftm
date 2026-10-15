@@ -132,12 +132,12 @@ ftmd writes hook settings to `<socket stem>.claude-settings.json` next to its so
 | `PermissionRequest` (fires as soon as a tool needs approval) | `needs_input` |
 | `PreToolUse` (`AskUserQuestion`) | `needs_input` |
 | `Notification` (`permission_prompt\|elicitation_dialog\|elicitation_url_dialog`) | `needs_input` |
-| `Stop`, `StopFailure` | `idle` |
+| `Stop`, `StopFailure` | `idle` (`Stop` runs `ftm status idle --hook`, which reads the hook input for the background subagents still running) |
 | `SessionEnd` | `done` (best effort: a killed session may not send it) |
 
 The 60s `idle_prompt` notification is deliberately not mapped, so a finished agent never turns red. `PostToolUse` rather than `PreToolUse` marks work so it cannot race the `AskUserQuestion` hook, and it clears `needs_input` once a prompt is answered. In the app, agent rows show a dot (starting blue, working green, needs input red, idle grey, done hollow grey, failed hollow red, finished but unseen yellow; CSS variables `--status-*`, taken from the theme's palette and nudged until they read against the sidebar); terminals show none. `ftm ls` marks unseen workspaces `(unseen)`.
 
-`needs_input` also raises a desktop notification (agent name, "needs input"), plays the needs-input sound, and badges every ancestor row with the count of agents below it that need input. A workspace turning unseen plays the finished sound, unless it is the selected workspace and the window has focus: then the app marks it seen at once and stays quiet. Selecting an unseen workspace (or focusing the window on one) marks it seen. A session ending after the agent was already idle does not count as finishing again. Agents are started with `claude -n <name> "<brief>"`, so `SendMessage` between leader and workers keeps working as today. `sonarx:spawn-repo-agent` and `sonarx:agent-shutdown` switch from `supacode ...` to `ftm spawn` / `ftm close`.
+`needs_input` also raises a desktop notification (agent name, "needs input"), plays the needs-input sound, and badges every ancestor row with the count of agents below it that need input. A workspace turning unseen plays the finished sound, unless it is the selected workspace and the window has focus: then the app marks it seen at once and stays quiet. Each background subagent's hand-back starts another turn, so an agent that fans out plays the finished sound once per hand-back; with `[sounds] wait_for_subagents` the app stays quiet while `background_agents` (running subagents from `Stop`'s `background_tasks`, shells left out since they can run for good) is nonzero, and holds the sound 1.5s so a second hand-back queued behind the first can cancel it. Selecting an unseen workspace (or focusing the window on one) marks it seen. A session ending after the agent was already idle does not count as finishing again. Agents are started with `claude -n <name> "<brief>"`, so `SendMessage` between leader and workers keeps working as today. `sonarx:spawn-repo-agent` and `sonarx:agent-shutdown` switch from `supacode ...` to `ftm spawn` / `ftm close`.
 
 ## Settings
 
@@ -159,6 +159,7 @@ name = "Supacode Dark"   # or follow_system = true with dark/light
 needs_input = "Nudge"    # a name from the sound list; "" plays nothing
 completed = "Chime"
 volume = 0.7             # 0 to 1
+wait_for_subagents = false  # true: no finished sound while the agent still has background subagents running
 
 [updates]
 check = true             # look for a newer release; unset means only on a pacman ftm-bin/ftm-nightly-bin install

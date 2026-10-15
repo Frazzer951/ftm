@@ -114,6 +114,8 @@ pub struct SoundSettings {
     pub completed: String,
     /// 0 to 1.
     pub volume: f32,
+    /// Hold `completed` while the agent still has background subagents running, so their hand-backs don't each play it.
+    pub wait_for_subagents: bool,
 }
 
 impl Default for SoundSettings {
@@ -122,6 +124,7 @@ impl Default for SoundSettings {
             needs_input: "Nudge".into(),
             completed: "Chime".into(),
             volume: 0.7,
+            wait_for_subagents: false,
         }
     }
 }
@@ -292,12 +295,15 @@ mod tests {
             light: "Supacode Light".into(),
         };
         assert_eq!(settings.sounds.completed, "Chime");
+        assert!(!settings.sounds.wait_for_subagents);
         settings.sounds.needs_input = String::new();
+        settings.sounds.wait_for_subagents = true;
         settings.save(&path).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("future = \"keep\"") && text.contains("[other]"), "{text}");
         assert!(text.contains("option_as_meta = \"left\""), "{text}");
         assert!(text.contains("app_scroll = \"xterm\""), "{text}");
+        assert!(text.contains("wait_for_subagents = true"), "{text}");
         assert!(text.contains("[theme]") && text.contains("follow_system = true"), "{text}");
         assert!(text.contains("needs_input = \"\""), "{text}");
         assert!(!text.contains("[updates]"), "{text}");

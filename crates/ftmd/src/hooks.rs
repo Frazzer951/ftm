@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 /// the `permission_prompt` notification only after ~6s), an `AskUserQuestion`, or an MCP elicitation; the 60s
 /// `idle_prompt` notification is left out so a finished agent never turns red. `PostToolUse` rather than `PreToolUse`
 /// marks work, so it cannot race the `AskUserQuestion` hook and it clears needs_input once a prompt is answered.
-/// `SessionEnd` is best effort: a killed session may never send it.
+/// `SessionEnd` is best effort: a killed session may never send it. `Stop` passes its input on (`--hook`) for the
+/// background subagents still running.
 const HOOKS: &[(&str, Option<&str>, &str)] = &[
     ("UserPromptSubmit", None, "working"),
     ("PostToolUse", None, "working"),
@@ -20,7 +21,7 @@ const HOOKS: &[(&str, Option<&str>, &str)] = &[
         Some("permission_prompt|elicitation_dialog|elicitation_url_dialog"),
         "needs-input",
     ),
-    ("Stop", None, "idle"),
+    ("Stop", None, "idle --hook"),
     ("StopFailure", None, "idle"),
     ("SessionEnd", None, "done"),
 ];
@@ -78,7 +79,7 @@ mod tests {
     fn hooks_call_ftm_status_and_never_fail() {
         let s = settings(Path::new("/opt/it's/ftm"));
         let cmd = |event: &str| s["hooks"][event][0]["hooks"][0]["command"].as_str().unwrap().to_string();
-        assert_eq!(cmd("Stop"), r"'/opt/it'\''s/ftm' status idle >/dev/null 2>&1 || true");
+        assert_eq!(cmd("Stop"), r"'/opt/it'\''s/ftm' status idle --hook >/dev/null 2>&1 || true");
         assert!(cmd("Notification").contains("status needs-input"));
         assert!(
             !s["hooks"]["Notification"][0]["matcher"]
