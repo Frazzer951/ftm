@@ -1246,7 +1246,7 @@ dependencies = [
 
 [[package]]
 name = "ftm"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "base64 0.23.1",
  "clap",
@@ -1258,7 +1258,7 @@ dependencies = [
 
 [[package]]
 name = "ftm-app"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "core-text",
  "ftm-core",
@@ -1279,7 +1279,7 @@ dependencies = [
 
 [[package]]
 name = "ftm-core"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "dirs",
  "serde",
@@ -1291,7 +1291,7 @@ dependencies = [
 
 [[package]]
 name = "ftmd"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "base64 0.23.1",
  "eyre",

@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.11] - 2026-10-16
+
+### App
+
+- feat(app): show status for Claude sessions in terminal workspaces
+
 ## [0.1.10] - 2026-10-16
 
 ### Other
