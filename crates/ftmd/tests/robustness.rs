@@ -4,7 +4,7 @@
 mod common;
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
-use common::{Conn, Daemon, start_daemon, start_daemon_logged, temp_root, wait_for};
+use common::{Conn, Daemon, start_daemon, temp_root, wait_for};
 use ftm_core::model::{Kind, Layout, PaneId, Status, Workspace};
 use ftm_core::protocol::{Event, Request, Response, SpawnRequest};
 use std::path::Path;
@@ -132,6 +132,7 @@ fn a_zero_size_resize_leaves_the_pane_working() {
 #[cfg(target_os = "linux")]
 #[test]
 fn running_out_of_descriptors_does_not_stop_ftmd() {
+    use common::start_daemon_logged;
     let mut daemon = start_daemon_logged("emfile", Path::new(env!("CARGO_BIN_EXE_ftmd")));
     let pid = daemon.pid();
     let open = std::fs::read_dir(format!("/proc/{pid}/fd")).unwrap().count() as u64;
