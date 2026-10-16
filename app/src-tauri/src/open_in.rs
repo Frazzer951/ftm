@@ -4,7 +4,7 @@
 use std::io::Read;
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 struct Target {
@@ -13,10 +13,10 @@ struct Target {
     /// The menu item's text.
     label: &'static str,
     /// Detected and launched by bundle id; `None` for Finder, which is always there.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code, reason = "only macOS detects apps by bundle id"))]
     bundle_id: Option<&'static str>,
     /// Detected on PATH and run as `<binary> <args> <path>`; `None` for the file manager, opened with xdg-open.
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    #[cfg_attr(target_os = "macos", allow(dead_code, reason = "macOS detects apps by bundle id, not PATH"))]
     binary: Option<(&'static str, &'static [&'static str])>,
 }
 
@@ -96,14 +96,14 @@ pub fn open(target: &str, path: &str) -> Result<(), String> {
         std::thread::spawn(move || {
             let mut chunk = [0; 4096];
             while let Ok(n @ 1..) = pipe.read(&mut chunk) {
-                keep_tail(&mut stderr.lock().unwrap_or_else(|e| e.into_inner()), &chunk[..n]);
+                keep_tail(&mut stderr.lock().unwrap_or_else(PoisonError::into_inner), &chunk[..n]);
             }
         });
     }
     match wait_briefly(&mut child, LAUNCH_WAIT) {
         Some(status) if !status.success() => {
             std::thread::sleep(Duration::from_millis(50));
-            let stderr = stderr.lock().unwrap_or_else(|e| e.into_inner());
+            let stderr = stderr.lock().unwrap_or_else(PoisonError::into_inner);
             Err(format!(
                 "opening in {} failed: {}",
                 target.name,
@@ -221,7 +221,7 @@ fn command(target: &Target, path: &Path) -> Command {
 
 /// Percent-encodes everything but unreserved characters and `/`; GitKraken decodes the path with
 /// decodeURIComponent.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code, reason = "only macOS opens GitKraken by URL"))]
 fn encode_path(path: &Path) -> String {
     use std::os::unix::ffi::OsStrExt;
     let mut out = String::new();

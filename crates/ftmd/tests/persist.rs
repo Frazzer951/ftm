@@ -230,8 +230,8 @@ fn attach_on_loose_pty(socket: &Path, ws: WorkspaceId) -> (std::process::Child, 
     };
     let rc = unsafe {
         libc::openpty(
-            &mut master,
-            &mut slave,
+            &raw mut master,
+            &raw mut slave,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             &raw mut size,
@@ -255,7 +255,7 @@ fn attach_on_loose_pty(socket: &Path, ws: WorkspaceId) -> (std::process::Child, 
 
 fn raw(fd: &OwnedFd) -> bool {
     let mut t: libc::termios = unsafe { std::mem::zeroed() };
-    assert_eq!(unsafe { libc::tcgetattr(fd.as_raw_fd(), &mut t) }, 0);
+    assert_eq!(unsafe { libc::tcgetattr(fd.as_raw_fd(), &raw mut t) }, 0);
     t.c_lflag & libc::ICANON == 0
 }
 

@@ -10,7 +10,7 @@
 //!   seconds that a loaded CI box still meets.
 //! - Never change the process environment (`std::env::set_var`); pass values to the child `Command` instead.
 //! - Name everything per test (the `name` given to `start_daemon` and `temp_root` must be unique in the binary).
-#![allow(dead_code)]
+#![allow(dead_code, reason = "each test binary uses a different subset of the helpers")]
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use ftm_core::model::{PaneId, Workspace};
@@ -170,7 +170,10 @@ fn start(name: &str, exe: &Path, logged: bool, configure: impl FnOnce(&mut Comma
         cmd.env_remove(key);
     }
     configure(&mut cmd);
-    let envs: Vec<_> = cmd.get_envs().map(|(k, v)| (k.to_owned(), v.map(|v| v.to_owned()))).collect();
+    let envs: Vec<_> = cmd
+        .get_envs()
+        .map(|(k, v)| (k.to_owned(), v.map(ToOwned::to_owned)))
+        .collect();
     let log = logged.then(|| state_home.join("ftmd.log"));
     let child = Daemon::spawn(exe, &envs, &socket, log.as_deref());
     Daemon {

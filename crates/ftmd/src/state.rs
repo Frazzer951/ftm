@@ -485,7 +485,7 @@ fn folder_order(order: Vec<PathBuf>, folders: &[Folder]) -> Vec<PathBuf> {
         .filter(|p| known.contains(p) && seen.insert(p.clone()))
         .collect();
     let mut rest: Vec<&PathBuf> = folders.iter().map(|f| &f.path).filter(|p| !seen.contains(*p)).collect();
-    rest.sort_by_key(|p| (p.file_name().map(|n| n.to_string_lossy().to_lowercase()), p.to_path_buf()));
+    rest.sort_by_key(|p| (p.file_name().map(|n| n.to_string_lossy().to_lowercase()), (*p).clone()));
     out.extend(rest.into_iter().cloned());
     out
 }

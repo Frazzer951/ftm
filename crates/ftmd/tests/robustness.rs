@@ -31,7 +31,7 @@ fn spawn_command(conn: &mut Conn, cwd: &Path, command: Option<&str>) -> (Workspa
 }
 
 fn holder_sockets(daemon: &Daemon) -> usize {
-    std::fs::read_dir(daemon.holders()).map_or(0, |d| d.count())
+    std::fs::read_dir(daemon.holders()).map_or(0, Iterator::count)
 }
 
 #[test]
@@ -146,7 +146,7 @@ fn running_out_of_descriptors_does_not_stop_ftmd() {
         rlim_max: open + 4,
     };
     assert_eq!(
-        unsafe { libc::prlimit(pid, libc::RLIMIT_NOFILE, &limit, std::ptr::null_mut()) },
+        unsafe { libc::prlimit(pid, libc::RLIMIT_NOFILE, &raw const limit, std::ptr::null_mut()) },
         0
     );
 
@@ -209,7 +209,7 @@ fn a_new_pane_is_announced_before_its_output() {
     while !seen.contains("early-2") {
         match events.line() {
             Event::Workspaces { workspaces } => {
-                announced |= workspaces.iter().any(|w| w.tabs.iter().any(|t| t.layout.contains(pane)))
+                announced |= workspaces.iter().any(|w| w.tabs.iter().any(|t| t.layout.contains(pane)));
             },
             Event::Output { pane: p, data, reset } if p == pane => {
                 assert!(announced, "output for pane {pane} before any layout had it");

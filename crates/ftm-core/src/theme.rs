@@ -42,7 +42,7 @@ fn hex(value: &str) -> Option<String> {
 impl Theme {
     /// Unknown keys, comments and malformed lines are ignored; missing colors get sensible defaults.
     pub fn parse(name: &str, text: &str) -> Theme {
-        let mut palette: Vec<String> = XTERM_PALETTE.iter().map(|c| c.to_string()).collect();
+        let mut palette: Vec<String> = XTERM_PALETTE.iter().map(ToString::to_string).collect();
         let mut keys: HashMap<&str, String> = HashMap::new();
         for line in text.lines() {
             let line = line.trim();

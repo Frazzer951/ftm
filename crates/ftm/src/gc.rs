@@ -85,12 +85,12 @@ pub fn run(yes: bool, fetch: bool, upstream_deleted: bool) -> Result<()> {
                             println!("removed {}  ({why})", wt.shown);
                             if let Err(e) = delete_branch(&repo, &branch, stale.as_deref()) {
                                 failed += 1;
-                                eprintln!("failed  {}  (worktree removed, but: {e:#})", wt.shown)
+                                eprintln!("failed  {}  (worktree removed, but: {e:#})", wt.shown);
                             }
                         },
                         Err(e) => {
                             failed += 1;
-                            eprintln!("failed  {}  ({e:#})", wt.shown)
+                            eprintln!("failed  {}  ({e:#})", wt.shown);
                         },
                     }
                 },

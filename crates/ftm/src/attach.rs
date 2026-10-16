@@ -73,7 +73,7 @@ impl RawMode {
     fn enable() -> Result<Self> {
         unsafe {
             let mut original: libc::termios = std::mem::zeroed();
-            if libc::tcgetattr(libc::STDIN_FILENO, &mut original) != 0 {
+            if libc::tcgetattr(libc::STDIN_FILENO, &raw mut original) != 0 {
                 bail!("stdin is not a terminal");
             }
             let _ = ORIGINAL.set(original);
@@ -81,8 +81,8 @@ impl RawMode {
                 libc::signal(sig, on_fatal as *const () as libc::sighandler_t);
             }
             let mut raw = original;
-            libc::cfmakeraw(&mut raw);
-            if libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw) != 0 {
+            libc::cfmakeraw(&raw mut raw);
+            if libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw const raw) != 0 {
                 bail!("putting the terminal in raw mode: {}", std::io::Error::last_os_error());
             }
             Ok(RawMode(original))
@@ -92,7 +92,7 @@ impl RawMode {
 
 impl Drop for RawMode {
     fn drop(&mut self) {
-        unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.0) };
+        unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw const self.0) };
     }
 }
 

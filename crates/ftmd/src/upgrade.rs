@@ -87,20 +87,12 @@ impl Inherited {
     pub fn listener(&self, socket: &Path) -> Result<std::os::unix::net::UnixListener> {
         let fd = self.listen;
         let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-        if unsafe { libc::fstat(fd, &mut stat) } != 0 || stat.st_mode & libc::S_IFMT != libc::S_IFSOCK {
+        if unsafe { libc::fstat(fd, &raw mut stat) } != 0 || stat.st_mode & libc::S_IFMT != libc::S_IFSOCK {
             bail!("{LISTEN_FD}={fd} is not a socket");
         }
         let mut kind: libc::c_int = 0;
-        let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
-        let ok = unsafe {
-            libc::getsockopt(
-                fd,
-                libc::SOL_SOCKET,
-                libc::SO_TYPE,
-                (&mut kind as *mut libc::c_int).cast(),
-                &mut len,
-            )
-        };
+        let mut len = size_of::<libc::c_int>() as libc::socklen_t;
+        let ok = unsafe { libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_TYPE, (&raw mut kind).cast(), &raw mut len) };
         if ok != 0 || kind != libc::SOCK_STREAM {
             bail!("{LISTEN_FD}={fd} is not a stream socket");
         }
@@ -361,7 +353,7 @@ fn wait_ready(read: &OwnedFd, child: &mut std::process::Child) -> Result<()> {
             events: libc::POLLIN,
             revents: 0,
         };
-        let n = unsafe { libc::poll(&mut pfd, 1, left.as_millis().min(i32::MAX as u128) as i32) };
+        let n = unsafe { libc::poll(&raw mut pfd, 1, left.as_millis().min(i32::MAX as u128) as i32) };
         if n < 0 {
             let e = std::io::Error::last_os_error();
             if e.kind() == std::io::ErrorKind::Interrupted {

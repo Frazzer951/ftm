@@ -311,7 +311,7 @@ fn in_session(group: libc::pid_t, session: libc::pid_t) -> bool {
 fn running(pid: libc::pid_t) -> bool {
     let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
     let flags = libc::WEXITED | libc::WNOHANG | libc::WNOWAIT;
-    if unsafe { libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, flags) } != 0 {
+    if unsafe { libc::waitid(libc::P_PID, pid as libc::id_t, &raw mut info, flags) } != 0 {
         return false;
     }
     #[cfg(target_os = "linux")]
