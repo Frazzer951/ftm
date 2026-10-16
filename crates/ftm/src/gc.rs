@@ -61,7 +61,7 @@ pub fn run(yes: bool, fetch: bool) -> Result<()> {
         }
     }
 
-    let mut removable = 0;
+    let (mut removable, mut failed) = (0, 0);
     for (repo, found) in by_repo {
         let name = repo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let config = RepoConfig::load(&paths::repo_config_path(&name))?;
@@ -84,7 +84,10 @@ pub fn run(yes: bool, fetch: bool) -> Result<()> {
                             removed_any = true;
                             println!("removed {}  ({why})", wt.shown)
                         },
-                        Err(e) => println!("failed  {}  ({e:#})", wt.shown),
+                        Err(e) => {
+                            failed += 1;
+                            eprintln!("failed  {}  ({e:#})", wt.shown)
+                        },
                     }
                 },
             }
@@ -95,6 +98,9 @@ pub fn run(yes: bool, fetch: bool) -> Result<()> {
     }
     if !yes && removable > 0 {
         println!("dry run: pass --yes to remove {removable} worktree(s) and their branches");
+    }
+    if failed > 0 {
+        bail!("{failed} worktree(s) could not be removed");
     }
     Ok(())
 }

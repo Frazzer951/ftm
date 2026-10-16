@@ -131,3 +131,53 @@ fn gc_removes_only_merged_clean_closed_worktrees() {
 
     drop(daemon);
 }
+
+/// A removal that fails goes to stderr and makes gc exit non-zero; the rest are still removed.
+#[test]
+fn gc_reports_failed_removals() {
+    let bin = ftm_bin();
+    let root = temp_root("gc-fail");
+    let (repo, config, data) = (root.join("failgc"), root.join("config"), root.join("data"));
+    std::fs::create_dir_all(config.join("ftm/repos")).unwrap();
+    std::fs::create_dir_all(root.join("home")).unwrap();
+    std::fs::write(config.join("ftm/repos/failgc.toml"), "base = \"main\"\n").unwrap();
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["config", "user.name", "t"]);
+    git(&repo, &["config", "user.email", "t@t"]);
+    commit(&repo, "f", "init");
+
+    let daemon = start_daemon("gc-fail", |c| {
+        c.env("HOME", root.join("home"))
+            .env("XDG_CONFIG_HOME", &config)
+            .env("XDG_DATA_HOME", &data);
+    });
+    let ftm = |args: &[&str]| {
+        without_user_git_config(&mut Command::new(&bin))
+            .args(args)
+            .env("FTM_SOCKET", &daemon.socket)
+            .env("XDG_CONFIG_HOME", &config)
+            .env("XDG_DATA_HOME", &data)
+            .env_remove("FTM_WORKSPACE_ID")
+            .output()
+            .unwrap()
+    };
+    let worktree = |branch: &str| -> PathBuf {
+        let out = ftm(&["spawn", "terminal", "--path", repo.to_str().unwrap(), "--worktree", branch]);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        assert!(ftm(&["close", "--id", &id]).status.success());
+        data.join("ftm/worktrees/failgc").join(branch)
+    };
+    let locked = worktree("locked");
+    git(&repo, &["worktree", "lock", locked.to_str().unwrap()]);
+    let fine = worktree("fine");
+
+    let out = ftm(&["gc", "--yes", "--no-fetch"]);
+    let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(!out.status.success(), "{stdout}");
+    assert!(stderr.contains("failed  failgc/locked"), "{stderr}");
+    assert!(!stdout.contains("failed"), "{stdout}");
+    assert!(stdout.contains("removed failgc/fine"), "{stdout}");
+    assert!(locked.exists() && !fine.exists());
+}
