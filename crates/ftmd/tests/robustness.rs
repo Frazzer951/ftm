@@ -117,6 +117,11 @@ fn a_zero_size_resize_leaves_the_pane_working() {
     for (rows, cols) in [(0, 80), (24, 0), (0, 0)] {
         assert!(matches!(conn.send(&Request::Resize { pane, cols, rows }), Response::Ok));
     }
+    // A double-width character must fit even at the smallest size.
+    conn.type_in(pane, "printf '\\344\\270\\200\\n'; touch printed\n");
+    wait_for("the wide character to be printed", Duration::from_secs(10), || {
+        dir.join("printed").exists()
+    });
     conn.send(&Request::Resize {
         pane,
         cols: 80,
