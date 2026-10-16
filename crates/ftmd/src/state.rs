@@ -959,7 +959,12 @@ fn spawn(shared: &Shared, req: SpawnRequest) -> Result<Response> {
             return Err(e);
         },
     };
+    let hooked = state.claude_settings.is_some();
     let ws = state.workspace_mut(id)?;
+    // Without its hooks the agent never reports, so there is nothing to wait for.
+    if !hooked && req.kind == Kind::Agent {
+        ws.status = Status::Idle;
+    }
     ws.tabs.push(Tab {
         id: TabId::new_v4(),
         layout: Layout::Pane { id: pane },

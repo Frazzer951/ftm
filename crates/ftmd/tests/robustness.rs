@@ -204,3 +204,37 @@ fn a_new_pane_is_announced_before_its_output() {
         }
     }
 }
+
+/// Without the hook settings an agent never reports a status, so it must not wait in `starting` for one, nor count as
+/// failed when its shell exits later.
+#[test]
+fn agents_without_status_hooks_are_not_left_starting() {
+    let dir = temp_root("no-hooks");
+    let settings = format!("/tmp/ftmd-{}-no-hooks.claude-settings.json", std::process::id());
+    std::fs::create_dir_all(&settings).unwrap();
+    let daemon = start_daemon("no-hooks", |c| {
+        c.env("FTM_AGENT_CMD", "true");
+    });
+    let mut conn = Conn::open(&daemon.socket);
+    let Response::Spawned { workspace } = conn.send(&Request::Spawn(SpawnRequest {
+        kind: Kind::Agent,
+        name: Some("a".into()),
+        parent: None,
+        cwd: dir.to_path_buf(),
+        worktree_branch: None,
+        base: None,
+        copy_changes: false,
+        brief: None,
+        command: None,
+    })) else {
+        panic!("expected spawned")
+    };
+    assert_eq!(workspace.status, Status::Idle);
+    let pane = workspace.tabs[0].layout.panes()[0];
+    conn.type_in(pane, "exit\n");
+    wait_for("the shell to exit", Duration::from_secs(10), || {
+        conn.list()[0].tabs.is_empty()
+    });
+    assert_eq!(conn.list()[0].status, Status::Idle);
+    let _ = std::fs::remove_dir(&settings);
+}
