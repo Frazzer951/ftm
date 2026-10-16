@@ -91,7 +91,7 @@ impl Inherited {
             bail!("{LISTEN_FD}={fd} is not a socket");
         }
         let mut kind: libc::c_int = 0;
-        let mut len = size_of::<libc::c_int>() as libc::socklen_t;
+        let mut len = libc::socklen_t::try_from(size_of::<libc::c_int>()).expect("c_int fits in socklen_t");
         let ok = unsafe { libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_TYPE, (&raw mut kind).cast(), &raw mut len) };
         if ok != 0 || kind != libc::SOCK_STREAM {
             bail!("{LISTEN_FD}={fd} is not a stream socket");
@@ -353,7 +353,7 @@ fn wait_ready(read: &OwnedFd, child: &mut std::process::Child) -> Result<()> {
             events: libc::POLLIN,
             revents: 0,
         };
-        let n = unsafe { libc::poll(&raw mut pfd, 1, left.as_millis().min(i32::MAX as u128) as i32) };
+        let n = unsafe { libc::poll(&raw mut pfd, 1, i32::try_from(left.as_millis()).unwrap_or(i32::MAX)) };
         if n < 0 {
             let e = std::io::Error::last_os_error();
             if e.kind() == std::io::ErrorKind::Interrupted {

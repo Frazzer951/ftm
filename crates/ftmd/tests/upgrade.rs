@@ -41,7 +41,7 @@ fn frame_version() -> u8 {
         .output()
         .unwrap();
     let handshake: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    handshake["frame"].as_u64().unwrap() as u8
+    u8::try_from(handshake["frame"].as_u64().unwrap()).unwrap()
 }
 
 fn spawn_terminal(conn: &mut Conn, cwd: &Path) -> PaneId {

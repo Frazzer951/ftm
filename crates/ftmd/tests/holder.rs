@@ -74,7 +74,7 @@ fn kill_leaves_nothing_behind_once_the_shell_is_gone() {
     assert_eq!(read_frame(&mut conn).0, 1);
     assert_eq!(read_frame(&mut conn).0, OUTPUT);
     let job = read_pid(&pidfile);
-    let _reap = Reap(vec![holder.id() as i32, job]);
+    let _reap = Reap(vec![holder.id().cast_signed(), job]);
 
     conn.write_all(&[KILL, 0, 0, 0, 0]).unwrap();
     wait_for("the holder to exit", Duration::from_secs(10), || {

@@ -255,12 +255,13 @@ fn send(pane: PaneId, text: &str, enter: bool) -> Result<()> {
 /// for good (a dev server, a log watcher).
 fn running_subagents(hook_input: &str) -> u32 {
     let input: serde_json::Value = serde_json::from_str(hook_input).unwrap_or_default();
-    input["background_tasks"].as_array().map_or(0, |tasks| {
+    let running = input["background_tasks"].as_array().map_or(0, |tasks| {
         tasks
             .iter()
             .filter(|t| t["type"] == "subagent" && t["status"] == "running")
-            .count() as u32
-    })
+            .count()
+    });
+    u32::try_from(running).unwrap_or(u32::MAX)
 }
 
 fn resolve_pane(target: PaneId) -> Result<PaneId> {

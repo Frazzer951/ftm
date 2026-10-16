@@ -243,7 +243,7 @@ fn serve(
 /// are gone, so the shell stays unreaped until this is done and other groups are only signalled while they are still
 /// in the pane's session.
 fn terminate(pane: &str, master: &Mutex<Box<dyn MasterPty + Send>>, child: &Mutex<Box<dyn Child + Send + Sync>>) {
-    let Some(shell) = lock(child).process_id().map(|pid| pid as libc::pid_t) else {
+    let Some(shell) = lock(child).process_id().map(u32::cast_signed) else {
         return;
     };
     let fg = lock(master).process_group_leader().filter(|&g| g > 0 && g != shell);
@@ -311,7 +311,7 @@ fn in_session(group: libc::pid_t, session: libc::pid_t) -> bool {
 fn running(pid: libc::pid_t) -> bool {
     let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
     let flags = libc::WEXITED | libc::WNOHANG | libc::WNOWAIT;
-    if unsafe { libc::waitid(libc::P_PID, pid as libc::id_t, &raw mut info, flags) } != 0 {
+    if unsafe { libc::waitid(libc::P_PID, pid.cast_unsigned(), &raw mut info, flags) } != 0 {
         return false;
     }
     #[cfg(target_os = "linux")]
@@ -342,7 +342,7 @@ mod tests {
     #[test]
     fn an_exited_child_stops_running_but_stays_unreaped() {
         let mut child = session_leader();
-        let pid = child.id() as libc::pid_t;
+        let pid = child.id().cast_signed();
         assert!(running(pid));
         unsafe { libc::kill(pid, libc::SIGKILL) };
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -356,7 +356,7 @@ mod tests {
     #[test]
     fn groups_count_only_while_in_the_session() {
         let mut child = session_leader();
-        let pid = child.id() as libc::pid_t;
+        let pid = child.id().cast_signed();
         assert!(in_session(pid, pid));
         assert!(!in_session(pid, unsafe { libc::getsid(0) }));
         unsafe { libc::kill(pid, libc::SIGKILL) };

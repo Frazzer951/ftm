@@ -56,10 +56,10 @@ impl Daemon {
 
     /// SIGTERM: ftmd exits and leaves the panes to their holders. Also stops an ftmd this one handed over to.
     pub fn stop(&mut self) {
-        unsafe { libc::kill(self.child.id() as i32, libc::SIGTERM) };
+        unsafe { libc::kill(self.child.id().cast_signed(), libc::SIGTERM) };
         let _ = self.child.wait();
         if let Some(pid) = self.log.as_ref().and_then(|_| self.latest_pid())
-            && pid != self.child.id() as i32
+            && pid != self.child.id().cast_signed()
         {
             unsafe { libc::kill(pid, libc::SIGTERM) };
             let deadline = Instant::now() + Duration::from_secs(10);
@@ -76,7 +76,7 @@ impl Daemon {
     }
 
     pub fn pid(&self) -> i32 {
-        self.child.id() as i32
+        self.child.id().cast_signed()
     }
 
     /// The first ftmd's process, to see whether it has exited.

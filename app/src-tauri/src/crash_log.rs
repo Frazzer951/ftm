@@ -56,7 +56,7 @@ fn timestamp(at: SystemTime) -> String {
     let secs = at.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
     let (days, rem) = (secs / 86_400, secs % 86_400);
     // Howard Hinnant's civil_from_days.
-    let z = days as i64 + 719_468;
+    let z = days.cast_signed() + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;

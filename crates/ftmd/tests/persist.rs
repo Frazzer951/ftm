@@ -294,7 +294,7 @@ fn attach_restores_the_terminal_when_killed() {
     for sig in [libc::SIGTERM, libc::SIGHUP] {
         let (mut child, _master, slave) = attach_on_loose_pty(&daemon.socket, ws.id);
         wait_for("raw mode", Duration::from_secs(10), || raw(&slave));
-        unsafe { libc::kill(child.id() as i32, sig) };
+        unsafe { libc::kill(child.id().cast_signed(), sig) };
         let status = child.wait().unwrap();
         assert_eq!(status.signal(), Some(sig));
         assert!(!raw(&slave), "terminal left raw after signal {sig}");

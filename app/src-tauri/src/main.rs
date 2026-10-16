@@ -57,10 +57,10 @@ type Rect = (i32, i32, u32, u32);
 /// Whether at least 100x20 px of the window's title bar (its top 30 px) is on some display, so it can be grabbed.
 fn title_bar_visible(window: Rect, displays: &[Rect]) -> bool {
     let (x, y, w, _) = window;
-    let (right, bottom) = (x + w as i32, y + 30);
+    let (right, bottom) = (x + w.cast_signed(), y + 30);
     displays.iter().any(|&(dx, dy, dw, dh)| {
-        let width = right.min(dx + dw as i32) - x.max(dx);
-        let height = bottom.min(dy + dh as i32) - y.max(dy);
+        let width = right.min(dx + dw.cast_signed()) - x.max(dx);
+        let height = bottom.min(dy + dh.cast_signed()) - y.max(dy);
         width >= 100 && height >= 20
     })
 }
@@ -69,7 +69,7 @@ fn title_bar_visible(window: Rect, displays: &[Rect]) -> bool {
 fn centered_on(window: Rect, display: Rect) -> Rect {
     let (dx, dy, dw, dh) = display;
     let (w, h) = (window.2.min(dw * 9 / 10), window.3.min(dh * 9 / 10));
-    (dx + ((dw - w) / 2) as i32, dy + ((dh - h) / 2) as i32, w, h)
+    (dx + ((dw - w) / 2).cast_signed(), dy + ((dh - h) / 2).cast_signed(), w, h)
 }
 
 /// Restored geometry can point at a display that is gone or rearranged, leaving the window where it cannot be seen
