@@ -21,6 +21,7 @@ fn spawn_command(conn: &mut Conn, cwd: &Path, command: Option<&str>) -> (Workspa
         copy_changes: false,
         brief: None,
         command: command.map(str::to_string),
+        claude_args: Vec::new(),
     })) else {
         panic!("expected spawned")
     };
@@ -190,6 +191,7 @@ fn unknown_kinds_and_statuses_are_refused() {
         copy_changes: false,
         brief: None,
         command: None,
+        claude_args: Vec::new(),
     }))));
     let list = conn.list();
     assert_eq!(list.len(), 1);
@@ -247,6 +249,7 @@ fn agents_without_status_hooks_are_not_left_starting() {
         copy_changes: false,
         brief: None,
         command: None,
+        claude_args: Vec::new(),
     })) else {
         panic!("expected spawned")
     };

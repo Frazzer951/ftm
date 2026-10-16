@@ -146,6 +146,7 @@ cargo build
 ./target/debug/ftmd &
 LEADER=$(./target/debug/ftm spawn agent --name leader)
 FTM_WORKSPACE_ID=$LEADER ./target/debug/ftm spawn agent --path ../some-repo --worktree fix/thing
+./target/debug/ftm spawn agent --name worker -- --model claude-sonnet-5-5 --permission-mode auto  # args after -- go to claude
 ./target/debug/ftm ls
 ./target/debug/ftm gc          # merged worktrees; --yes removes them and their branches
 ```

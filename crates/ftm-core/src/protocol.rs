@@ -109,13 +109,24 @@ pub struct SpawnRequest {
     /// before the field ignores it and opens a plain shell.
     #[serde(default)]
     pub command: Option<String>,
+    /// For an agent: extra arguments for Claude, each passed as its own argv entry after `-n <name>` and before the
+    /// brief. An ftmd from before the field ignores them and starts the agent without.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub claude_args: Vec<String>,
 }
+
+/// `SpawnRequest.claude_args` is honoured.
+pub const FEATURE_CLAUDE_ARGS: &str = "claude_args";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum Response {
     Pong {
         version: String,
+        /// What this ftmd supports beyond the base protocol (see `FEATURE_*`), so a client can refuse a request an
+        /// older ftmd would quietly ignore part of. Empty from daemons that predate it.
+        #[serde(default)]
+        features: Vec<String>,
     },
     Workspaces {
         workspaces: Vec<Workspace>,
@@ -188,6 +199,7 @@ mod tests {
                 copy_changes: false,
                 brief: None,
                 command: None,
+                claude_args: Vec::new(),
             })
         };
         let close = |remove_worktree| Request::Close {
@@ -218,11 +230,18 @@ mod tests {
             panic!()
         };
         assert_eq!(req.command, None);
-        let newer = old.replace(r#""brief":null"#, r#""brief":null,"command":"true","future":1"#);
+        assert!(req.claude_args.is_empty());
+        // Without extra arguments the request is what an older ftmd expects.
+        assert!(!serde_json::to_string(&Request::Spawn(req)).unwrap().contains("claude_args"));
+        let newer = old.replace(
+            r#""brief":null"#,
+            r#""brief":null,"command":"true","claude_args":["--model","m"],"future":1"#,
+        );
         let Request::Spawn(req) = serde_json::from_str(&newer).unwrap() else {
             panic!()
         };
         assert_eq!(req.command.as_deref(), Some("true"));
+        assert_eq!(req.claude_args, ["--model", "m"]);
     }
 
     /// An app keeps running across a hot upgrade of ftmd, so it must survive events, kinds and statuses added since.

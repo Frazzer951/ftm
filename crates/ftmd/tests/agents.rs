@@ -213,6 +213,57 @@ fn agents_nest_report_status_and_clean_up() {
     assert!(ftm(&bin, &socket, &["ls"]).contains("Task of unnamed-dir (unnamed-dir)"));
     ftm(&bin, &socket, &["close", "--id", &unnamed.to_string()]);
 
+    // Arguments after `--` reach Claude one argv entry each, after `-n` and before the brief, which `--` shields from
+    // an option taking several values. They are never shell code. Terminals refuse them.
+    let extra = ["--model", "m 1", "--add-dir", "$(whoami); 'x'"];
+    for (name, brief, want) in [
+        (
+            "extra",
+            true,
+            ["-n", "extra"]
+                .iter()
+                .chain(&extra)
+                .chain(&["--", BRIEF])
+                .copied()
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "extra-nobrief",
+            false,
+            ["-n", "extra-nobrief"].iter().chain(&extra).copied().collect(),
+        ),
+    ] {
+        let brief_path = root.join("brief.md");
+        let mut args = vec!["spawn", "agent", "--name", name, "--path", loose_dir.to_str().unwrap()];
+        if brief {
+            args.extend(["--brief", brief_path.to_str().unwrap()]);
+        }
+        args.push("--");
+        args.extend(extra);
+        let id = ftm(&bin, &socket, &args);
+        wait_for(&format!("{name} to start"), Duration::from_secs(20), || {
+            out.join(format!("{name}.ready")).exists()
+        });
+        assert_eq!(argv(&out, name), want);
+        ftm(&bin, &socket, &["close", "--id", &id]);
+    }
+    let refused = Command::new(&bin)
+        .args([
+            "spawn",
+            "terminal",
+            "--path",
+            loose_dir.to_str().unwrap(),
+            "--",
+            "--model",
+            "m",
+        ])
+        .env("FTM_SOCKET", &socket)
+        .env_remove("FTM_WORKSPACE_ID")
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("only apply to agents"));
+
     // `ftm rename` inside the agent retitles its own workspace; the spawn name stays for FTM_NAME and `claude -n`.
     assert_eq!(leader_ws.title.as_deref(), Some("fix the bug"));
     assert_eq!(leader_ws.name, "leader");
@@ -564,4 +615,32 @@ fn worktrees_copy_ignored_files() {
 
     drop(daemon);
     std::fs::set_permissions(repo.join(".claude/sealed"), std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// An ftmd from before `claude_args` would start a plain agent without them (for `--resume`, a new session), so the
+/// CLI refuses rather than sending them to one.
+#[test]
+fn claude_args_are_refused_by_an_older_ftmd() {
+    let root = temp_root("oldftmd");
+    let socket = root.join("old.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut request = String::new();
+        std::io::BufRead::read_line(&mut std::io::BufReader::new(&stream), &mut request).unwrap();
+        (&stream).write_all(b"{\"result\":\"pong\",\"version\":\"0.1.8\"}\n").unwrap();
+        request
+    });
+    let out = Command::new(ftm_bin())
+        .args(["spawn", "agent", "--path", root.to_str().unwrap(), "--", "--resume", "x"])
+        .env("FTM_SOCKET", &socket)
+        .env_remove("FTM_WORKSPACE_ID")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("ftmd 0.1.8 does not support claude arguments"));
+    assert!(
+        server.join().unwrap().contains(r#""op":"ping""#),
+        "only a ping reaches the old ftmd"
+    );
 }

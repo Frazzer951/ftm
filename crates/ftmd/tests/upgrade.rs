@@ -55,6 +55,7 @@ fn spawn_terminal(conn: &mut Conn, cwd: &Path) -> PaneId {
         copy_changes: false,
         brief: None,
         command: None,
+        claude_args: Vec::new(),
     })) else {
         panic!("expected spawned")
     };
@@ -81,7 +82,7 @@ fn echo(conn: &mut Conn, pane: PaneId, tag: &str) {
 
 fn ping(conn: &mut Conn) -> String {
     match conn.send(&Request::Ping) {
-        Response::Pong { version } => version,
+        Response::Pong { version, .. } => version,
         r => panic!("{r:?}"),
     }
 }
