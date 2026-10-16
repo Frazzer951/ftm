@@ -172,6 +172,9 @@ fn gc_reports_failed_removals() {
     let locked = worktree("locked");
     git(&repo, &["worktree", "lock", locked.to_str().unwrap()]);
     let fine = worktree("fine");
+    // A held ref lock makes `branch -D` fail after the worktree is gone.
+    let stuck = worktree("pre/stuck");
+    std::fs::write(repo.join(".git/refs/heads/pre/stuck.lock"), "").unwrap();
 
     let out = ftm(&["gc", "--yes", "--no-fetch"]);
     let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
@@ -180,4 +183,8 @@ fn gc_reports_failed_removals() {
     assert!(!stdout.contains("failed"), "{stdout}");
     assert!(stdout.contains("removed failgc/fine"), "{stdout}");
     assert!(locked.exists() && !fine.exists());
+    assert!(stdout.contains("removed failgc/pre/stuck"), "{stdout}");
+    assert!(stderr.contains("failed  failgc/pre/stuck  (worktree removed, but:"), "{stderr}");
+    assert!(!stuck.exists() && !data.join("ftm/worktrees/failgc/pre").exists());
+    assert!(!git(&repo, &["worktree", "list"]).contains("stuck"), "not pruned");
 }

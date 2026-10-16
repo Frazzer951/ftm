@@ -79,10 +79,14 @@ pub fn run(yes: bool, fetch: bool) -> Result<()> {
                         println!("remove  {}  ({why})", wt.shown);
                         continue;
                     }
-                    match remove(&repo, &wt.path, &branch, stale.as_deref(), &root) {
+                    match remove_worktree(&repo, &wt.path, &root) {
                         Ok(()) => {
                             removed_any = true;
-                            println!("removed {}  ({why})", wt.shown)
+                            println!("removed {}  ({why})", wt.shown);
+                            if let Err(e) = delete_branch(&repo, &branch, stale.as_deref()) {
+                                failed += 1;
+                                eprintln!("failed  {}  (worktree removed, but: {e:#})", wt.shown)
+                            }
                         },
                         Err(e) => {
                             failed += 1;
@@ -260,14 +264,9 @@ fn same_or_inside(path: &Path, dir: &Path) -> bool {
     canon(path).starts_with(canon(dir))
 }
 
-/// Never forced: `git worktree remove` refuses a dirty worktree. The branch is force-deleted since squash merges are
-/// not ancestors of the base; `verdict` has already checked it.
-fn remove(repo: &Path, wt: &Path, branch: &str, stale: Option<&str>, root: &Path) -> Result<()> {
+/// Never forced: `git worktree remove` refuses a dirty worktree.
+fn remove_worktree(repo: &Path, wt: &Path, root: &Path) -> Result<()> {
     git(repo, &["worktree", "remove", &wt.to_string_lossy()])?;
-    git(repo, &["branch", "-D", branch])?;
-    if let Some(tracking) = stale {
-        git(repo, &["update-ref", "-d", tracking])?;
-    }
     let mut dir = wt.parent();
     while let Some(d) = dir
         && d.starts_with(root)
@@ -275,6 +274,15 @@ fn remove(repo: &Path, wt: &Path, branch: &str, stale: Option<&str>, root: &Path
         && std::fs::remove_dir(d).is_ok()
     {
         dir = d.parent();
+    }
+    Ok(())
+}
+
+/// Force-deleted since squash merges are not ancestors of the base; `verdict` has already checked it.
+fn delete_branch(repo: &Path, branch: &str, stale: Option<&str>) -> Result<()> {
+    git(repo, &["branch", "-D", branch])?;
+    if let Some(tracking) = stale {
+        git(repo, &["update-ref", "-d", tracking])?;
     }
     Ok(())
 }
