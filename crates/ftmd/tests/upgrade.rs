@@ -3,7 +3,7 @@
 mod common;
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
-use common::{Conn, alive, start_daemon_logged, temp_root, wait_for, wait_for_output};
+use common::{Conn, alive, copy_executable, start_daemon_logged, temp_root, wait_for, wait_for_output, write_executable};
 use ftm_core::model::{Kind, PaneId, Workspace};
 use ftm_core::protocol::{Event, Request, Response, SpawnRequest};
 use std::os::unix::fs::PermissionsExt;
@@ -17,7 +17,7 @@ fn copy_ftmd(dir: &Path) -> PathBuf {
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let exe = bin.join("ftmd");
-    std::fs::copy(env!("CARGO_BIN_EXE_ftmd"), &exe).unwrap();
+    copy_executable(Path::new(env!("CARGO_BIN_EXE_ftmd")), &exe);
     exe
 }
 
@@ -30,7 +30,7 @@ fn replace(exe: &Path, write: impl FnOnce(&Path)) {
 }
 
 fn replace_with_script(exe: &Path, script: &str) {
-    replace(exe, |tmp| std::fs::write(tmp, format!("#!/bin/sh\n{script}\n")).unwrap());
+    replace(exe, |tmp| write_executable(tmp, format!("#!/bin/sh\n{script}\n").as_bytes()));
 }
 
 fn frame_version() -> u8 {
@@ -108,9 +108,7 @@ fn a_replaced_binary_takes_over_and_keeps_the_panes() {
     let pane = spawn_terminal(&mut conn, &dir);
     echo(&mut conn, pane, "before");
 
-    replace(&exe, |tmp| {
-        std::fs::copy(env!("CARGO_BIN_EXE_ftmd"), tmp).unwrap();
-    });
+    replace(&exe, |tmp| copy_executable(Path::new(env!("CARGO_BIN_EXE_ftmd")), tmp));
 
     wait_for("the new ftmd to restore", SWITCH_TIMEOUT, || {
         daemon.log().contains("restored")

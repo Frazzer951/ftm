@@ -3,7 +3,7 @@
 mod common;
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
-use common::{Conn, alive, ftm_bin, git, start_daemon, temp_root, wait_for, wait_until};
+use common::{Conn, alive, ftm_bin, git, start_daemon, temp_root, wait_for, wait_until, write_executable};
 use ftm_core::model::{Kind, Status, Workspace, WorkspaceId};
 use ftm_core::protocol::{Request, Response};
 use std::collections::HashMap;
@@ -92,8 +92,7 @@ fn agents_nest_report_status_and_clean_up() {
     std::fs::create_dir_all(root.join("home")).unwrap();
 
     let fake = root.join("fake-claude");
-    std::fs::write(&fake, FAKE_AGENT).unwrap();
-    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&fake, FAKE_AGENT.as_bytes());
     std::fs::write(
         config.join("ftm/repos/agentrepo.toml"),
         format!(

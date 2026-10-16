@@ -293,6 +293,25 @@ pub fn wait_for(what: &str, timeout: Duration, mut ok: impl FnMut() -> bool) {
     }
 }
 
+/// Executables are written by a child process: a fork from another test thread inherits any writable fd this process
+/// holds on the file until that child execs, and exec refuses a file open for writing (ETXTBSY).
+pub fn write_executable(path: &Path, contents: &[u8]) {
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", r#"cat > "$1" && chmod 755 "$1""#, "sh"])
+        .arg(path)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(contents).unwrap();
+    assert!(child.wait().unwrap().success(), "writing {}", path.display());
+}
+
+/// See `write_executable`.
+pub fn copy_executable(from: &Path, to: &Path) {
+    let status = Command::new("cp").arg(from).arg(to).status().unwrap();
+    assert!(status.success(), "copying {} to {}", from.display(), to.display());
+}
+
 /// `ftm` is another package, so its binary is not a `CARGO_BIN_EXE_*` here; build it into the same target dir.
 pub fn ftm_bin() -> PathBuf {
     let status = Command::new(env!("CARGO"))
