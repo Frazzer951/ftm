@@ -124,7 +124,8 @@ impl Drop for Daemon {
 
 /// macOS caps socket paths at ~104 bytes, so this stays in /tmp rather than the (long) per-user temp dir.
 /// Panes run `/bin/sh`, nothing FTM-related leaks in from the environment the tests run in (which may itself be an
-/// FTM pane), and the saved tree goes to a private state dir; `configure` adds the rest.
+/// FTM pane), and the saved tree, config and worktrees go to a private dir rather than the user's; `configure` adds the
+/// rest.
 pub fn start_daemon(name: &str, configure: impl FnOnce(&mut Command)) -> Daemon {
     start(name, Path::new(env!("CARGO_BIN_EXE_ftmd")), false, configure)
 }
@@ -141,7 +142,9 @@ fn start(name: &str, exe: &Path, logged: bool, configure: impl FnOnce(&mut Comma
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ftmd"));
     cmd.env("FTM_SOCKET", &socket)
         .env("SHELL", "/bin/sh")
-        .env("XDG_STATE_HOME", &state_home);
+        .env("XDG_STATE_HOME", &state_home)
+        .env("XDG_CONFIG_HOME", state_home.join("config"))
+        .env("XDG_DATA_HOME", state_home.join("data"));
     for key in [
         "FTM_WORKSPACE_ID",
         "FTM_PANE_ID",
