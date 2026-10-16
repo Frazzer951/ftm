@@ -11,7 +11,8 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     commit-message:
-      prefix: "Deps:"
+      prefix: "chore"
+      include: "scope"
     groups:
       tauri:
         patterns:
@@ -29,7 +30,8 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     commit-message:
-      prefix: "Deps:"
+      prefix: "chore"
+      include: "scope"
     groups:
       tauri:
         patterns:
@@ -45,7 +47,8 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     commit-message:
-      prefix: "Deps:"
+      prefix: "chore"
+      include: "scope"
     groups:
       minor-patch:
         update-types:
