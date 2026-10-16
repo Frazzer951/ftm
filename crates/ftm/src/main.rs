@@ -175,7 +175,9 @@ fn main() -> Result<()> {
                 worktree_branch: worktree,
                 base,
                 copy_changes,
-                brief: brief.map(std::fs::read_to_string).transpose()?,
+                brief: brief
+                    .map(|p| std::fs::read_to_string(&p).wrap_err_with(|| format!("reading {}", p.display())))
+                    .transpose()?,
                 command: None,
             })
         },
