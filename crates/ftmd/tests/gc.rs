@@ -202,3 +202,69 @@ fn gc_reports_failed_removals() {
     assert!(!stuck.exists() && !data.join("ftm/worktrees/failgc/pre").exists());
     assert!(!git(&repo, &["worktree", "list"]).contains("stuck"), "not pruned");
 }
+
+/// A repo made with `--separate-git-dir` is named after its git dir, from its main checkout and its worktrees alike,
+/// so ftmd and gc read the same config for it.
+#[test]
+fn gc_and_ftmd_agree_on_a_separate_git_dir_repo() {
+    let bin = ftm_bin();
+    let root = temp_root("gc-sep");
+    let (store, checkout, config, data) = (
+        root.join("sepstore.git"),
+        root.join("sepcheckout"),
+        root.join("config"),
+        root.join("data"),
+    );
+    std::fs::create_dir_all(config.join("ftm/repos")).unwrap();
+    std::fs::create_dir_all(root.join("home")).unwrap();
+    std::fs::write(config.join("ftm/repos/sepstore.toml"), "base = \"main\"\n").unwrap();
+    git(
+        &root,
+        &[
+            "init",
+            "-q",
+            "-b",
+            "main",
+            "--separate-git-dir",
+            store.to_str().unwrap(),
+            checkout.to_str().unwrap(),
+        ],
+    );
+    git(&checkout, &["config", "user.name", "t"]);
+    git(&checkout, &["config", "user.email", "t@t"]);
+    commit(&checkout, "f", "init");
+
+    let daemon = start_daemon("gc-sep", |c| {
+        c.env("HOME", root.join("home"))
+            .env("XDG_CONFIG_HOME", &config)
+            .env("XDG_DATA_HOME", &data);
+    });
+    let ftm = |args: &[&str]| {
+        let out = without_user_git_config(&mut Command::new(&bin))
+            .args(args)
+            .env("FTM_SOCKET", &daemon.socket)
+            .env("XDG_CONFIG_HOME", &config)
+            .env("XDG_DATA_HOME", &data)
+            .env_remove("FTM_WORKSPACE_ID")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "ftm {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let worktree = |from: &Path, branch: &str| -> PathBuf {
+        let id = ftm(&["spawn", "terminal", "--path", from.to_str().unwrap(), "--worktree", branch]);
+        ftm(&["close", "--id", id.trim()]);
+        let path = data.join("ftm/worktrees/sepstore").join(branch);
+        assert!(path.is_dir(), "{} missing", path.display());
+        path
+    };
+    let outer = worktree(&checkout, "outer");
+    let inner = worktree(&outer, "inner");
+    commit(&inner, "i", "inner work");
+    git(&checkout, &["merge", "-q", "--no-ff", "-m", "merge", "inner"]);
+
+    let out = ftm(&["gc", "--yes", "--no-fetch"]);
+    assert!(out.contains("removed sepstore/inner"), "{out}");
+    assert!(out.contains("removed sepstore/outer"), "{out}");
+    assert!(!inner.exists() && !outer.exists());
+}

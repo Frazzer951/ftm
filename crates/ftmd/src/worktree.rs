@@ -1,6 +1,6 @@
 use eyre::{Result, WrapErr, bail};
 use ftm_core::config::{CopyIgnored, DEFAULT_COPY_IGNORED_EXCLUDE, RepoConfig};
-use ftm_core::paths;
+use ftm_core::{paths, repo};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -25,21 +25,16 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
 }
 
-/// The checkout `dir` is in, and the main checkout of its repo: the parent of the common git dir, so a worktree made
-/// from inside another worktree is named, configured and removed by the repo it belongs to.
+/// The checkout `dir` is in, and the repo it belongs to, so a worktree made from inside another worktree is named,
+/// configured and removed by that repo.
 fn checkouts(dir: &Path) -> Option<(PathBuf, PathBuf)> {
     let src = PathBuf::from(git(dir, &["rev-parse", "--show-toplevel"]).ok()?);
-    let common = PathBuf::from(git(dir, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).ok()?);
-    let repo = match common.parent() {
-        Some(parent) if common.file_name().is_some_and(|n| n == ".git") => parent.to_path_buf(),
-        _ => src.clone(),
-    };
-    Some((src, repo))
+    Some((src, repo::main_repo(dir)?))
 }
 
 pub fn create(cwd: &Path, branch: &str, base: Option<&str>, copy_changes: bool) -> Result<Created> {
     let (src, repo) = checkouts(cwd).ok_or_else(|| eyre::eyre!("{} is not in a git repo", cwd.display()))?;
-    let name = repo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = repo::repo_name(&repo);
     let config = RepoConfig::load(&paths::repo_config_path(&name))?;
     let excludes = match &config.copy_ignored {
         CopyIgnored::All(true) => Excludes::new(&config.copy_ignored_exclude)?,
