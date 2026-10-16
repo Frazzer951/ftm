@@ -221,7 +221,7 @@ impl State {
         let id = PaneId::new_v4();
         let shell = shell();
         paths::private_dir(&self.holders, true).wrap_err_with(|| format!("creating {}", self.holders.display()))?;
-        let holder_socket = self.holders.join(format!("{id}.sock"));
+        let holder_socket = paths::holder_socket(&self.holders, id);
 
         let mut cmd = std::process::Command::new(own_exe()?);
         cmd.arg("pty-holder")
@@ -536,7 +536,13 @@ pub fn load(shared: &Shared) -> Result<()> {
         .collect();
     let (mut kept, mut dropped) = (0, 0);
     for (ws, pane) in panes {
-        let holder_socket = state.holders.join(format!("{pane}.sock"));
+        let holder_socket = [
+            paths::holder_socket(&state.holders, pane),
+            paths::legacy_holder_socket(&state.holders, pane),
+        ]
+        .into_iter()
+        .find(|p| p.exists())
+        .unwrap_or_else(|| paths::holder_socket(&state.holders, pane));
         let attached = UnixStream::connect(&holder_socket)
             .map_err(eyre::Report::from)
             .and_then(|stream| state.attach_holder(shared, ws, pane, holder_socket.clone(), stream, false));

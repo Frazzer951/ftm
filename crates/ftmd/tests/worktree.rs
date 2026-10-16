@@ -33,12 +33,7 @@ impl Env {
                 .env("XDG_DATA_HOME", root.join("data"));
             configure(c, &root);
         });
-        Env {
-            bin,
-            root,
-            repo,
-            daemon,
-        }
+        Env { bin, root, repo, daemon }
     }
 
     fn try_ftm(&self, args: &[&str]) -> Output {
@@ -145,8 +140,14 @@ fn failed_spawns_leave_nothing_behind() {
     git(&env.repo, &["commit", "-qam", "change f"]);
     std::fs::write(env.repo.join("f"), "edited\n").unwrap();
     let left_behind = |branch: &str| {
-        assert!(!env.worktrees().join("failrepo").join(branch).exists(), "{branch} worktree left");
-        assert!(!git(&env.repo, &["worktree", "list"]).contains(branch), "{branch} still registered");
+        assert!(
+            !env.worktrees().join("failrepo").join(branch).exists(),
+            "{branch} worktree left"
+        );
+        assert!(
+            !git(&env.repo, &["worktree", "list"]).contains(branch),
+            "{branch} still registered"
+        );
     };
 
     // The edits to f do not apply on `old` or `kept`, which have the original f.

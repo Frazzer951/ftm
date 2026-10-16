@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use uuid::Uuid;
 
 /// The dir the default socket lives in: `ftm`, or `ftm-nightly` in a build made with `FTM_CHANNEL=nightly`, so a
 /// nightly install runs its own daemon next to the stable one.
@@ -65,11 +66,23 @@ pub fn worktrees_dir() -> PathBuf {
         .join("worktrees")
 }
 
-/// Pane holder sockets for the daemon on `socket`: `<socket>.d/<pane>.sock`, short enough for the ~104 byte limit.
+/// Pane holder sockets for the daemon on `socket` live in `<socket>.d`.
 pub fn holders_dir(socket: &Path) -> PathBuf {
     let mut dir = socket.as_os_str().to_owned();
     dir.push(".d");
     PathBuf::from(dir)
+}
+
+/// A pane's holder socket in `holders`, named by the first 12 hex digits of its (random) id: a whole UUID pushes the
+/// path past macOS's 104 byte socket limit under `~/Library/Caches` for longer user names.
+pub fn holder_socket(holders: &Path, pane: Uuid) -> PathBuf {
+    let id = pane.simple().to_string();
+    holders.join(format!("{}.sock", &id[..12]))
+}
+
+/// The name holders started by FTM 0.1.8 and earlier listen on.
+pub fn legacy_holder_socket(holders: &Path, pane: Uuid) -> PathBuf {
+    holders.join(format!("{pane}.sock"))
 }
 
 /// The workspace tree saved by the daemon on `socket`, under `$XDG_STATE_HOME/ftm` (else `~/.local/state/ftm`),
@@ -145,6 +158,24 @@ mod tests {
         ));
         assert!(!socket_dir_is_ours(Path::new("/tmp")));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn holder_sockets_fit_the_socket_path_limit() {
+        // sun_path is 104 bytes on macOS (108 on Linux), including the NUL.
+        let user = "u".repeat(32);
+        for dir in ["ftm", "ftm-nightly"] {
+            for base in [format!("/Users/{user}/Library/Caches"), "/run/user/4294967295".to_string()] {
+                let socket = Path::new(&base).join(dir).join("ftmd.sock");
+                let holder = holder_socket(&holders_dir(&socket), Uuid::max());
+                assert!(holder.as_os_str().len() < 104, "{} is too long", holder.display());
+            }
+        }
+        let pane = Uuid::new_v4();
+        let holders = Path::new("/h");
+        assert_eq!(holder_socket(holders, pane), holder_socket(holders, pane));
+        assert_ne!(holder_socket(holders, pane), holder_socket(holders, Uuid::new_v4()));
+        assert_eq!(legacy_holder_socket(holders, pane), holders.join(format!("{pane}.sock")));
     }
 
     #[test]

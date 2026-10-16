@@ -110,6 +110,33 @@ fn ftmd_restart_keeps_sessions() {
     wait_for_output(&mut events, right, "right-2");
 }
 
+/// Holders started by an older ftmd listen on `<pane uuid>.sock`; a new ftmd still finds them.
+#[test]
+fn ftmd_restart_reattaches_holders_on_the_legacy_socket_name() {
+    let dir = temp_root("legacy");
+    let mut daemon = start_daemon("legacy", |_| {});
+    let mut req = Conn::open(&daemon.socket);
+    let ws = spawn_terminal(&mut req, &dir, "legacy");
+    let pane = ws.tabs[0].layout.panes()[0];
+    let (shell, holder) = pids(&mut req, pane, "before");
+    drop(req);
+
+    daemon.stop();
+    let legacy = ftm_core::paths::legacy_holder_socket(&daemon.holders(), pane);
+    std::fs::rename(ftm_core::paths::holder_socket(&daemon.holders(), pane), &legacy).unwrap();
+    daemon.restart();
+
+    let mut req = Conn::open(&daemon.socket);
+    assert_eq!(req.list().len(), 1, "pane dropped");
+    assert_eq!(pids(&mut req, pane, "after"), (shell, holder));
+    req.send(&Request::Close {
+        id: ws.id,
+        remove_worktree: false,
+    });
+    wait_for("holder to exit", Duration::from_secs(10), || !alive(holder));
+    let _ = std::fs::remove_file(&legacy);
+}
+
 /// A terminal's command (an update's `makepkg -si`) runs once: a restarted ftmd reattaches to the pane's shell rather
 /// than starting the pane again.
 #[test]
