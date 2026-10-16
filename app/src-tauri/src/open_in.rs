@@ -96,10 +96,7 @@ pub fn open(target: &str, path: &str) -> Result<(), String> {
         std::thread::spawn(move || {
             let mut chunk = [0; 4096];
             while let Ok(n @ 1..) = pipe.read(&mut chunk) {
-                stderr
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .extend_from_slice(&chunk[..n]);
+                keep_tail(&mut stderr.lock().unwrap_or_else(|e| e.into_inner()), &chunk[..n]);
             }
         });
     }
@@ -121,6 +118,16 @@ pub fn open(target: &str, path: &str) -> Result<(), String> {
             Ok(())
         },
     }
+}
+
+/// The end of a launcher's stderr, which says why it failed. A launched app can hold the pipe open and keep writing
+/// for as long as it runs.
+const STDERR_KEEP: usize = 8 * 1024;
+
+fn keep_tail(kept: &mut Vec<u8>, chunk: &[u8]) {
+    kept.extend_from_slice(chunk);
+    let excess = kept.len().saturating_sub(STDERR_KEEP);
+    kept.drain(..excess);
 }
 
 /// How long a launcher gets to report failure before it counts as having started the app.
@@ -231,6 +238,16 @@ fn encode_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keeps_only_the_end_of_stderr() {
+        let mut kept = Vec::new();
+        for n in 0..10_000u32 {
+            keep_tail(&mut kept, format!("line {n}\n").as_bytes());
+        }
+        assert_eq!(kept.len(), STDERR_KEEP);
+        assert!(kept.ends_with(b"line 9999\n"));
+    }
 
     #[test]
     fn target_ids_are_unique() {
