@@ -96,6 +96,16 @@ enum Command {
         #[arg(env = ENV_WORKSPACE_ID)]
         id: WorkspaceId,
     },
+    /// Color the workspace's sidebar row: red, orange, yellow, green, cyan, blue, purple, pink, gray or #rrggbb;
+    /// --clear removes it
+    Color {
+        #[arg(required_unless_present = "clear")]
+        color: Option<String>,
+        #[arg(long, conflicts_with = "color")]
+        clear: bool,
+        #[arg(long, env = ENV_WORKSPACE_ID)]
+        id: Option<WorkspaceId>,
+    },
     /// Print a pane's screen and scrollback as text, or with --raw its buffered output bytes (last 1 MiB)
     Capture {
         /// Pane id, or a workspace id for the first pane of its first tab
@@ -221,6 +231,11 @@ fn main() -> Result<()> {
         },
         Command::Pin { id } => Request::Pin { id, pinned: true },
         Command::Unpin { id } => Request::Pin { id, pinned: false },
+        Command::Color { color, id, .. } => Request::SetColor {
+            id: id
+                .ok_or_else(|| eyre::eyre!("no workspace: pass --id or run inside an FTM workspace (${ENV_WORKSPACE_ID})"))?,
+            color,
+        },
         Command::Capture { target, raw } => {
             let pane = resolve_pane(target)?;
             let Response::Output { data } = client::send(&Request::Capture { pane, raw })? else {
@@ -316,7 +331,7 @@ fn print_tree(ws: &Workspace, all: &[Workspace], depth: usize) {
         None => ws.cwd.display().to_string(),
     };
     println!(
-        "{:indent$}{} {:?} {:?}{}{} {}  {}",
+        "{:indent$}{} {:?} {:?}{}{}{} {}  {}",
         "",
         match ws.display_name() {
             shown if shown != ws.name => format!("{shown} ({})", ws.name),
@@ -326,6 +341,7 @@ fn print_tree(ws: &Workspace, all: &[Workspace], depth: usize) {
         ws.status,
         if ws.unseen { " (unseen)" } else { "" },
         if ws.pinned { " (pinned)" } else { "" },
+        ws.color.as_ref().map(|c| format!(" (color {c})")).unwrap_or_default(),
         location,
         ws.id,
         indent = depth * 2

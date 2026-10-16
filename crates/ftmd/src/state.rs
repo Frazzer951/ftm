@@ -2,8 +2,11 @@ use crate::frame::{self, Frame};
 use crate::worktree;
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use eyre::{Result, WrapErr, bail, eyre};
-use ftm_core::model::{Folder, Kind, Layout, PaneId, SplitDir, Status, Tab, TabId, Workspace, WorkspaceId, Worktree};
-use ftm_core::protocol::{Event, FEATURE_CLAUDE_ARGS, Request, Response, SpawnRequest};
+use ftm_core::model::{
+    Folder, Kind, Layout, PaneId, SplitDir, Status, Tab, TabId, WORKSPACE_COLORS, Workspace, WorkspaceId, Worktree,
+    workspace_color,
+};
+use ftm_core::protocol::{Event, FEATURE_CLAUDE_ARGS, FEATURE_WORKSPACE_COLORS, Request, Response, SpawnRequest};
 use ftm_core::{ENV_AGENT_CMD, ENV_NAME, ENV_PANE_ID, ENV_SOCKET, ENV_WORKSPACE_ID, paths};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -996,7 +999,7 @@ pub fn handle(shared: &Shared, request: Request, peer: Option<i32>) -> Response 
     let result = match request {
         Request::Ping => Ok(Response::Pong {
             version: env!("CARGO_PKG_VERSION").to_string(),
-            features: vec![FEATURE_CLAUDE_ARGS.to_string()],
+            features: [FEATURE_CLAUDE_ARGS, FEATURE_WORKSPACE_COLORS].map(String::from).to_vec(),
         }),
         Request::List => Ok(Response::Workspaces {
             workspaces: lock(shared).list(),
@@ -1025,6 +1028,7 @@ pub fn handle(shared: &Shared, request: Request, peer: Option<i32>) -> Response 
         Request::Close { id, remove_worktree } => close(shared, id, remove_worktree),
         Request::Rename { id, name } => rename(shared, id, &name),
         Request::Pin { id, pinned } => pin(shared, id, pinned),
+        Request::SetColor { id, color } => set_color(shared, id, color.as_deref()),
         Request::MarkSeen { id } => {
             let mut state = lock(shared);
             state
@@ -1149,6 +1153,7 @@ fn open_spawned(shared: &Shared, req: &SpawnRequest, created: Option<&worktree::
             auto_title: None,
             agent_pane: None,
             pinned: false,
+            color: None,
             kind: req.kind,
             cwd,
             worktree,
@@ -1191,7 +1196,9 @@ fn open_spawned(shared: &Shared, req: &SpawnRequest, created: Option<&worktree::
     }
     state.emit_workspaces();
     state.emit_replay(pane);
-    Ok(Response::Spawned { workspace })
+    Ok(Response::Spawned {
+        workspace: Box::new(workspace),
+    })
 }
 
 /// Kills the workspace's panes and moves its children up to its own parent.
@@ -1242,6 +1249,20 @@ fn pin(shared: &Shared, id: WorkspaceId, pinned: bool) -> Result<Response> {
         bail!("workspace {id} is nested under another workspace; only top-level workspaces can be pinned");
     }
     state.workspace_mut(id)?.pinned = pinned;
+    state.emit_workspaces();
+    Ok(Response::Ok)
+}
+
+/// An empty `color` clears it, like `None`.
+fn set_color(shared: &Shared, id: WorkspaceId, color: Option<&str>) -> Result<Response> {
+    let color = match color.map(str::trim).filter(|c| !c.is_empty()) {
+        None => None,
+        Some(c) => Some(
+            workspace_color(c).ok_or_else(|| eyre!("unknown color {c:?}: use {} or #rrggbb", WORKSPACE_COLORS.join(", ")))?,
+        ),
+    };
+    let mut state = lock(shared);
+    state.workspace_mut(id)?.color = color;
     state.emit_workspaces();
     Ok(Response::Ok)
 }

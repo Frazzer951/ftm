@@ -28,7 +28,7 @@ fn spawn_command(conn: &mut Conn, cwd: &Path, command: Option<&str>) -> (Workspa
     let Layout::Pane { id } = workspace.tabs[0].layout else {
         panic!("expected one pane")
     };
-    (workspace, id)
+    (*workspace, id)
 }
 
 fn holder_sockets(daemon: &Daemon) -> usize {

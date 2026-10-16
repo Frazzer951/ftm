@@ -10,7 +10,7 @@ import { LigaturesAddon } from "@xterm/addon-ligatures";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { chromeColors } from "./colors.ts";
+import { chromeColors, WORKSPACE_COLORS } from "./colors.ts";
 import { dropText } from "./drop.ts";
 import { StatusSounds, statusDot, stillFinished } from "./finish.ts";
 import { clipboardKey, type OptionAsMeta, optionIsMeta, paneKey } from "./keys.ts";
@@ -37,6 +37,8 @@ interface Workspace {
   title: string | null;
   auto_title: string | null;
   pinned: boolean;
+  /// A name from `WORKSPACE_COLORS` or `#rrggbb`; missing from an ftmd that predates colors.
+  color?: string | null;
   /// "unknown" for a kind or status from a newer ftmd than this app knows.
   kind: "terminal" | "agent" | "unknown";
   cwd: string;
@@ -883,6 +885,10 @@ function workspaceRow(ws: Workspace): HTMLElement {
   const row = document.createElement("div");
   row.className = "ws" + (ws.id === selected ? " selected" : "");
   row.dataset.id = ws.id;
+  if (ws.color) {
+    row.classList.add("colored");
+    row.style.setProperty("--ws-color", workspaceColor(ws.color));
+  }
   row.title = [displayName(ws) === ws.name ? ws.name : `${displayName(ws)} (${ws.name})`, ws.kind, ws.cwd].join("\n");
   const dot = document.createElement("span");
   Object.assign(dot, statusDot(ws));
@@ -927,10 +933,34 @@ function workspaceRow(ws: Workspace): HTMLElement {
     if (!ws.parent || !workspaces.some((w) => w.id === ws.parent)) {
       items.push([ws.pinned ? "Unpin" : "Pin", () => request({ op: "pin", id: ws.id, pinned: !ws.pinned }).catch(console.error)]);
     }
+    items.push(["Color…", () => showColorMenu(e.clientX, e.clientY, ws)]);
     items.push(...openInItems(ws.cwd), ["Close", () => closeWorkspace(ws.id)]);
     showMenu(e.clientX, e.clientY, items);
   };
   return row;
+}
+
+/// The CSS color for a workspace's `color`: the theme's take on a palette name, or the hex as given.
+const workspaceColor = (color: string) => (color.startsWith("#") ? color : `var(--ws-${color})`);
+
+function setColor(ws: Workspace, color: string | null) {
+  request({ op: "set_color", id: ws.id, color }).catch((err) => {
+    console.error(err);
+    notice("color", `Could not color ${displayName(ws)}: ${err}`, "error");
+  });
+}
+
+/// The palette, plus None; `ftm color '#rrggbb'` sets any other color.
+function showColorMenu(x: number, y: number, ws: Workspace) {
+  showMenu(x, y, [
+    ...WORKSPACE_COLORS.map((c): MenuItem => [
+      c[0].toUpperCase() + c.slice(1) + (ws.color === c ? " ✓" : ""),
+      () => setColor(ws, c),
+      workspaceColor(c),
+    ]),
+    ...(ws.color?.startsWith("#") ? [[`${ws.color} ✓`, () => {}, ws.color] as MenuItem] : []),
+    [ws.color ? "None" : "None ✓", () => setColor(ws, null)],
+  ]);
 }
 
 interface OpenTarget {
@@ -1188,13 +1218,22 @@ function startRename(id: Id) {
   input.select();
 }
 
-function showMenu(x: number, y: number, items: [string, () => void][]) {
+/// A menu entry: its label, what it does, and optionally a color swatch shown before the label.
+type MenuItem = [string, () => void, string?];
+
+function showMenu(x: number, y: number, items: MenuItem[]) {
   closeMenu();
   const menu = document.createElement("div");
   menu.id = "menu";
-  for (const [label, action] of items) {
+  for (const [label, action, swatch] of items) {
     const item = document.createElement("button");
     item.textContent = label;
+    if (swatch) {
+      const chip = document.createElement("span");
+      chip.className = "swatch";
+      chip.style.background = swatch;
+      item.prepend(chip);
+    }
     item.onclick = () => {
       closeMenu();
       action();

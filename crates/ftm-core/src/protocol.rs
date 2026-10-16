@@ -33,6 +33,12 @@ pub enum Request {
         id: WorkspaceId,
         pinned: bool,
     },
+    /// Sets the workspace's sidebar color, a name from `WORKSPACE_COLORS` or `#rrggbb`; `None` clears it.
+    SetColor {
+        id: WorkspaceId,
+        #[serde(default)]
+        color: Option<String>,
+    },
     /// Clears the workspace's `unseen` flag: someone has looked at it.
     MarkSeen {
         id: WorkspaceId,
@@ -117,6 +123,8 @@ pub struct SpawnRequest {
 
 /// `SpawnRequest.claude_args` is honoured.
 pub const FEATURE_CLAUDE_ARGS: &str = "claude_args";
+/// `Request::SetColor` and `Workspace.color`.
+pub const FEATURE_WORKSPACE_COLORS: &str = "workspace_colors";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
@@ -138,7 +146,7 @@ pub enum Response {
         order: Vec<PathBuf>,
     },
     Spawned {
-        workspace: Workspace,
+        workspace: Box<Workspace>,
     },
     Pane {
         pane: PaneId,

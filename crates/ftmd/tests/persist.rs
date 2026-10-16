@@ -30,7 +30,7 @@ fn spawn_terminal(conn: &mut Conn, cwd: &Path, name: &str) -> Workspace {
     })) else {
         panic!("expected spawned")
     };
-    workspace
+    *workspace
 }
 
 fn capture(conn: &mut Conn, pane: PaneId) -> String {
