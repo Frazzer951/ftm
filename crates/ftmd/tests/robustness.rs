@@ -5,7 +5,7 @@ mod common;
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use common::{Conn, Daemon, start_daemon, temp_root, wait_for};
-use ftm_core::model::{Kind, Layout, PaneId, Workspace};
+use ftm_core::model::{Kind, Layout, PaneId, Status, Workspace};
 use ftm_core::protocol::{Request, Response, SpawnRequest};
 use std::path::Path;
 use std::time::Duration;
@@ -144,4 +144,33 @@ fn running_out_of_descriptors_does_not_stop_ftmd() {
     assert!(daemon.child().try_wait().unwrap().is_none(), "ftmd exited");
     let mut conn = Conn::open(&daemon.socket);
     assert!(matches!(conn.send(&Request::Ping), Response::Pong { .. }));
+}
+
+/// `Unknown` only exists so a client can read a newer ftmd; ftmd never takes one in, so it never hands one out.
+#[test]
+fn unknown_kinds_and_statuses_are_refused() {
+    let dir = temp_root("unknown");
+    let daemon = start_daemon("unknown", |_| {});
+    let mut conn = Conn::open(&daemon.socket);
+    let (ws, _) = spawn_command(&mut conn, &dir, None);
+    let refused = |r: Option<Response>| matches!(r, Some(Response::Error { .. }));
+    assert!(refused(conn.try_send(&Request::SetStatus {
+        id: ws.id,
+        status: Status::Unknown,
+        background_agents: 0,
+    })));
+    assert!(refused(conn.try_send(&Request::Spawn(SpawnRequest {
+        kind: Kind::Unknown,
+        name: None,
+        parent: None,
+        cwd: dir.to_path_buf(),
+        worktree_branch: None,
+        base: None,
+        copy_changes: false,
+        brief: None,
+        command: None,
+    }))));
+    let list = conn.list();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].status, Status::Starting);
 }

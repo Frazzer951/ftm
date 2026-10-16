@@ -764,7 +764,7 @@ pub fn handle(shared: &Shared, request: Request) -> Response {
             id,
             status,
             background_agents,
-        } => {
+        } if status != Status::Unknown => {
             let mut state = lock(shared);
             state
                 .workspace_mut(id)
@@ -817,6 +817,7 @@ pub fn handle(shared: &Shared, request: Request) -> Response {
         Request::Input { pane, data } => input(shared, pane, &data),
         Request::Capture { pane, raw } => capture(shared, pane, raw),
         Request::Resize { pane, cols, rows } => resize(shared, pane, cols, rows),
+        Request::SetStatus { .. } => Err(eyre!("unknown status")),
         Request::Subscribe | Request::Attach { .. } => Err(eyre!("handled by the connection")),
     };
     result.unwrap_or_else(|e| Response::Error {
@@ -835,6 +836,9 @@ fn set_status(ws: &mut Workspace, status: Status, background_agents: u32) {
 }
 
 fn spawn(shared: &Shared, req: SpawnRequest) -> Result<Response> {
+    if req.kind == Kind::Unknown {
+        bail!("unknown workspace kind");
+    }
     if req.command.is_some() && req.kind == Kind::Agent {
         bail!("a command only applies to terminals");
     }
