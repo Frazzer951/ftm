@@ -8,6 +8,7 @@ use ftm_core::protocol::{Event, Request, Response};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::RecvTimeoutError;
 use std::time::Duration;
 
 /// Ctrl+]. Followed by `d` it detaches; pressed twice it sends one to the pane.
@@ -128,8 +129,11 @@ pub fn run(pane: PaneId) -> Result<()> {
         if WINCH.swap(false, Ordering::Relaxed) {
             resize(&mut requests)?;
         }
-        let Ok(bytes) = rx.recv_timeout(Duration::from_millis(50)) else {
-            continue;
+        let bytes = match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(bytes) => bytes,
+            Err(RecvTimeoutError::Timeout) => continue,
+            // Stdin is gone, so nothing can be typed or detach this view.
+            Err(RecvTimeoutError::Disconnected) => break true,
         };
         let mut send = Vec::with_capacity(bytes.len());
         let mut detach = false;
@@ -157,6 +161,12 @@ pub fn run(pane: PaneId) -> Result<()> {
         }
     };
     drop(raw);
-    println!("\r\n[{} pane {pane}]", if detached { "detached from" } else { "exited:" });
+    // Stdout may be gone with stdin.
+    let _ = writeln!(
+        std::io::stdout(),
+        "\r\n[{} pane {pane}]",
+        if detached { "detached from" } else { "exited:" }
+    );
     std::process::exit(0);
 }
+

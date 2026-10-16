@@ -8,6 +8,7 @@ use ftm_core::model::{Kind, PaneId, SplitDir, Status, Workspace, WorkspaceId};
 use ftm_core::protocol::{Event, Request, Response, SpawnRequest};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::io::{Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -214,6 +215,65 @@ fn panes_whose_holder_died_are_dropped() {
     events.send(&Request::Subscribe);
     req.type_in(survivor, "echo still-$((2+2))\n");
     wait_for_output(&mut events, survivor, "still-4");
+}
+
+/// `ftm attach` with stdin and stdout on a terminal that is not its controlling one, so hanging that terminal up
+/// ends its input without a SIGHUP. Returns the child and the terminal's master and slave.
+fn attach_on_loose_pty(socket: &Path, ws: WorkspaceId) -> (std::process::Child, OwnedFd, OwnedFd) {
+    let (mut master, mut slave) = (0, 0);
+    let size = libc::winsize {
+        ws_row: 24,
+        ws_col: 80,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let rc = unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null(), &size) };
+    assert_eq!(rc, 0);
+    for fd in [master, slave] {
+        unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+    }
+    let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+    let child = std::process::Command::new(ftm_bin())
+        .args(["attach", &ws.to_string()])
+        .env("FTM_SOCKET", socket)
+        .stdin(slave.try_clone().unwrap())
+        .stdout(slave.try_clone().unwrap())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    (child, master, slave)
+}
+
+fn raw(fd: &OwnedFd) -> bool {
+    let mut t: libc::termios = unsafe { std::mem::zeroed() };
+    assert_eq!(unsafe { libc::tcgetattr(fd.as_raw_fd(), &mut t) }, 0);
+    t.c_lflag & libc::ICANON == 0
+}
+
+#[test]
+fn attach_ends_when_its_input_is_gone() {
+    let dir = temp_root("attach-eof");
+    let daemon = start_daemon("attach-eof", |_| {});
+    let mut req = Conn::open(&daemon.socket);
+    let ws = spawn_terminal(&mut req, &dir, "eof");
+    let (child, master, slave) = attach_on_loose_pty(&daemon.socket, ws.id);
+    wait_for("raw mode", Duration::from_secs(10), || raw(&slave));
+    // Killed on drop, so a failed check does not leave it spinning.
+    struct Reaped(std::process::Child);
+    impl Drop for Reaped {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut child = Reaped(child);
+    drop((master, slave));
+    let mut status = None;
+    wait_for("attach to exit", Duration::from_secs(10), || {
+        status = child.0.try_wait().unwrap();
+        status.is_some()
+    });
+    assert!(status.unwrap().success());
 }
 
 #[test]
