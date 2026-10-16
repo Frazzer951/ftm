@@ -6,7 +6,7 @@ mod common;
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use common::{Conn, Daemon, start_daemon, temp_root, wait_for};
 use ftm_core::model::{Kind, Layout, PaneId, Status, Workspace};
-use ftm_core::protocol::{Request, Response, SpawnRequest};
+use ftm_core::protocol::{Event, Request, Response, SpawnRequest};
 use std::path::Path;
 use std::time::Duration;
 
@@ -173,4 +173,34 @@ fn unknown_kinds_and_statuses_are_refused() {
     let list = conn.list();
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].status, Status::Starting);
+}
+
+/// A client drops output for panes it does not know yet, so a new pane's first output (what its holder had before
+/// ftmd connected) must come after the layout that adds it.
+#[test]
+fn a_new_pane_is_announced_before_its_output() {
+    let dir = temp_root("announce");
+    let daemon = start_daemon("announce", |_| {});
+    let mut events = Conn::open(&daemon.socket);
+    events.send(&Request::Subscribe);
+    let mut conn = Conn::open(&daemon.socket);
+    let (_, pane) = spawn_command(&mut conn, &dir, Some("echo early-$((1+1)); sleep 100"));
+
+    let mut announced = false;
+    let mut seen = String::new();
+    while !seen.contains("early-2") {
+        match events.line() {
+            Event::Workspaces { workspaces } => {
+                announced |= workspaces.iter().any(|w| w.tabs.iter().any(|t| t.layout.contains(pane)))
+            },
+            Event::Output { pane: p, data, reset } if p == pane => {
+                assert!(announced, "output for pane {pane} before any layout had it");
+                if reset {
+                    seen.clear();
+                }
+                seen.push_str(&String::from_utf8_lossy(&B64.decode(data).unwrap()));
+            },
+            _ => {},
+        }
+    }
 }

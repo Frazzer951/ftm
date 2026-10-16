@@ -326,7 +326,8 @@ impl State {
                 exited: false,
             },
         );
-        self.pane_output(id, &replay, true);
+        // Sent once the pane is in a layout (`emit_replay`): a client drops output for panes it does not know.
+        self.pane_output(id, &replay, false);
         let shared = shared.clone();
         std::thread::Builder::new()
             .name(format!("pane-{id}"))
@@ -920,6 +921,7 @@ fn spawn(shared: &Shared, req: SpawnRequest) -> Result<Response> {
         state.remember_folder(req.cwd.clone());
     }
     state.emit_workspaces();
+    state.emit_replay(pane);
     Ok(Response::Spawned { workspace })
 }
 
@@ -983,6 +985,7 @@ fn new_tab(shared: &Shared, workspace: WorkspaceId) -> Result<Response> {
         layout: Layout::Pane { id: pane },
     });
     state.emit_workspaces();
+    state.emit_replay(pane);
     Ok(Response::Pane { pane })
 }
 
@@ -997,6 +1000,7 @@ fn split(shared: &Shared, target: PaneId, dir: SplitDir) -> Result<Response> {
         bail!("pane {target} is not in a tab");
     }
     state.emit_workspaces();
+    state.emit_replay(pane);
     Ok(Response::Pane { pane })
 }
 
