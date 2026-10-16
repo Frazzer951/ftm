@@ -662,6 +662,8 @@ fn reconnect(shared: &Shared, id: PaneId) -> Result<Option<UnixStream>> {
     let (read, (rows, cols), replay) = handshake(&stream)?;
     let mut state = lock(shared);
     let Some(pane) = state.panes.get_mut(&id) else {
+        // Closed while this connection was being made, which may have replaced the one `reap` sent its Kill on.
+        let _ = frame::write(&mut &stream, &Frame::Kill);
         return Ok(None);
     };
     pane.holder = holder_writer(id, stream)?;
@@ -722,10 +724,23 @@ fn close_pane(shared: &Shared, id: PaneId, why: &str) {
 
 /// Asks the holder to kill everything on the pane's terminal (it does the SIGHUP, then SIGKILL after 2s), and
 /// returns a handle that finishes once the holder is gone, i.e. no process of the pane is left.
+///
+/// The Kill also goes over a connection of its own: the pane's may be one the holder already hung up on, with
+/// `read_loop` yet to reconnect. A new connection replaces the old one and is read until the holder exits, so the
+/// replay and output it gets meanwhile never block the holder.
 fn reap(pane: Pane) -> std::thread::JoinHandle<()> {
     let _ = pane.holder.send(Frame::Kill);
     std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(10);
+        if let Ok(mut stream) = UnixStream::connect(&pane.holder_socket)
+            && frame::write(&mut stream, &Frame::Kill).is_ok()
+        {
+            let mut buf = vec![0u8; 64 << 10];
+            while let Some(left) = deadline.checked_duration_since(Instant::now())
+                && stream.set_read_timeout(Some(left.max(Duration::from_millis(1)))).is_ok()
+                && matches!(std::io::Read::read(&mut stream, &mut buf), Ok(n) if n > 0)
+            {}
+        }
         while pane.holder_socket.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(25));
         }

@@ -259,3 +259,68 @@ fn agents_without_status_hooks_are_not_left_starting() {
     assert_eq!(conn.list()[0].status, Status::Idle);
     let _ = std::fs::remove_dir(&settings);
 }
+
+/// SIGKILLs the session a test's pane runs in, if the test failed before closing it.
+struct KillSession(std::path::PathBuf);
+
+impl Drop for KillSession {
+    fn drop(&mut self) {
+        if let Some(pid) = std::fs::read_to_string(&self.0)
+            .ok()
+            .and_then(|s| s.trim().parse::<i32>().ok())
+        {
+            // SAFETY: getsid takes no pointers.
+            let sid = unsafe { libc::getsid(pid) };
+            if sid > 0 {
+                let _ = std::process::Command::new("pkill")
+                    .args(["-KILL", "-s", &sid.to_string()])
+                    .status();
+            }
+        }
+    }
+}
+
+/// Stops ftmd until the holder of a flooding pane hangs up on it, and has `queued` sent while it is stopped.
+fn stall_until_hung_up(daemon: &Daemon, dir: &Path, queued: Request) -> std::thread::JoinHandle<Option<Response>> {
+    let pid = daemon.pid();
+    // SAFETY: kill takes no pointers.
+    unsafe { libc::kill(pid, libc::SIGSTOP) };
+    wait_for("the holder to stop waiting on ftmd", Duration::from_secs(30), || {
+        dir.join("flooded").exists()
+    });
+    let socket = daemon.socket.clone();
+    let (sent, wait) = std::sync::mpsc::channel();
+    let request = std::thread::spawn(move || {
+        let mut conn = Conn::open(&socket);
+        conn.set_read_timeout(Duration::from_secs(30));
+        let _ = sent.send(());
+        conn.try_send(&queued)
+    });
+    wait.recv().unwrap();
+    // Queued in ftmd's socket before it runs again.
+    std::thread::sleep(Duration::from_millis(200));
+    // SAFETY: kill takes no pointers.
+    unsafe { libc::kill(pid, libc::SIGCONT) };
+    request
+}
+
+/// A pane closed while ftmd is reconnecting to its holder still has its processes killed, rather than the Kill going
+/// to the connection the holder already hung up on.
+#[test]
+fn closing_a_pane_whose_holder_hung_up_kills_it() {
+    let dir = temp_root("close-hung-up");
+    let daemon = start_daemon("close-hung-up", |_| {});
+    let mut conn = Conn::open(&daemon.socket);
+    let _cleanup = KillSession(dir.join("pid"));
+    let (_, pane) = spawn_command(
+        &mut conn,
+        &dir,
+        Some("echo $$ > pid; sleep 1; yes | head -c 3000000; touch flooded; sleep 300"),
+    );
+
+    let closed = stall_until_hung_up(&daemon, &dir, Request::ClosePane { pane });
+    assert!(matches!(closed.join().unwrap(), Some(Response::Ok)));
+    wait_for("the pane's holder to exit", Duration::from_secs(15), || {
+        holder_sockets(&daemon) == 0
+    });
+}
