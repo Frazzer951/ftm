@@ -124,6 +124,12 @@ policy, which the system cannot activate, then becomes an accessory without a Do
 then stays hidden, so it is no use for screenshots; any launch that shows a window can take focus. Frontend errors are
 printed to the terminal running the app as `[frontend] ...`.
 
+## Claude in a terminal workspace
+
+Agent workspaces report Claude's status through ftm's hooks. A Claude session started by hand in a terminal workspace
+only reports (sidebar dot, needs-input count, sounds) when launched as `claude --settings "$FTM_CLAUDE_SETTINGS" ...`;
+every pane has that variable set. A plain `claude` reports nothing, and the terminal keeps no dot.
+
 ## Repo config
 
 `~/.config/ftm/repos/<repo>.toml` sets how FTM makes worktrees of a repo:

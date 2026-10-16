@@ -12,7 +12,7 @@ import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { chromeColors } from "./colors.ts";
 import { dropText } from "./drop.ts";
-import { StatusSounds, stillFinished } from "./finish.ts";
+import { StatusSounds, statusDot, stillFinished } from "./finish.ts";
 import { clipboardKey, type OptionAsMeta, optionIsMeta, paneKey } from "./keys.ts";
 import { KeyLayout, type KeyProtocol, kittyKeyboard } from "./kitty.ts";
 import { replyFilter } from "./replies.ts";
@@ -885,8 +885,7 @@ function workspaceRow(ws: Workspace): HTMLElement {
   row.dataset.id = ws.id;
   row.title = [displayName(ws) === ws.name ? ws.name : `${displayName(ws)} (${ws.name})`, ws.kind, ws.cwd].join("\n");
   const dot = document.createElement("span");
-  dot.className = ws.kind !== "agent" ? "dot none" : ws.unseen ? "dot unseen" : `dot ${ws.status}`;
-  dot.title = ws.kind !== "agent" ? "" : ws.unseen ? "done, unseen" : ws.status.replace("_", " ");
+  Object.assign(dot, statusDot(ws));
   const text = document.createElement("div");
   text.className = "text";
   const name = document.createElement("span");
@@ -1214,7 +1213,7 @@ function closeMenu() {
 function descendantsNeedingInput(id: Id): number {
   return workspaces
     .filter((w) => w.parent === id)
-    .reduce((n, w) => n + (w.kind === "agent" && w.status === "needs_input" ? 1 : 0) + descendantsNeedingInput(w.id), 0);
+    .reduce((n, w) => n + (w.status === "needs_input" ? 1 : 0) + descendantsNeedingInput(w.id), 0);
 }
 
 const statusSounds = new StatusSounds<Workspace>();
