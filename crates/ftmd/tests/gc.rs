@@ -130,5 +130,4 @@ fn gc_removes_only_merged_clean_closed_worktrees() {
     assert!(!list.contains("squashed") && list.contains("active"), "{list}");
 
     drop(daemon);
-    let _ = std::fs::remove_dir_all(&root);
 }

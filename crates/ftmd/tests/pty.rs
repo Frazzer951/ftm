@@ -144,7 +144,6 @@ fn close_kills_foreground_job_and_removes_worktree() {
     assert!(!wt.exists());
     assert!(!root.join("data/ftm/worktrees/repo/chore").exists());
     assert!(git(&repo, &["branch", "--list", "chore/wt"]).is_empty());
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// A relaunched app resizes to the size the pane already has, which on its own would not make a TUI repaint over the
@@ -194,7 +193,6 @@ fn resize_to_the_same_size_makes_the_pane_repaint() {
     resize(&mut req);
     let out = wait_for_output(&mut events, pane, "w40 120w");
     assert!(out.contains("w40 119w"), "no narrower size first: {out:?}");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Enter has to reach the pane in a read of its own, or Claude Code takes it as part of a pasted burst.
@@ -260,7 +258,6 @@ fn send_enter_presses_enter_in_its_own_read() {
     assert_eq!(reads(3), ["hello world", "\r", "\r"]);
     send(&["no enter"]);
     assert_eq!(reads(4)[3], "no enter");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A terminal's command runs under `sh` whatever the login shell, then the pane stays open on a shell.

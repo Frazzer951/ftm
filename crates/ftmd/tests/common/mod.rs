@@ -4,7 +4,7 @@
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use ftm_core::model::{PaneId, Workspace};
 use ftm_core::protocol::{Event, Request, Response};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -15,7 +15,7 @@ pub struct Daemon {
     child: Child,
     pub socket: PathBuf,
     envs: Vec<(OsString, Option<OsString>)>,
-    state_home: PathBuf,
+    state_home: TempRoot,
     exe: PathBuf,
     /// ftmd's output, kept only by `start_daemon_logged`.
     log: Option<PathBuf>,
@@ -118,7 +118,7 @@ impl Drop for Daemon {
         self.stop();
         let _ = std::fs::remove_file(&self.socket);
         let _ = std::fs::remove_dir_all(&holders);
-        let _ = std::fs::remove_dir_all(&self.state_home);
+        let _ = std::fs::remove_file(self.socket.with_extension("claude-settings.json"));
     }
 }
 
@@ -274,15 +274,42 @@ pub fn alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
-/// A fresh scratch dir under the (canonicalized) temp dir.
-pub fn temp_root(name: &str) -> PathBuf {
+/// A fresh scratch dir under the (canonicalized) temp dir, removed on drop.
+pub fn temp_root(name: &str) -> TempRoot {
     let root = std::env::temp_dir()
         .canonicalize()
         .unwrap()
         .join(format!("ftmd-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
-    root
+    TempRoot(root)
+}
+
+pub struct TempRoot(PathBuf);
+
+impl std::ops::Deref for TempRoot {
+    type Target = PathBuf;
+    fn deref(&self) -> &PathBuf {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for TempRoot {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<OsStr> for TempRoot {
+    fn as_ref(&self) -> &OsStr {
+        self.0.as_os_str()
+    }
+}
+
+impl Drop for TempRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 pub fn wait_for(what: &str, timeout: Duration, mut ok: impl FnMut() -> bool) {

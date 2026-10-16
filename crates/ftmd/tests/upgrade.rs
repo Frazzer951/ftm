@@ -135,7 +135,6 @@ fn a_replaced_binary_takes_over_and_keeps_the_panes() {
     assert!(matches!(events.send(&Request::Subscribe), Response::Ok));
     conn.type_in(pane, "echo after-$((40+3))\n");
     wait_for_output(&mut events, pane, "after-43");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -165,7 +164,6 @@ fn a_build_with_another_frame_version_does_not_take_over() {
     wait_blocked(&mut late);
 
     drop(daemon);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -203,7 +201,6 @@ fn a_build_from_another_channel_does_not_take_over() {
     echo(&mut conn, pane, "after");
 
     drop(daemon);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -235,5 +232,4 @@ fn a_new_ftmd_that_fails_to_start_leaves_the_old_one_serving() {
     ping(&mut fresh);
 
     drop(daemon);
-    let _ = std::fs::remove_dir_all(&dir);
 }
