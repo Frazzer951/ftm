@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { clipboardKey, optionIsMeta, paneKey } from "../src/keys.ts";
-import { DISAMBIGUATE, encodeKey, kittyKeyboard, type KeyEvent } from "../src/kitty.ts";
+import { DISAMBIGUATE, encodeKey, KeyLayout, kittyKeyboard, type KeyEvent } from "../src/kitty.ts";
 
 type Handler = (params: (number | number[])[]) => boolean;
 
@@ -190,6 +190,63 @@ test("Alt and Shift follow the layout, not the physical key", () => {
   assert.equal(enc(key("?", "Slash", { ctrlKey: true, shiftKey: true }), 0b101), "\x1b[47:63;6u");
 });
 
+/// A layout learned from typing each `[code, unshifted, shifted]` with and without Shift.
+function learned(keys: [string, string, string][]): KeyLayout {
+  const layout = new KeyLayout();
+  for (const [code, plain, shifted] of keys) {
+    layout.learn(key(plain, code));
+    layout.learn(key(shifted, code, { shiftKey: true }));
+  }
+  return layout;
+}
+
+const dvorak = learned([
+  ["KeyS", "o", "O"],
+  ["KeyF", "u", "U"],
+  ["Minus", "[", "{"],
+]);
+const qwertz = learned([
+  ["KeyY", "z", "Z"],
+  ["KeyZ", "y", "Y"],
+  ["Digit5", "5", "%"],
+  ["Minus", "ß", "?"],
+]);
+
+test("a Meta Option is unwound to the key in the active layout, once it has been typed", () => {
+  const enc = (e: KeyEvent, layout: KeyLayout, flags = DISAMBIGUATE) => encodeKey(e, flags, true, true, layout);
+  assert.equal(enc(key("ø", "KeyS", { altKey: true }), dvorak), "\x1b[111;3u");
+  assert.equal(enc(key("Ø", "KeyS", { altKey: true, shiftKey: true }), dvorak, 0b101), "\x1b[111:79;4u");
+  assert.equal(enc(key("“", "Minus", { altKey: true }), dvorak), "\x1b[91;3u");
+  assert.equal(enc(key("¥", "KeyZ", { altKey: true }), qwertz), "\x1b[121;3u");
+  // German Option+5 composes an ASCII "[", which is still not the key's own character.
+  assert.equal(enc(key("[", "Digit5", { altKey: true }), qwertz), "\x1b[53;3u");
+  // A key not typed yet falls back to the US layout.
+  assert.equal(enc(key("∂", "KeyD", { altKey: true }), dvorak), "\x1b[100;3u");
+});
+
+test("a Meta Option that leaves a letter alone did not compose, so the letter counts", () => {
+  const enc = (e: KeyEvent, flags = DISAMBIGUATE) => encodeKey(e, flags, true, true, new KeyLayout());
+  assert.equal(enc(key("o", "KeyS", { altKey: true })), "\x1b[111;3u");
+  assert.equal(enc(key("O", "KeyS", { altKey: true, shiftKey: true }), 0b101), "\x1b[111:79;4u");
+});
+
+test("only keys typed with at most Shift held teach the layout, and a changed key drops what was known of it", () => {
+  const layout = new KeyLayout();
+  layout.learn(key("s", "KeyS", { ctrlKey: true }));
+  layout.learn(key("ß", "KeyS", { altKey: true }));
+  layout.learn({ ...key("@", "KeyQ"), getModifierState: (m: string) => m === "AltGraph" });
+  layout.learn(key("Dead", "Quote"));
+  layout.learn(key("1", "Numpad1"));
+  layout.learn({ ...key("x", "KeyX"), type: "keyup" });
+  for (const code of ["KeyS", "KeyQ", "Quote", "Numpad1", "KeyX"]) assert.equal(layout.key(code), undefined, code);
+  layout.learn(key("A", "KeyA"));
+  assert.deepEqual(layout.key("KeyA"), ["a", undefined]);
+  layout.learn(key("a", "KeyA", { shiftKey: true }));
+  assert.deepEqual(layout.key("KeyA"), ["a", "A"]);
+  layout.learn(key("q", "KeyA"));
+  assert.deepEqual(layout.key("KeyA"), ["q", undefined]);
+});
+
 test("keypad keys that type text stay text unless a modifier other than Shift is held", () => {
   const enc = (e: KeyEvent) => encodeKey(e, DISAMBIGUATE, true);
   // NumLock on.
@@ -297,4 +354,5 @@ test("a Meta Option goes through the protocol as Alt on macOS, a composing one t
   // Linux Alt does not compose, so the layout's key counts.
   assert.equal(paneKey(down("o", "KeyS", { altKey: true }), { mac: false, altIsMeta: true, kitty: t.kitty }), "\x1b[111;3u");
   assert.equal(paneKey(b, { mac: true, altIsMeta: false, kitty: t.kitty }), undefined);
+  assert.equal(paneKey(down("ø", "KeyS", { altKey: true }), { mac: true, altIsMeta: true, kitty: t.kitty, layout: dvorak }), "\x1b[111;3u");
 });

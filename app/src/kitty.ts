@@ -8,7 +8,7 @@ import type { IDisposable, Terminal } from "@xterm/xterm";
 export interface KeyProtocol {
   readonly flags: number;
   /// The bytes for a keydown, or undefined when xterm's own encoding is already right for it.
-  encode(e: KeyEvent, altIsMeta: boolean, composedAlt?: boolean): string | undefined;
+  encode(e: KeyEvent, altIsMeta: boolean, composedAlt?: boolean, layout?: KeyLayout): string | undefined;
   /// After `term.reset()`, which does not go through the parser.
   reset(): void;
   dispose(): void;
@@ -84,8 +84,8 @@ function keypad(e: KeyEvent): Keypad | undefined {
   return rest in keypadText ? { code: keypadText[rest], text: true } : undefined;
 }
 
-/// The US layout's unshifted and shifted character for each text key, which a macOS Meta Option is unwound to: it
-/// still composes, so `key` holds the composed character rather than the one on the key.
+/// The US layout's unshifted and shifted character for each text key, which a key the active layout is not yet known
+/// for is taken from.
 const usKeys: Record<string, [string, string]> = {
   Backquote: ["`", "~"],
   Minus: ["-", "_"],
@@ -105,27 +105,76 @@ const usKeys: Record<string, [string, string]> = {
 
 const codePoint = (c: string) => c.codePointAt(0) as number;
 
+/// `c` in the given case, unless that takes more than one character (`İ`), or `c` has no case.
+function cased(c: string, upper: boolean): string {
+  const to = upper ? c.toUpperCase() : c.toLowerCase();
+  return [...to].length === 1 ? to : c;
+}
+
+const hasCase = (c: string) => c.toLowerCase() !== c.toUpperCase();
+
+/// The active layout's unshifted and shifted character for each key, learned from the keys typed with at most Shift
+/// held. WebKit has no `navigator.keyboard.getLayoutMap()`, and a macOS Option composes even as Meta, so its `key`
+/// does not say which key it was on. Until a key is seen, the US layout stands in for it.
+export class KeyLayout {
+  private keys = new Map<string, [string | undefined, string | undefined]>();
+
+  learn(e: KeyEvent & Partial<Pick<KeyboardEvent, "type" | "getModifierState">>) {
+    if (e.type !== undefined && e.type !== "keydown") return;
+    if (e.ctrlKey || e.altKey || e.metaKey || e.isComposing || e.getModifierState?.("AltGraph")) return;
+    const chars = [...e.key];
+    if (chars.length !== 1 || !e.code || e.code.startsWith("Numpad")) return;
+    const ch = cased(chars[0], e.shiftKey);
+    const slot = e.shiftKey ? 1 : 0;
+    const pair = this.keys.get(e.code);
+    if (pair?.[slot] === ch) return;
+    // A changed key means a changed layout, which makes the other half stale too.
+    const fresh: [string | undefined, string | undefined] = [undefined, undefined];
+    fresh[slot] = ch;
+    if (pair && pair[slot] === undefined) fresh[1 - slot] = pair[1 - slot];
+    this.keys.set(e.code, fresh);
+  }
+
+  /// The key's unshifted and shifted character, either of which may not be known yet.
+  key(code: string): [string | undefined, string | undefined] | undefined {
+    return this.keys.get(code);
+  }
+}
+
+const usLayout = new KeyLayout();
+
 /// The key's unshifted character, and the shifted one when Shift is held. Taken from `key`, so it follows the active
 /// layout, except where `key` cannot say: a composed Option, or a shifted symbol whose unshifted form only the
 /// physical key gives.
-function textKey(e: KeyEvent, composedAlt: boolean): { code: number; shifted?: number } | undefined {
+function textKey(e: KeyEvent, composedAlt: boolean, layout: KeyLayout): { code: number; shifted?: number } | undefined {
+  const known = layout.key(e.code);
   const us = usKeys[e.code];
-  if (composedAlt && us) {
-    return { code: codePoint(us[0]), shifted: e.shiftKey ? codePoint(us[1]) : undefined };
+  // An Option that left a letter alone did not compose.
+  if (composedAlt && !/^[a-z]$/i.test(e.key)) {
+    const [base, shifted] = known?.[0] !== undefined ? known : (us ?? []);
+    if (base !== undefined) {
+      const alternate = shifted ?? (hasCase(base) ? cased(base, true) : undefined);
+      return { code: codePoint(base), shifted: e.shiftKey && alternate ? codePoint(alternate) : undefined };
+    }
   }
   const chars = [...e.key];
   if (chars.length !== 1) return;
   const ch = chars[0];
-  const lower = ch.toLowerCase();
-  const cased = lower !== ch.toUpperCase();
-  let base = cased && [...lower].length === 1 ? lower : ch;
-  if (e.shiftKey && !cased && us && (us[1] === ch || e.code.startsWith("Digit"))) base = us[0];
+  let base = cased(ch, false);
+  if (e.shiftKey && !hasCase(ch) && us && (us[1] === ch || e.code.startsWith("Digit"))) base = us[0];
   return { code: codePoint(base), shifted: e.shiftKey ? codePoint(ch) : undefined };
 }
 
 /// `altIsMeta` is false for a macOS Option that composes characters, which then is not a modifier at all.
 /// `composedAlt` says Alt still composes `key` when it is Meta, as a macOS Option does.
-export function encodeKey(e: KeyEvent, flags: number, altIsMeta: boolean, composedAlt = false): string | undefined {
+/// `layout` is the active keyboard layout as far as it is known.
+export function encodeKey(
+  e: KeyEvent,
+  flags: number,
+  altIsMeta: boolean,
+  composedAlt = false,
+  layout = usLayout,
+): string | undefined {
   if (!(flags & DISAMBIGUATE) || e.isComposing) return;
   const altMod = e.altKey && altIsMeta;
   const bits = (e.shiftKey ? SHIFT : 0) | (altMod ? ALT : 0) | (e.ctrlKey ? CTRL : 0) | (e.metaKey ? SUPER : 0);
@@ -141,7 +190,7 @@ export function encodeKey(e: KeyEvent, flags: number, altIsMeta: boolean, compos
     return legacyWhenBare && !bits ? undefined : csi(func);
   }
   if ((bits & ~SHIFT) === 0) return;
-  const text = textKey(e, altMod && composedAlt);
+  const text = textKey(e, altMod && composedAlt, layout);
   if (text === undefined) return;
   let key = String(text.code);
   if (flags & ALTERNATE_KEYS && text.shifted !== undefined && text.shifted !== text.code) key += `:${text.shifted}`;
@@ -203,7 +252,7 @@ export function kittyKeyboard(term: Pick<Terminal, "parser" | "buffer">, reply: 
     get flags() {
       return screen().flags;
     },
-    encode: (e, altIsMeta, composedAlt) => encodeKey(e, screen().flags, altIsMeta, composedAlt),
+    encode: (e, altIsMeta, composedAlt, layout) => encodeKey(e, screen().flags, altIsMeta, composedAlt, layout),
     reset() {
       main = fresh();
       alt = fresh();

@@ -14,7 +14,7 @@ import { chromeColors } from "./colors.ts";
 import { dropText } from "./drop.ts";
 import { StatusSounds, stillFinished } from "./finish.ts";
 import { clipboardKey, type OptionAsMeta, optionIsMeta, paneKey } from "./keys.ts";
-import { type KeyProtocol, kittyKeyboard } from "./kitty.ts";
+import { KeyLayout, type KeyProtocol, kittyKeyboard } from "./kitty.ts";
 import { isQueryReply } from "./replies.ts";
 import { loadSounds, play, type SoundEntry, type SoundSettings } from "./sounds.ts";
 import "./style.css";
@@ -171,7 +171,7 @@ function view(pane: Id): PaneView {
     }
     const altIsMeta = !isMac || optionIsMeta(settings.option_as_meta, optionsDown);
     if (isMac && e.type === "keydown") term.options.macOptionIsMeta = altIsMeta;
-    const seq = paneKey(e, { mac: isMac, altIsMeta, kitty });
+    const seq = paneKey(e, { mac: isMac, altIsMeta, kitty, layout });
     if (seq === undefined) return true;
     e.preventDefault();
     term.input(seq);
@@ -269,11 +269,14 @@ let settings: TerminalSettings = {
 
 /// Which Option keys are down, for Option as Meta on one side only; key events only say that some Alt is held.
 const optionsDown = new Set<string>();
+/// Learned from every key typed anywhere in the window.
+const layout = new KeyLayout();
 for (const type of ["keydown", "keyup"] as const)
   window.addEventListener(
     type,
     (e) => {
       if (e.code === "AltLeft" || e.code === "AltRight") optionsDown[type === "keydown" ? "add" : "delete"](e.code);
+      layout.learn(e);
     },
     true,
   );
