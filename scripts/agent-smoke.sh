@@ -55,6 +55,7 @@ field() { ws_json | python3 -c "import json,sys; w=[w for w in json.load(sys.std
 # Preflight: the panes' login shell must resolve this build's ftm, and send/capture must round-trip.
 term=$(ftm spawn terminal --path "$DIR" --name smoke-preflight)
 sleep 1
+# shellcheck disable=SC2016 # expanded by the pane's shell
 ftm send "$term" 'echo "FTM=$(command -v ftm)"' --enter
 for _ in $(seq 50); do ftm capture "$term" | grep -q "^FTM=/" && break; sleep 0.2; done
 resolved=$(ftm capture "$term" | grep "^FTM=/" | tail -1 | cut -d= -f2-)
