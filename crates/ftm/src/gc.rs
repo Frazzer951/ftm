@@ -67,7 +67,7 @@ pub fn run(yes: bool, fetch: bool, upstream_deleted: bool) -> Result<()> {
         let config = RepoConfig::load(&paths::repo_config_path(&repo_name(&repo)))?;
         let base = config
             .base
-            .or_else(|| remote_default(&repo))
+            .or_else(|| remote_default(&repo, |w| eprintln!("{}: {w}", repo.display())))
             .unwrap_or_else(|| DEFAULT_BASE.into());
 
         let live = if fetch { fetch_base(&repo, &base) } else { None };

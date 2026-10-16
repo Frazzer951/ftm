@@ -77,8 +77,9 @@ fn default_remote(dir: &Path) -> Option<String> {
 }
 
 /// The remote's default branch as a remote-tracking ref (`origin/main`), or `None` for a repo with no remote. Asks
-/// the remote (`ls-remote`, up to `REMOTE_TIMEOUT`) only when `refs/remotes/<remote>/HEAD` is not set.
-pub fn remote_default(dir: &Path) -> Option<String> {
+/// the remote (`ls-remote`, up to `REMOTE_TIMEOUT`) only when `refs/remotes/<remote>/HEAD` is not set; a failure to
+/// is passed to `warn` before falling back to `<remote>/main` or `<remote>/master`.
+pub fn remote_default(dir: &Path, warn: impl FnOnce(String)) -> Option<String> {
     let remote = default_remote(dir)?;
     if let Some(head) = git(
         dir,
@@ -86,7 +87,9 @@ pub fn remote_default(dir: &Path) -> Option<String> {
     ) {
         return Some(head);
     }
-    let listed = git_remote(dir, &["ls-remote", "--symref", &remote, "HEAD"]).unwrap_or_default();
+    let listed = git_remote(dir, &["ls-remote", "--symref", &remote, "HEAD"])
+        .inspect_err(|e| warn(format!("asking {remote} for its default branch: {e}")))
+        .unwrap_or_default();
     let symref = listed.lines().find_map(|l| {
         l.strip_prefix("ref: refs/heads/")
             .and_then(|r| r.strip_suffix("\tHEAD"))

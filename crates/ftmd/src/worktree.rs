@@ -73,7 +73,7 @@ pub fn create(cwd: &Path, branch: &str, base: Option<&str>, copy_changes: bool) 
         let base = base
             .map(str::to_string)
             .or(config.base.clone())
-            .or_else(|| repo::remote_default(&src));
+            .or_else(|| repo::remote_default(&src, |w| tracing::warn!("{w}")));
         let mut args = vec!["worktree", "add", "-b", branch, &path_str];
         if let Some(base) = &base {
             fetch_tracking(&src, base);
