@@ -7,6 +7,7 @@ use ftm_core::paths;
 use ftm_core::protocol::{Event, Request, Response};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
@@ -28,19 +29,31 @@ struct Conn {
 
 impl Conn {
     fn open() -> Result<Self> {
-        let socket = paths::socket_path();
-        let write = UnixStream::connect(&socket)
+        Self::connect(&paths::socket_path())
+    }
+
+    fn connect(socket: &Path) -> Result<Self> {
+        let write = UnixStream::connect(socket)
             .wrap_err_with(|| format!("connecting to ftmd at {} (is it running?)", socket.display()))?;
         let read = BufReader::new(write.try_clone()?);
         Ok(Conn { write, read })
     }
 
+    /// Fails rather than blocking when ftmd stops answering, so a hung ftmd cannot leave the terminal stuck in raw
+    /// mode.
     fn send(&mut self, request: &Request) -> Result<Response> {
+        self.send_within(request, request.reply_timeout())
+    }
+
+    fn send_within(&mut self, request: &Request, timeout: Duration) -> Result<Response> {
+        // macOS refuses these with EINVAL once ftmd has closed its end, and then neither call can block anyway.
+        let _ = self.write.set_read_timeout(Some(timeout));
+        let _ = self.write.set_write_timeout(Some(timeout));
         let mut line = serde_json::to_vec(request)?;
         line.push(b'\n');
-        self.write.write_all(&line)?;
+        self.write.write_all(&line).wrap_err("sending to ftmd")?;
         let mut reply = String::new();
-        self.read.read_line(&mut reply)?;
+        self.read.read_line(&mut reply).wrap_err("waiting for ftmd to reply")?;
         if reply.is_empty() {
             bail!("ftmd closed the connection without replying");
         }
@@ -48,6 +61,13 @@ impl Conn {
             Response::Error { message } => bail!(message),
             response => Ok(response),
         }
+    }
+
+    /// The pane's output stream, which is quiet for as long as the pane is.
+    fn attach(mut self, pane: PaneId) -> Result<Self> {
+        self.send(&Request::Attach { pane })?;
+        let _ = self.write.set_read_timeout(None);
+        Ok(self)
     }
 }
 
@@ -119,8 +139,7 @@ fn usable_size(ws: libc::winsize) -> Option<(u16, u16)> {
 }
 
 pub fn run(pane: PaneId) -> Result<()> {
-    let mut events = Conn::open()?;
-    events.send(&Request::Attach { pane })?;
+    let mut events = Conn::open()?.attach(pane)?;
     let mut requests = Conn::open()?;
     let resize = |requests: &mut Conn| -> Result<()> {
         if let Some((rows, cols)) = terminal_size() {
@@ -214,6 +233,55 @@ pub fn run(pane: PaneId) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::net::UnixListener;
+    use std::time::Instant;
+
+    /// A fake ftmd that reads requests and answers only `Attach`, then holds every connection open.
+    fn fake_ftmd(name: &str) -> (std::path::PathBuf, std::thread::JoinHandle<()>) {
+        let dir = std::env::temp_dir().join(format!("ftm-attach-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("s.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for conn in listener.incoming() {
+                let mut conn = conn.unwrap();
+                let mut line = String::new();
+                let _ = BufReader::new(&mut conn).read_line(&mut line);
+                if serde_json::from_str::<Request>(&line).is_ok_and(|r| matches!(r, Request::Attach { .. })) {
+                    let mut reply = serde_json::to_vec(&Response::Ok).unwrap();
+                    reply.push(b'\n');
+                    conn.write_all(&reply).unwrap();
+                }
+                held.push(conn);
+            }
+        });
+        (socket, server)
+    }
+
+    #[test]
+    fn a_hung_ftmd_fails_a_request_instead_of_blocking() {
+        let (socket, _server) = fake_ftmd("hung");
+        let mut conn = Conn::connect(&socket).unwrap();
+        let started = Instant::now();
+        let input = Request::Input {
+            pane: PaneId::nil(),
+            data: String::new(),
+        };
+        let err = conn.send_within(&input, Duration::from_millis(100)).unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(5), "{err:#}");
+        assert!(format!("{err:#}").contains("waiting for ftmd to reply"), "{err:#}");
+        let _ = std::fs::remove_dir_all(socket.parent().unwrap());
+    }
+
+    #[test]
+    fn the_attached_stream_waits_for_output_without_a_timeout() {
+        let (socket, _server) = fake_ftmd("stream");
+        let events = Conn::connect(&socket).unwrap().attach(PaneId::nil()).unwrap();
+        assert_eq!(events.write.read_timeout().unwrap(), None);
+        let _ = std::fs::remove_dir_all(socket.parent().unwrap());
+    }
 
     #[test]
     fn a_terminal_without_a_size_is_not_sent() {
