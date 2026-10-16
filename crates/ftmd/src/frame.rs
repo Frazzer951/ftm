@@ -31,6 +31,10 @@ const INPUT: u8 = 3;
 const RESIZE: u8 = 4;
 const KILL: u8 = 5;
 
+/// Well above the largest frame either side sends (a holder's whole buffer), so a corrupt header cannot make the reader
+/// allocate gigabytes.
+pub const MAX_PAYLOAD: usize = 16 << 20;
+
 pub fn write(w: &mut impl Write, frame: &Frame) -> io::Result<()> {
     let (tag, payload): (u8, Vec<u8>) = match frame {
         Frame::Hello { version, rows, cols } => {
@@ -61,6 +65,9 @@ pub fn read(r: &mut impl Read) -> io::Result<Option<Frame>> {
     }
     r.read_exact(&mut head[1..])?;
     let len = u32::from_be_bytes(head[1..].try_into().expect("4 bytes")) as usize;
+    if len > MAX_PAYLOAD {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("frame of {len} bytes")));
+    }
     let mut payload = vec![0u8; len];
     r.read_exact(&mut payload)?;
     let u16_at = |i: usize| -> io::Result<u16> {
@@ -114,5 +121,28 @@ mod tests {
             assert_eq!(read(&mut r).unwrap(), Some(f));
         }
         assert_eq!(read(&mut r).unwrap(), None);
+    }
+
+    fn read_err(bytes: &[u8]) -> io::ErrorKind {
+        read(&mut &bytes[..]).unwrap_err().kind()
+    }
+
+    #[test]
+    fn malformed_frames_are_errors() {
+        assert_eq!(read_err(&[OUTPUT, 0, 0]), io::ErrorKind::UnexpectedEof);
+        assert_eq!(read_err(&[OUTPUT, 0, 0, 0, 4, b'a']), io::ErrorKind::UnexpectedEof);
+        assert_eq!(read_err(&[99, 0, 0, 0, 0]), io::ErrorKind::InvalidData);
+        assert_eq!(read_err(&[HELLO, 0, 0, 0, 3, VERSION, 0, 24]), io::ErrorKind::InvalidData);
+        assert_eq!(read_err(&[RESIZE, 0, 0, 0, 2, 0, 24]), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn oversized_frames_are_refused_before_reading_them() {
+        let mut head = vec![OUTPUT];
+        head.extend(u32::MAX.to_be_bytes());
+        assert_eq!(read_err(&head), io::ErrorKind::InvalidData);
+        let mut head = vec![INPUT];
+        head.extend((MAX_PAYLOAD as u32).to_be_bytes());
+        assert_eq!(read_err(&head), io::ErrorKind::UnexpectedEof);
     }
 }

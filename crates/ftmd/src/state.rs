@@ -24,6 +24,8 @@ const BUFFER_SLACK: usize = 256 << 10;
 /// Long enough that the TUI reads the narrower size before the real one comes back; two SIGWINCHs handled together
 /// look like no change at all.
 const REDRAW_NUDGE: Duration = Duration::from_millis(150);
+/// Input is sent to a holder in frames of at most this size, far below `frame::MAX_PAYLOAD`.
+const INPUT_CHUNK: usize = 64 << 10;
 
 pub struct State {
     workspaces: BTreeMap<WorkspaceId, Workspace>,
@@ -960,7 +962,9 @@ fn input(shared: &Shared, pane: PaneId, data: &str) -> Result<Response> {
         p.holder.clone()
     };
     let mut holder = holder.lock().unwrap_or_else(PoisonError::into_inner);
-    frame::write(&mut *holder, &Frame::Input(bytes)).wrap_err("writing to pane holder")?;
+    for chunk in bytes.chunks(INPUT_CHUNK) {
+        frame::write(&mut *holder, &Frame::Input(chunk.to_vec())).wrap_err("writing to pane holder")?;
+    }
     Ok(Response::Ok)
 }
 
