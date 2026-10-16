@@ -325,6 +325,7 @@ mod tests {
     #[test]
     fn script_keeps_the_build_dir_on_failure() {
         let dir = std::env::temp_dir().join(format!("ftm-update-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let script = script("0.1.4", Stable, false, "https://127.0.0.1:1/PKGBUILD").unwrap();
         let out = Command::new("/bin/sh")
@@ -336,7 +337,7 @@ mod tests {
         assert!(!out.status.success(), "{stdout}");
         assert!(stdout.contains("FTM update failed; build files are in"), "{stdout}");
         let left: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name()).collect();
-        assert_eq!(left.len(), 1, "{left:?}");
+        assert_eq!(left.len(), 1, "{left:?} in {}: {stdout}", dir.display());
         assert!(left[0].to_string_lossy().starts_with("ftm-update."));
         let _ = std::fs::remove_dir_all(&dir);
     }
