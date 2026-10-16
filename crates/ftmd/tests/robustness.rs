@@ -67,3 +67,26 @@ fn a_pane_that_stops_reading_input_stalls_nothing_else() {
     });
     assert!(matches!(conn.try_send(&Request::Ping), Some(Response::Pong { .. })));
 }
+
+/// A holder gives up on an ftmd that stops reading its output for 5s. ftmd reconnects and gets the buffer again,
+/// instead of freezing the pane or taking it for dead.
+#[test]
+fn a_stalled_ftmd_reconnects_to_its_holders() {
+    let dir = temp_root("stalled-reader");
+    let mut daemon = start_daemon("stalled-reader", |_| {});
+    let mut conn = Conn::open(&daemon.socket);
+    let (_, pane) = spawn_command(&mut conn, &dir, Some("sleep 1; yes | head -c 2000000; echo done-$((1+1))"));
+
+    let pid = daemon.pid();
+    unsafe { libc::kill(pid, libc::SIGSTOP) };
+    std::thread::sleep(Duration::from_secs(8));
+    unsafe { libc::kill(pid, libc::SIGCONT) };
+    assert!(daemon.child().try_wait().unwrap().is_none());
+
+    wait_for("the output after the stall", Duration::from_secs(20), || {
+        match conn.send(&Request::Capture { pane, raw: false }) {
+            Response::Output { data } => String::from_utf8_lossy(&B64.decode(data).unwrap()).contains("done-2"),
+            r => panic!("{r:?}"),
+        }
+    });
+}

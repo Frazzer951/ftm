@@ -150,10 +150,12 @@ fn pump_output(
             let excess = s.buffer.len() - BUFFER_CAP;
             s.buffer.drain(..excess);
         }
+        // An ftmd that stopped reading may hold half a frame: hang up on it entirely, so it reconnects for the buffer.
         if let Some(client) = s.client.as_mut()
             && frame::write(client, &Frame::Output(buf[..n].to_vec())).is_err()
+            && let Some(client) = s.client.take()
         {
-            s.client = None;
+            let _ = client.shutdown(std::net::Shutdown::Both);
         }
     }
     lock(shared).eof = true;

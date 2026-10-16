@@ -309,19 +309,8 @@ impl State {
         stream: UnixStream,
         startup: bool,
     ) -> Result<()> {
-        let mut read = stream.try_clone()?;
-        read.set_read_timeout(Some(Duration::from_secs(5)))?;
-        let Some(Frame::Hello { version, rows, cols }) = frame::read(&mut read)? else {
-            bail!("pane holder did not say hello");
-        };
-        if version != frame::VERSION {
-            return Err(HolderVersion(version).into());
-        }
+        let (read, (rows, cols), replay) = handshake(&stream)?;
         // The replay goes in before anyone can see the pane, so a capture or attach right after a restart has the screen.
-        let Some(Frame::Output(replay)) = frame::read(&mut read)? else {
-            bail!("pane holder did not send its buffer");
-        };
-        read.set_read_timeout(None)?;
         self.panes.insert(
             id,
             Pane {
@@ -334,7 +323,7 @@ impl State {
                 exited: false,
             },
         );
-        self.pane_output(id, &replay);
+        self.pane_output(id, &replay, true);
         let shared = shared.clone();
         std::thread::Builder::new()
             .name(format!("pane-{id}"))
@@ -343,7 +332,8 @@ impl State {
         Ok(())
     }
 
-    fn pane_output(&mut self, id: PaneId, bytes: &[u8]) {
+    /// `live` output goes out to subscribers as it comes; a holder's replay is sent whole by the caller.
+    fn pane_output(&mut self, id: PaneId, bytes: &[u8], live: bool) {
         let Some(pane) = self.panes.get_mut(&id) else { return };
         pane.buffer.extend_from_slice(bytes);
         pane.screen.process(bytes);
@@ -352,11 +342,13 @@ impl State {
             let excess = pane.buffer.len() - BUFFER_CAP;
             pane.buffer.drain(..excess);
         }
-        let _ = self.events.send(Event::Output {
-            pane: id,
-            data: B64.encode(bytes),
-            reset: false,
-        });
+        if live {
+            let _ = self.events.send(Event::Output {
+                pane: id,
+                data: B64.encode(bytes),
+                reset: false,
+            });
+        }
         // The last task-like title in this chunk wins; placeholders and the bare name in between do not count.
         if let Some(ws) = self.workspaces.get_mut(&workspace)
             && ws.agent_pane == Some(id)
@@ -365,6 +357,17 @@ impl State {
         {
             ws.auto_title = Some(title);
             self.emit_workspaces();
+        }
+    }
+
+    /// The pane's whole buffer, for subscribers to redraw it from scratch.
+    fn emit_replay(&self, id: PaneId) {
+        if let Some(pane) = self.panes.get(&id) {
+            let _ = self.events.send(Event::Output {
+                pane: id,
+                data: B64.encode(&pane.buffer),
+                reset: true,
+            });
         }
     }
 
@@ -389,6 +392,24 @@ fn holder_writer(id: PaneId, mut stream: UnixStream) -> Result<mpsc::Sender<Fram
         })
         .wrap_err("starting pane writer")?;
     Ok(tx)
+}
+
+/// A new connection to a holder starts with its `Hello` and then its whole buffer. Returns the stream to read on, the
+/// terminal's size, and the buffer.
+fn handshake(stream: &UnixStream) -> Result<(UnixStream, (u16, u16), Vec<u8>)> {
+    let mut read = stream.try_clone()?;
+    read.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let Some(Frame::Hello { version, rows, cols }) = frame::read(&mut read)? else {
+        bail!("pane holder did not say hello");
+    };
+    if version != frame::VERSION {
+        return Err(HolderVersion(version).into());
+    }
+    let Some(Frame::Output(replay)) = frame::read(&mut read)? else {
+        bail!("pane holder did not send its buffer");
+    };
+    read.set_read_timeout(None)?;
+    Ok((read, (rows, cols), replay))
 }
 
 #[derive(Debug)]
@@ -548,23 +569,58 @@ fn lock(shared: &Shared) -> MutexGuard<'_, State> {
 }
 
 /// The first `Output` after (re)connecting is the holder's whole buffer, which rebuilds the screen after a restart.
-/// The holder going away means the pane's processes are gone.
+/// A holder hangs up on an ftmd that stopped reading its output, so a lost connection is retried; the holder's socket
+/// being gone means the pane's processes are.
 fn read_loop(shared: Shared, id: PaneId, mut holder: UnixStream) {
+    let mut reconnected: Option<Instant> = None;
     let ended = loop {
-        match frame::read(&mut holder) {
+        let lost = match frame::read(&mut holder) {
             Ok(Some(Frame::Output(bytes))) => {
                 let mut state = lock(&shared);
                 if !state.panes.contains_key(&id) {
                     return;
                 }
-                state.pane_output(id, &bytes);
+                state.pane_output(id, &bytes, true);
+                continue;
             },
-            Ok(Some(_)) => {},
-            Ok(None) => break "its holder hung up".to_string(),
-            Err(e) => break format!("reading from its holder failed: {e}"),
+            Ok(Some(_)) => continue,
+            Ok(None) => "its holder hung up".to_string(),
+            Err(e) => format!("reading from its holder failed: {e}"),
+        };
+        // Another ftmd taking the holder over would take it straight back.
+        if reconnected.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        match reconnect(&shared, id) {
+            Ok(Some(stream)) => {
+                tracing::info!("pane {id}: reconnected to its holder ({lost})");
+                holder = stream;
+                reconnected = Some(Instant::now());
+            },
+            Ok(None) => return,
+            Err(e) => break format!("{lost}; reconnecting failed: {e:#}"),
         }
     };
     pane_exited(&shared, id, &ended);
+}
+
+/// `None` once the pane is closed.
+fn reconnect(shared: &Shared, id: PaneId) -> Result<Option<UnixStream>> {
+    let Some(socket) = lock(shared).panes.get(&id).map(|p| p.holder_socket.clone()) else {
+        return Ok(None);
+    };
+    let stream = UnixStream::connect(&socket)?;
+    let (read, (rows, cols), replay) = handshake(&stream)?;
+    let mut state = lock(shared);
+    let Some(pane) = state.panes.get_mut(&id) else {
+        return Ok(None);
+    };
+    pane.holder = holder_writer(id, stream)?;
+    pane.buffer.clear();
+    pane.screen = vt100::Parser::new_with_callbacks(rows, cols, SCROLLBACK, TitleWatch::default());
+    state.pane_output(id, &replay, false);
+    state.emit_replay(id);
+    Ok(Some(read))
 }
 
 /// An agent whose startup pane exits before Claude reports any status never started (setup the shell could not
