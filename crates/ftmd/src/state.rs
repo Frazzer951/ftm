@@ -58,6 +58,12 @@ struct Pane {
     startup: bool,
     /// Its holder is gone but it stays on screen, showing why its agent never started.
     exited: bool,
+    /// Processes with an `ftm attach` stream open on the pane, once per stream. Their resizes fit the pane to their
+    /// own terminal.
+    attachers: Vec<i32>,
+    /// The size to go back to once the last attach ends: the pane's size when the first began, or the latest any
+    /// other client set since. Other clients (the app) only resize when their own size changes.
+    restore: Option<(u16, u16)>,
 }
 
 /// Collects the terminal titles (OSC 0/2) a pane sets, in order, until read.
@@ -324,6 +330,8 @@ impl State {
                 screen: vt100::Parser::new_with_callbacks(rows, cols, SCROLLBACK, TitleWatch::default()),
                 startup,
                 exited: false,
+                attachers: Vec::new(),
+                restore: None,
             },
         );
         // Sent once the pane is in a layout (`emit_replay`): a client drops output for panes it does not know.
@@ -730,6 +738,46 @@ pub fn attach(shared: &Shared, pane: PaneId) -> Result<(broadcast::Receiver<Even
     Ok((state.events.subscribe(), screen))
 }
 
+/// Registers an `ftm attach` stream from `pid`, until the returned guard drops.
+pub fn attached(shared: &Shared, pane: PaneId, pid: i32) -> Attached {
+    if let Ok(p) = lock(shared).pane_mut(pane) {
+        if p.attachers.is_empty() {
+            p.restore = Some(p.screen.screen().size());
+        }
+        p.attachers.push(pid);
+    }
+    Attached {
+        shared: shared.clone(),
+        pane,
+        pid,
+    }
+}
+
+pub struct Attached {
+    shared: Shared,
+    pane: PaneId,
+    pid: i32,
+}
+
+impl Drop for Attached {
+    fn drop(&mut self) {
+        let restore = {
+            let mut state = lock(&self.shared);
+            let Ok(p) = state.pane_mut(self.pane) else { return };
+            if let Some(i) = p.attachers.iter().position(|&pid| pid == self.pid) {
+                p.attachers.remove(i);
+            }
+            if !p.attachers.is_empty() {
+                return;
+            }
+            p.restore.take()
+        };
+        if let Some((rows, cols)) = restore {
+            let _ = resize(&self.shared, self.pane, cols, rows, None);
+        }
+    }
+}
+
 pub fn pane_alive(workspaces: &[Workspace], pane: PaneId) -> bool {
     workspaces.iter().any(|w| w.tabs.iter().any(|t| t.layout.contains(pane)))
 }
@@ -752,7 +800,8 @@ fn screen_text(parser: &mut vt100::Parser<TitleWatch>) -> String {
     text
 }
 
-pub fn handle(shared: &Shared, request: Request) -> Response {
+/// `peer` is the pid of the process that sent `request`, when known.
+pub fn handle(shared: &Shared, request: Request, peer: Option<i32>) -> Response {
     let result = match request {
         Request::Ping => Ok(Response::Pong {
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -817,7 +866,7 @@ pub fn handle(shared: &Shared, request: Request) -> Response {
         },
         Request::Input { pane, data } => input(shared, pane, &data),
         Request::Capture { pane, raw } => capture(shared, pane, raw),
-        Request::Resize { pane, cols, rows } => resize(shared, pane, cols, rows),
+        Request::Resize { pane, cols, rows } => resize(shared, pane, cols, rows, peer),
         Request::SetStatus { .. } => Err(eyre!("unknown status")),
         Request::Subscribe | Request::Attach { .. } => Err(eyre!("handled by the connection")),
     };
@@ -1018,11 +1067,14 @@ fn capture(shared: &Shared, pane: PaneId, raw: bool) -> Result<Response> {
 /// A resize to the size the pane already has comes from a terminal that just attached (the app relaunched, `ftm
 /// attach`), which drew the replay at some other size. The kernel sends no SIGWINCH for an unchanged size, and Node
 /// ignores one that does not change it, so the pane is nudged one column narrower and back to make its TUI repaint.
-fn resize(shared: &Shared, pane: PaneId, cols: u16, rows: u16) -> Result<Response> {
+fn resize(shared: &Shared, pane: PaneId, cols: u16, rows: u16, peer: Option<i32>) -> Result<Response> {
     // A collapsed view can report no size at all; the emulator needs at least one cell.
     let (rows, cols) = (rows.max(1), cols.max(1));
     let mut state = lock(shared);
     let p = state.pane_mut(pane)?;
+    if !p.attachers.is_empty() && !peer.is_some_and(|pid| p.attachers.contains(&pid)) {
+        p.restore = Some((rows, cols));
+    }
     let unchanged = p.screen.screen().size() == (rows, cols);
     p.screen.screen_mut().set_size(rows, cols);
     if p.exited {

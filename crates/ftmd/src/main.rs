@@ -16,8 +16,8 @@ use serde::Serialize;
 use state::{Shared, State};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::unix::OwnedWriteHalf;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::broadcast::error::RecvError;
@@ -132,14 +132,14 @@ async fn serve(stream: UnixStream, state: Shared) -> Result<()> {
             return stream_events(&mut write, &state).await;
         }
         if let Request::Attach { pane } = request {
-            return stream_pane(&mut write, &state, pane).await;
+            return stream_pane(&mut lines, &mut write, &state, pane, peer).await;
         }
         // Killing a pane leaves no other trace of who asked.
         if matches!(request, Request::Close { .. } | Request::ClosePane { .. }) {
             tracing::info!("{request:?} from pid {}", peer.map_or("?".into(), |p| p.to_string()));
         }
         let shared = state.clone();
-        let response = tokio::task::spawn_blocking(move || state::handle(&shared, request)).await?;
+        let response = tokio::task::spawn_blocking(move || state::handle(&shared, request, peer)).await?;
         write_line(&mut write, &response).await?;
     }
     Ok(())
@@ -162,8 +162,16 @@ async fn stream_events(write: &mut OwnedWriteHalf, state: &Shared) -> Result<()>
     }
 }
 
-async fn stream_pane(write: &mut OwnedWriteHalf, state: &Shared, pane: PaneId) -> Result<()> {
+/// Ends when the pane does or the client hangs up, which gives the pane back the size it had for other clients.
+async fn stream_pane(
+    lines: &mut Lines<BufReader<OwnedReadHalf>>,
+    write: &mut OwnedWriteHalf,
+    state: &Shared,
+    pane: PaneId,
+    peer: Option<i32>,
+) -> Result<()> {
     let mut first = true;
+    let mut _attached = None;
     loop {
         let (mut rx, screen) = match state::attach(state, pane) {
             Ok(attached) => attached,
@@ -174,6 +182,7 @@ async fn stream_pane(write: &mut OwnedWriteHalf, state: &Shared, pane: PaneId) -
             Err(_) => return Ok(()),
         };
         if first {
+            _attached = peer.map(|pid| state::attached(state, pane, pid));
             write_line(write, &Response::Ok).await?;
             first = false;
         }
@@ -184,7 +193,14 @@ async fn stream_pane(write: &mut OwnedWriteHalf, state: &Shared, pane: PaneId) -
         };
         write_line(write, &redraw).await?;
         loop {
-            match rx.recv().await {
+            let event = tokio::select! {
+                event = rx.recv() => event,
+                line = lines.next_line() => match line {
+                    Ok(Some(_)) => continue,
+                    _ => return Ok(()),
+                },
+            };
+            match event {
                 Ok(event @ Event::Output { pane: p, .. }) if p == pane => write_line(write, &event).await?,
                 Ok(Event::Workspaces { workspaces }) if !state::pane_alive(&workspaces, pane) => return Ok(()),
                 Ok(_) => {},
