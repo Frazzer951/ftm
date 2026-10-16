@@ -813,14 +813,20 @@ function workspaceTree(ws: Workspace): HTMLLIElement {
   return li;
 }
 
+/// Agents always show their status. A terminal shows it once a Claude Code session started in it by hand (with
+/// `--settings "$FTM_CLAUDE_SETTINGS"`) has reported one; a plain shell never leaves `starting`.
+function reportsStatus(ws: Workspace): boolean {
+  return ws.kind === "agent" || ws.status !== "starting";
+}
+
 function workspaceRow(ws: Workspace): HTMLElement {
   const row = document.createElement("div");
   row.className = "ws" + (ws.id === selected ? " selected" : "");
   row.dataset.id = ws.id;
   row.title = [displayName(ws) === ws.name ? ws.name : `${displayName(ws)} (${ws.name})`, ws.kind, ws.cwd].join("\n");
   const dot = document.createElement("span");
-  dot.className = ws.kind !== "agent" ? "dot none" : ws.unseen ? "dot unseen" : `dot ${ws.status}`;
-  dot.title = ws.kind !== "agent" ? "" : ws.unseen ? "done, unseen" : ws.status.replace("_", " ");
+  dot.className = !reportsStatus(ws) ? "dot none" : ws.unseen ? "dot unseen" : `dot ${ws.status}`;
+  dot.title = !reportsStatus(ws) ? "" : ws.unseen ? "done, unseen" : ws.status.replace("_", " ");
   const text = document.createElement("div");
   text.className = "text";
   const name = document.createElement("span");
@@ -1142,7 +1148,7 @@ function closeMenu() {
 function descendantsNeedingInput(id: Id): number {
   return workspaces
     .filter((w) => w.parent === id)
-    .reduce((n, w) => n + (w.kind === "agent" && w.status === "needs_input" ? 1 : 0) + descendantsNeedingInput(w.id), 0);
+    .reduce((n, w) => n + (w.status === "needs_input" ? 1 : 0) + descendantsNeedingInput(w.id), 0);
 }
 
 const lastStatus = new Map<Id, string>();
@@ -1161,7 +1167,7 @@ const finishCounts = (w: Workspace) => w.id !== selected || !document.hasFocus()
 /// With `wait_for_subagents`, a turn that ends with background subagents still running stays quiet, and the sound
 /// waits `FINISH_HOLD_MS` for the workspace to stay finished. The first tree after startup only records state.
 function onStatusChanges(list: Workspace[], initial: boolean) {
-  const waiting = list.filter((w) => w.kind === "agent" && w.status === "needs_input" && lastStatus.get(w.id) !== "needs_input");
+  const waiting = list.filter((w) => w.status === "needs_input" && lastStatus.get(w.id) !== "needs_input");
   const finished = list.filter((w) => w.unseen && !lastUnseen.has(w.id));
   lastStatus.clear();
   lastUnseen.clear();
