@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { homeDir } from "@tauri-apps/api/path";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { open } from "@tauri-apps/plugin-dialog";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
@@ -10,6 +11,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { chromeColors } from "./colors";
+import { dropText } from "./drop.ts";
 import { StatusSounds, stillFinished } from "./finish.ts";
 import { clipboardKey, type OptionAsMeta, optionIsMeta, paneKey } from "./keys.ts";
 import { type KeyProtocol, kittyKeyboard } from "./kitty.ts";
@@ -1577,6 +1579,34 @@ window.addEventListener("focus", () => {
 });
 setInterval(() => refreshAllGit().catch(console.error), 10_000);
 new ResizeObserver(() => requestAnimationFrame(fitVisible)).observe($("panes"));
+
+/// The pane slot under a file drag. wry reports GTK widget and AppKit view coordinates, which are CSS pixels despite
+/// the event's `PhysicalPosition` type.
+function dropSlot(x: number, y: number): HTMLElement | null {
+  return document.elementFromPoint(x, y)?.closest<HTMLElement>(".slot[data-pane]") ?? null;
+}
+
+function markDropSlot(slot: HTMLElement | null) {
+  document.querySelectorAll(".slot.drop-target").forEach((s) => {
+    if (s !== slot) s.classList.remove("drop-target");
+  });
+  slot?.classList.add("drop-target");
+}
+
+getCurrentWebview()
+  .onDragDropEvent(({ payload }) => {
+    if (payload.type === "leave") return markDropSlot(null);
+    const slot = dropSlot(payload.position.x, payload.position.y);
+    if (payload.type !== "drop") return markDropSlot(slot);
+    markDropSlot(null);
+    const pane = slot?.dataset.pane;
+    const v = pane && views.get(pane);
+    if (!pane || !v) return;
+    setFocus(pane);
+    v.term.paste(dropText(payload.paths));
+    v.term.focus();
+  })
+  .catch(console.error);
 setupSpawnDialog();
 setupSettingsDialog();
 invoke<{ terminal: TerminalSettings; theme: ThemeSettings; sounds: SoundSettings; updates: Partial<UpdateSettings> }>(
