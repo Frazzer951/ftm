@@ -4,7 +4,7 @@
 mod common;
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
-use common::{Conn, Daemon, start_daemon, temp_root, wait_for};
+use common::{Conn, Daemon, start_daemon, start_daemon_logged, temp_root, wait_for};
 use ftm_core::model::{Kind, Layout, PaneId, Status, Workspace};
 use ftm_core::protocol::{Event, Request, Response, SpawnRequest};
 use std::path::Path;
@@ -49,7 +49,10 @@ fn a_pane_that_stops_reading_input_stalls_nothing_else() {
             data: B64.encode(b"echo pasted\n".repeat(1 << 16)),
         });
     });
-    std::thread::sleep(Duration::from_millis(500));
+    // The terminal echoes what fits in its input queue; the rest backs up behind it.
+    wait_for("the paste to start", Duration::from_secs(10), || {
+        capture(&mut conn, pane).contains("echo pasted")
+    });
 
     conn.set_read_timeout(Duration::from_secs(5));
     assert!(matches!(
@@ -75,11 +78,18 @@ fn a_stalled_ftmd_reconnects_to_its_holders() {
     let dir = temp_root("stalled-reader");
     let mut daemon = start_daemon("stalled-reader", |_| {});
     let mut conn = Conn::open(&daemon.socket);
-    let (_, pane) = spawn_command(&mut conn, &dir, Some("sleep 1; yes | head -c 2000000; echo done-$((1+1))"));
+    let (_, pane) = spawn_command(
+        &mut conn,
+        &dir,
+        Some("sleep 1; yes | head -c 2000000; echo done-$((1+1)); touch flooded"),
+    );
 
     let pid = daemon.pid();
     unsafe { libc::kill(pid, libc::SIGSTOP) };
-    std::thread::sleep(Duration::from_secs(8));
+    // The flood only gets through once the holder has given up on the stopped ftmd.
+    wait_for("the holder to stop waiting on ftmd", Duration::from_secs(30), || {
+        dir.join("flooded").exists()
+    });
     unsafe { libc::kill(pid, libc::SIGCONT) };
     assert!(daemon.child().try_wait().unwrap().is_none());
 
@@ -122,7 +132,7 @@ fn a_zero_size_resize_leaves_the_pane_working() {
 #[cfg(target_os = "linux")]
 #[test]
 fn running_out_of_descriptors_does_not_stop_ftmd() {
-    let mut daemon = start_daemon("emfile", |_| {});
+    let mut daemon = start_daemon_logged("emfile", Path::new(env!("CARGO_BIN_EXE_ftmd")));
     let pid = daemon.pid();
     let open = std::fs::read_dir(format!("/proc/{pid}/fd")).unwrap().count() as u64;
     let limit = libc::rlimit {
@@ -138,7 +148,9 @@ fn running_out_of_descriptors_does_not_stop_ftmd() {
         .filter_map(|_| std::os::unix::net::UnixStream::connect(&daemon.socket).ok())
         .collect();
     assert!(!flood.is_empty());
-    std::thread::sleep(Duration::from_millis(500));
+    wait_for("an accept to fail", Duration::from_secs(10), || {
+        daemon.log().contains("Too many open files") || daemon.child().try_wait().unwrap().is_some()
+    });
     drop(flood);
 
     assert!(daemon.child().try_wait().unwrap().is_none(), "ftmd exited");
