@@ -1,4 +1,14 @@
 //! Helpers shared by the ftmd integration tests.
+//!
+//! Tests in a binary run in parallel, on CI boxes much slower than a laptop. To keep a new test from flaking:
+//! - Start ftmd with `start_daemon`/`start_daemon_logged`: its own socket, and state, config and data dirs, so it
+//!   never touches the user's daemon or files. Scratch dirs come from `temp_root`, which removes them on drop.
+//! - Write a file that will be executed with `write_executable`/`copy_executable`, never `std::fs::write`/`copy`:
+//!   another thread's fork can hold the writable fd open and exec then fails with ETXTBSY.
+//! - Wait for a condition (`wait_for`, `wait_until`, `wait_for_output`), never a fixed sleep, with a deadline of
+//!   seconds that a loaded CI box still meets.
+//! - Never change the process environment (`std::env::set_var`); pass values to the child `Command` instead.
+//! - Name everything per test (the `name` given to `start_daemon` and `temp_root` must be unique in the binary).
 #![allow(dead_code)]
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
