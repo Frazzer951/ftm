@@ -28,7 +28,7 @@ fn send(client: State<'_, daemon::Client>, request: Request) {
 
 #[tauri::command]
 fn subscribe(app: AppHandle, events: State<'_, daemon::Events>) {
-    let daemon = app.clone();
+    let (daemon, failed) = (app.clone(), app.clone());
     events.restart(
         move |event| {
             let _ = app.emit("ftm-event", event);
@@ -41,6 +41,9 @@ fn subscribe(app: AppHandle, events: State<'_, daemon::Events>) {
                     app_version: env!("CARGO_PKG_VERSION"),
                 },
             );
+        },
+        move |error| {
+            let _ = failed.emit("ftm-daemon-error", error);
         },
     );
 }

@@ -1658,20 +1658,18 @@ let daemonCurrent = false;
 // Each (re)connect of the event stream reports the daemon's version, then replays any update_blocked.
 const daemon = listen<{ version: string; app_version: string }>("ftm-daemon", ({ payload }) => {
   daemonCurrent = compareVersions(payload.version, payload.app_version) >= 0;
+  notice("subscribe", null);
   notice("update", null);
   notice("version", versionNotice(payload.version, payload.app_version));
 });
-/// Retried until it takes: without the stream, the sidebar stays empty.
-function subscribe(attempt = 0) {
-  invoke("subscribe")
-    .then(() => notice("subscribe", null))
-    .catch((err) => {
-      console.error("subscribing to ftmd", err);
-      notice("subscribe", `Could not connect to ftmd: ${err}. Retrying…`, "error");
-      setTimeout(() => subscribe(attempt + 1), Math.min(30_000, 1000 * 2 ** attempt));
-    });
-}
-Promise.all([events, daemon]).then(() => subscribe(), (err) => console.error("listening for ftmd events", err));
+// The stream keeps retrying in the background; without it the sidebar stays empty, so say why.
+const daemonError = listen<string>("ftm-daemon-error", ({ payload }) => {
+  console.error("ftmd event stream", payload);
+  notice("subscribe", `Could not connect to ftmd: ${payload}\n\nRetrying…`, "error");
+});
+Promise.all([events, daemon, daemonError])
+  .then(() => invoke("subscribe"))
+  .catch((err) => console.error("subscribing to ftmd events", err));
 
 interface Release {
   version: string;
