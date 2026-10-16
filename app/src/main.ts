@@ -17,6 +17,7 @@ import { clipboardKey, type OptionAsMeta, optionIsMeta, paneKey } from "./keys.t
 import { KeyLayout, type KeyProtocol, kittyKeyboard } from "./kitty.ts";
 import { defaultSort, moveItem, reorderWithin, type SortMode, sortRows } from "./order.ts";
 import { replyFilter } from "./replies.ts";
+import { clampSidebarWidth, SIDEBAR_DEFAULT } from "./sidebar.ts";
 import { loadSounds, play, type SoundEntry, type SoundSettings } from "./sounds.ts";
 import "./style.css";
 import { Tabs } from "./tabs.ts";
@@ -876,6 +877,59 @@ function sortButton(key: string, modes: SortMode[]): HTMLButtonElement {
 
 const sortWorkspaces = (list: Workspace[], mode: SortMode) =>
   sortRows(list, mode, displayName, (w) => w.color, WORKSPACE_COLORS);
+
+const SIDEBAR_WIDTH_KEY = "ftm.sidebarWidth";
+
+function setSidebarWidth(width: number) {
+  document.documentElement.style.setProperty("--sidebar-width", `${width}px`);
+}
+
+function saveSidebarWidth(width: number) {
+  try {
+    if (width === SIDEBAR_DEFAULT) localStorage.removeItem(SIDEBAR_WIDTH_KEY);
+    else localStorage.setItem(SIDEBAR_WIDTH_KEY, String(width));
+  } catch {
+    // Only the width is lost; the next start uses the default.
+  }
+}
+
+/// Drag the sidebar's right edge to resize it, double-click it to go back to the default. The panes refit through
+/// their ResizeObserver.
+function setupSidebarResize() {
+  try {
+    const saved = localStorage.getItem(SIDEBAR_WIDTH_KEY);
+    if (saved) setSidebarWidth(clampSidebarWidth(Number(saved), window.innerWidth));
+  } catch {
+    // Keep the default.
+  }
+  const handle = $("sidebar-resize");
+  let drag: { x: number; width: number; last: number } | null = null;
+  handle.onpointerdown = (e) => {
+    if (e.button !== 0) return;
+    const width = $("sidebar").getBoundingClientRect().width;
+    drag = { x: e.clientX, width, last: width };
+    handle.setPointerCapture(e.pointerId);
+    document.body.classList.add("resizing-sidebar");
+    e.preventDefault();
+  };
+  handle.onpointermove = (e) => {
+    if (!drag) return;
+    drag.last = clampSidebarWidth(drag.width + e.clientX - drag.x, window.innerWidth);
+    setSidebarWidth(drag.last);
+  };
+  const end = () => {
+    if (!drag) return;
+    saveSidebarWidth(drag.last);
+    drag = null;
+    document.body.classList.remove("resizing-sidebar");
+  };
+  handle.onpointerup = end;
+  handle.onpointercancel = end;
+  handle.ondblclick = () => {
+    setSidebarWidth(SIDEBAR_DEFAULT);
+    saveSidebarWidth(SIDEBAR_DEFAULT);
+  };
+}
 
 /// Top to bottom: Pinned, Active Terminals, Active Agents, Folders. Children stay under their parent, wherever the
 /// parent is, sorted the way the parent's section is.
@@ -1770,6 +1824,7 @@ getCurrentWebview()
     v.term.focus();
   })
   .catch(console.error);
+setupSidebarResize();
 setupSpawnDialog();
 setupSettingsDialog();
 invoke<{ terminal: TerminalSettings; theme: ThemeSettings; sounds: SoundSettings; updates: Partial<UpdateSettings> }>(

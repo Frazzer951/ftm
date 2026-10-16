@@ -11,7 +11,10 @@ body {
 button { font: inherit; color: inherit; background: var(--border); border: 1px solid var(--border-strong); border-radius: 4px; cursor: pointer; }
 button:hover { background: var(--hover); }
 
-#sidebar { width: 264px; flex: none; background: var(--sidebar); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
+#sidebar { position: relative; width: clamp(180px, var(--sidebar-width, 264px), 50vw); flex: none; background: var(--sidebar); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
+#sidebar-resize { position: absolute; top: 0; bottom: 0; right: -3px; width: 6px; z-index: 5; cursor: col-resize; }
+#sidebar-resize:hover, .resizing-sidebar #sidebar-resize { background: linear-gradient(to right, transparent 2px, var(--accent) 2px, var(--accent) 4px, transparent 4px); }
+body.resizing-sidebar { cursor: col-resize; user-select: none; }
 #sidebar header { display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; font-weight: 600; }
 #sections { overflow-y: auto; flex: 1; }
 #sections ul { list-style: none; margin: 0; padding: 0; }
