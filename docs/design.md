@@ -56,7 +56,7 @@ ftm capture <pane|workspace> [--raw]          # screen + scrollback as text; --r
 ftm send <pane|workspace> <text> [--enter]    # type into a pane; a workspace id means its first pane
 ftm attach <pane|workspace>                   # this terminal shows the pane; Ctrl+] then d detaches
 ftm gc [--yes] [--no-fetch]                   # list merged FTM worktrees; --yes removes them and their branches
-       [--include-upstream-deleted]           # also ones whose upstream was deleted (maybe closed unmerged)
+       [--include-upstream-deleted]           # also ones whose upstream was deleted (maybe closed unmerged); not with --no-fetch
 ```
 
 Planned: `ftm tab`/`ftm split`.
@@ -97,7 +97,7 @@ Worktrees live under `~/.local/share/ftm/worktrees/<repo>/<branch>` (`$XDG_DATA_
 
 - **merged**: the branch tip is an ancestor of `base`. A branch with no commits of its own counts as merged.
 - **squash-merged**: the branch's whole diff from where it left `base` matches a commit in `base` by patch id (`git cherry`).
-- **upstream deleted**, only with `--include-upstream-deleted`: the remote branch is gone (per `git ls-remote`) and the branch tip equals the last fetched tip of its remote-tracking ref, so everything was pushed. This catches PRs merged in a way the two checks above miss, such as a rebase merge. It cannot tell such a PR from one that was closed unmerged, whose commits would then survive only in the reflog, so without the flag these worktrees are skipped with a reason naming it.
+- **upstream deleted**, only with `--include-upstream-deleted`: the remote branch is gone (per `git ls-remote`) and the branch tip equals the last fetched tip of its remote-tracking ref, so everything was pushed. This catches PRs merged in a way the two checks above miss, such as a rebase merge. It cannot tell such a PR from one that was closed unmerged, whose commits would then survive only in the reflog, so without the flag these worktrees are skipped with a reason naming it. Seeing the deletion needs the fetch, so the flag conflicts with `--no-fetch`.
 
 A done worktree is skipped, with the reason printed, when any of these hold:
 

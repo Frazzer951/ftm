@@ -113,8 +113,8 @@ enum Command {
         #[arg(long)]
         no_fetch: bool,
         /// Also remove worktrees whose upstream branch was deleted after everything was pushed, which may be a PR
-        /// closed unmerged
-        #[arg(long)]
+        /// closed unmerged. Seeing the deletion needs a fetch, so not with --no-fetch
+        #[arg(long, conflicts_with = "no_fetch")]
         include_upstream_deleted: bool,
     },
     /// Type text into a pane
