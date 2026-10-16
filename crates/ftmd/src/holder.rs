@@ -9,13 +9,15 @@ use eyre::{Result, WrapErr, bail, eyre};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 const BUFFER_CAP: usize = 1 << 20;
 const BUFFER_SLACK: usize = 256 << 10;
+/// How long processes get to exit after SIGHUP, and then the terminal to reach end of stream after SIGKILL.
+const KILL_GRACE: Duration = Duration::from_secs(2);
 /// How long a holder whose processes are gone waits for its first ftmd, which is still connecting when a pane's
 /// command fails at once. Matches ftmd's own wait for a new holder.
 const ATTACH_GRACE: Duration = Duration::from_secs(5);
@@ -28,6 +30,8 @@ struct Shared {
     client: Option<UnixStream>,
     /// Some ftmd has been sent the buffer.
     attached: bool,
+    /// The terminal reached end of stream.
+    eof: bool,
     rows: u16,
     cols: u16,
 }
@@ -80,6 +84,7 @@ pub fn run(args: &[String]) -> Result<()> {
         buffer: Vec::new(),
         client: None,
         attached: false,
+        eof: false,
         rows,
         cols,
     }));
@@ -108,9 +113,15 @@ pub fn run(args: &[String]) -> Result<()> {
                 let _ = old.shutdown(std::net::Shutdown::Both);
             }
         }
-        let (pane, shared, input, master, child) =
-            (pane.clone(), shared.clone(), input.clone(), master.clone(), child.clone());
-        std::thread::spawn(move || serve(&pane, conn, &shared, &input, &master, &child));
+        let (pane, shared, input, master, child, socket) = (
+            pane.clone(),
+            shared.clone(),
+            input.clone(),
+            master.clone(),
+            child.clone(),
+            socket.clone(),
+        );
+        std::thread::spawn(move || serve(&pane, conn, &shared, &input, &master, &child, &socket));
     }
     Ok(())
 }
@@ -123,7 +134,7 @@ fn pump_output(
     mut reader: Box<dyn Read + Send>,
     shared: &Mutex<Shared>,
     child: &Mutex<Box<dyn Child + Send + Sync>>,
-    socket: &PathBuf,
+    socket: &Path,
 ) {
     let mut buf = vec![0u8; 64 << 10];
     loop {
@@ -145,6 +156,7 @@ fn pump_output(
             s.client = None;
         }
     }
+    lock(shared).eof = true;
     let deadline = Instant::now() + ATTACH_GRACE;
     while !lock(shared).attached && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
@@ -153,6 +165,10 @@ fn pump_output(
     if let Some(killing) = killing {
         let _ = killing.join();
     }
+    exit(pane, child, socket)
+}
+
+fn exit(pane: &str, child: &Mutex<Box<dyn Child + Send + Sync>>, socket: &Path) -> ! {
     let _ = std::fs::remove_file(socket);
     match lock(child).wait() {
         Ok(status) => match status.signal() {
@@ -167,10 +183,11 @@ fn pump_output(
 fn serve(
     pane: &str,
     mut conn: UnixStream,
-    shared: &Mutex<Shared>,
+    shared: &Arc<Mutex<Shared>>,
     input: &Sender<Vec<u8>>,
     master: &Arc<Mutex<Box<dyn MasterPty + Send>>>,
     child: &Arc<Mutex<Box<dyn Child + Send + Sync>>>,
+    socket: &Path,
 ) {
     while let Ok(Some(frame)) = frame::read(&mut conn) {
         match frame {
@@ -190,8 +207,25 @@ fn serve(
             Frame::Kill => {
                 let mut s = lock(shared);
                 if s.killing.is_none() {
-                    let (pane, master, child) = (pane.to_string(), master.clone(), child.clone());
-                    s.killing = Some(std::thread::spawn(move || terminate(&pane, &master, &child)));
+                    let (pane, shared, master, child, socket) = (
+                        pane.to_string(),
+                        shared.clone(),
+                        master.clone(),
+                        child.clone(),
+                        socket.to_path_buf(),
+                    );
+                    s.killing = Some(std::thread::spawn(move || {
+                        terminate(&pane, &master, &child);
+                        // A process that left the session can still hold the terminal open.
+                        let deadline = Instant::now() + KILL_GRACE;
+                        while !lock(&shared).eof {
+                            if Instant::now() > deadline {
+                                tracing::warn!("pane {pane}: terminal still open after SIGKILL; exiting anyway");
+                                exit(&pane, &child, &socket);
+                            }
+                            std::thread::sleep(Duration::from_millis(25));
+                        }
+                    }));
                 }
             },
             Frame::Hello { .. } | Frame::Output(_) => {},
@@ -201,8 +235,9 @@ fn serve(
 
 /// Hangs up the shell's process group and the terminal's foreground group, then SIGKILLs whatever is left. An agent
 /// started by an interactive shell runs in its own group and Claude Code ignores SIGHUP, so signalling the shell alone
-/// leaves it running. A group id is free for reuse once its processes are gone, so the shell stays unreaped until this
-/// is done and the foreground group is only signalled while it is still in the pane's session.
+/// leaves it running; a job that ignores SIGHUP outlives the shell. A group id is free for reuse once its processes
+/// are gone, so the shell stays unreaped until this is done and other groups are only signalled while they are still
+/// in the pane's session.
 fn terminate(pane: &str, master: &Mutex<Box<dyn MasterPty + Send>>, child: &Mutex<Box<dyn Child + Send + Sync>>) {
     let Some(shell) = lock(child).process_id().map(|pid| pid as libc::pid_t) else {
         return;
@@ -210,24 +245,53 @@ fn terminate(pane: &str, master: &Mutex<Box<dyn MasterPty + Send>>, child: &Mute
     let fg = lock(master).process_group_leader().filter(|&g| g > 0 && g != shell);
     tracing::info!("pane {pane}: hanging up shell group {shell} and foreground group {fg:?}");
     signal_groups(shell, fg, libc::SIGHUP);
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while running(shell) || fg.is_some_and(|g| in_session(g, shell)) {
+    let deadline = Instant::now() + KILL_GRACE;
+    while running(shell) || fg.is_some_and(|g| in_session(g, shell)) || !session_groups(shell).is_empty() {
         if Instant::now() > deadline {
-            tracing::warn!("pane {pane}: still running 2s after SIGHUP; sending SIGKILL");
-            signal_groups(shell, fg, libc::SIGKILL);
+            tracing::warn!("pane {pane}: still running {KILL_GRACE:?} after SIGHUP; sending SIGKILL");
             break;
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+    // Without a process table to check (macOS), the shell's group may still hold a job that ignored the hangup.
+    signal_groups(shell, fg, libc::SIGKILL);
 }
 
 fn signal_groups(shell: libc::pid_t, fg: Option<libc::pid_t>, signal: libc::c_int) {
     unsafe { libc::kill(-shell, signal) };
-    if let Some(fg) = fg
-        && in_session(fg, shell)
-    {
-        unsafe { libc::kill(-fg, signal) };
+    for group in fg.into_iter().chain(session_groups(shell)) {
+        if group != shell && in_session(group, shell) {
+            unsafe { libc::kill(-group, signal) };
+        }
     }
+}
+
+/// The process groups of the session `session` leads that still have a live process.
+#[cfg(target_os = "linux")]
+fn session_groups(session: libc::pid_t) -> Vec<libc::pid_t> {
+    let Ok(procs) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut groups: Vec<libc::pid_t> = procs
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().bytes().all(|b| b.is_ascii_digit()))
+        .filter_map(|e| {
+            let stat = std::fs::read_to_string(e.path().join("stat")).ok()?;
+            // pid (comm) state ppid pgrp session ...; comm may contain anything, including ") ".
+            let mut fields = stat.rsplit_once(')')?.1.split_whitespace();
+            let state = fields.next()?;
+            let (pgrp, sid) = (fields.nth(1)?.parse().ok()?, fields.next()?.parse::<libc::pid_t>().ok()?);
+            (sid == session && state != "Z").then_some(pgrp)
+        })
+        .collect();
+    groups.sort_unstable();
+    groups.dedup();
+    groups
+}
+
+#[cfg(not(target_os = "linux"))]
+fn session_groups(_session: libc::pid_t) -> Vec<libc::pid_t> {
+    Vec::new()
 }
 
 /// Whether `group` is still a process group of the session `session` leads. A group whose leader has exited but whose
