@@ -230,6 +230,22 @@ test("a Meta Option that leaves a letter alone did not compose, so the letter co
   assert.equal(enc(key("O", "KeyS", { altKey: true, shiftKey: true }), 0b101), "\x1b[111:79;4u");
 });
 
+test("a shifted symbol reports the unshifted key of the active layout as its base", () => {
+  const enc = (e: KeyEvent, layout: KeyLayout) => encodeKey(e, 0b101, true, false, layout);
+  assert.equal(enc(key("?", "Minus", { ctrlKey: true, shiftKey: true }), qwertz), "\x1b[223:63;6u");
+  assert.equal(enc(key("%", "Digit5", { altKey: true, shiftKey: true }), qwertz), "\x1b[53:37;4u");
+  assert.equal(enc(key("{", "Minus", { ctrlKey: true, shiftKey: true }), dvorak), "\x1b[91:123;6u");
+  // AZERTY: the digit row types symbols unshifted.
+  const azerty = learned([["Digit1", "&", "1"]]);
+  assert.equal(enc(key("1", "Digit1", { ctrlKey: true, shiftKey: true }), azerty), "\x1b[38:49;6u");
+  // Only the unshifted half known yet.
+  const half = new KeyLayout();
+  half.learn(key("ß", "Minus"));
+  assert.equal(enc(key("?", "Minus", { ctrlKey: true, shiftKey: true }), half), "\x1b[223:63;6u");
+  // A character the key does not type with Shift in this layout is its own base.
+  assert.equal(enc(key("\\", "Minus", { ctrlKey: true, shiftKey: true }), qwertz), "\x1b[92;6u");
+});
+
 test("only keys typed with at most Shift held teach the layout, and a changed key drops what was known of it", () => {
   const layout = new KeyLayout();
   layout.learn(key("s", "KeyS", { ctrlKey: true }));

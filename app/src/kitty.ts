@@ -144,8 +144,8 @@ export class KeyLayout {
 const usLayout = new KeyLayout();
 
 /// The key's unshifted character, and the shifted one when Shift is held. Taken from `key`, so it follows the active
-/// layout, except where `key` cannot say: a composed Option, or a shifted symbol whose unshifted form only the
-/// physical key gives.
+/// layout, except where `key` cannot say: a composed Option, or a shifted symbol, whose unshifted form comes from the
+/// layout.
 function textKey(e: KeyEvent, composedAlt: boolean, layout: KeyLayout): { code: number; shifted?: number } | undefined {
   const known = layout.key(e.code);
   const us = usKeys[e.code];
@@ -161,7 +161,12 @@ function textKey(e: KeyEvent, composedAlt: boolean, layout: KeyLayout): { code: 
   if (chars.length !== 1) return;
   const ch = chars[0];
   let base = cased(ch, false);
-  if (e.shiftKey && !hasCase(ch) && us && (us[1] === ch || e.code.startsWith("Digit"))) base = us[0];
+  if (e.shiftKey && !hasCase(ch)) {
+    // A shifted character other than the one learned for the key means it was not typed in this layout (AltGr).
+    if (known?.[0] !== undefined) {
+      if (known[1] === undefined || known[1] === ch) base = known[0];
+    } else if (us && (us[1] === ch || e.code.startsWith("Digit"))) base = us[0];
+  }
   return { code: codePoint(base), shifted: e.shiftKey ? codePoint(ch) : undefined };
 }
 
