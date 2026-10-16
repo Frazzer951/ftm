@@ -431,7 +431,9 @@ impl State {
             },
         );
         // Sent once the pane is in a layout (`emit_replay`): a client drops output for panes it does not know.
-        self.pane_output(id, &replay, false);
+        if self.pane_output(id, &replay, false) {
+            let _ = nudge(shared, self, id);
+        }
         let shared = shared.clone();
         std::thread::Builder::new()
             .name(format!("pane-{id}"))
@@ -440,11 +442,12 @@ impl State {
         Ok(())
     }
 
-    /// `live` output goes out to subscribers as it comes; a holder's replay is sent whole by the caller.
-    fn pane_output(&mut self, id: PaneId, bytes: &[u8], live: bool) {
-        let Some(pane) = self.panes.get_mut(&id) else { return };
+    /// `live` output goes out to subscribers as it comes; a holder's replay is sent whole by the caller. Returns
+    /// whether the emulator had to start the screen over, which leaves it blank until the pane repaints (`nudge`).
+    fn pane_output(&mut self, id: PaneId, bytes: &[u8], live: bool) -> bool {
+        let Some(pane) = self.panes.get_mut(&id) else { return false };
         pane.buffer.extend_from_slice(bytes);
-        process(id, &mut pane.screen, bytes);
+        let restarted = !process(id, &mut pane.screen, bytes);
         let (workspace, titles) = (pane.workspace, std::mem::take(&mut pane.screen.callbacks_mut().0));
         if pane.buffer.len() > BUFFER_CAP + BUFFER_SLACK {
             let excess = pane.buffer.len() - BUFFER_CAP;
@@ -466,6 +469,7 @@ impl State {
             ws.auto_title = Some(title);
             self.emit_workspaces();
         }
+        restarted
     }
 
     /// The pane's whole buffer, for subscribers to redraw it from scratch.
@@ -534,14 +538,15 @@ fn handshake(stream: &UnixStream) -> Result<(UnixStream, (u16, u16), Vec<u8>)> {
 }
 
 /// A panic in the emulator would otherwise end the pane's reader and leave the pane frozen; the screen starts over
-/// instead, while the raw output (what the app shows) carries on.
-fn process(id: PaneId, screen: &mut vt100::Parser<TitleWatch>, bytes: &[u8]) {
+/// instead, while the raw output (what the app shows) carries on. Returns false when it had to.
+fn process(id: PaneId, screen: &mut vt100::Parser<TitleWatch>, bytes: &[u8]) -> bool {
     let processed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| screen.process(bytes)));
     if processed.is_err() {
         let (rows, cols) = screen.screen().size();
         tracing::error!("pane {id}: the terminal emulator panicked; starting its screen over");
         *screen = vt100::Parser::new_with_callbacks(rows.max(MIN_ROWS), cols.max(MIN_COLS), SCROLLBACK, TitleWatch::default());
     }
+    processed.is_ok()
 }
 
 #[derive(Debug)]
@@ -744,7 +749,9 @@ fn read_loop(shared: Shared, id: PaneId, mut holder: UnixStream) {
                 if !state.panes.contains_key(&id) {
                     return;
                 }
-                state.pane_output(id, &bytes, true);
+                if state.pane_output(id, &bytes, true) {
+                    let _ = nudge(&shared, &state, id);
+                }
                 continue;
             },
             Ok(Some(_)) => continue,
@@ -786,7 +793,7 @@ fn reconnect(shared: &Shared, id: PaneId) -> Result<Option<UnixStream>> {
     let wanted = pane.screen.screen().size();
     pane.buffer.clear();
     pane.screen = vt100::Parser::new_with_callbacks(rows, cols, SCROLLBACK, TitleWatch::default());
-    state.pane_output(id, &replay, false);
+    let restarted = state.pane_output(id, &replay, false);
     if let Some(pane) = state.panes.get_mut(&id)
         && (rows, cols) != wanted
         && !pane.exited
@@ -796,6 +803,9 @@ fn reconnect(shared: &Shared, id: PaneId) -> Result<Option<UnixStream>> {
             rows: wanted.0,
             cols: wanted.1,
         }));
+    }
+    if restarted {
+        let _ = nudge(shared, &state, id);
     }
     state.emit_replay(id);
     Ok(Some(read))
@@ -821,7 +831,7 @@ fn pane_exited(shared: &Shared, id: PaneId, why: &str) {
             const NOTE: &[u8] = b"\r\n\x1b[31m[ftm] the agent exited before it started\x1b[0m\r\n";
             pane.exited = true;
             pane.buffer.extend_from_slice(NOTE);
-            process(id, &mut pane.screen, NOTE);
+            let _ = process(id, &mut pane.screen, NOTE);
             set_status(ws, Status::Failed, 0);
             let _ = state.events.send(Event::Output {
                 pane: id,
@@ -1269,11 +1279,23 @@ fn resize(shared: &Shared, pane: PaneId, cols: u16, rows: u16, peer: Option<i32>
     if p.exited {
         return Ok(Response::Ok);
     }
-    if !unchanged || cols < 2 {
+    if unchanged {
+        nudge(shared, &state, pane)?;
+    } else {
         state.send_to_holder(pane, Frame::Resize { rows, cols })?;
-        return Ok(Response::Ok);
     }
-    state.send_to_holder(pane, Frame::Resize { rows, cols: cols - 1 })?;
+    Ok(Response::Ok)
+}
+
+/// Makes the pane's TUI repaint: resizes its terminal by a column, and back to the pane's size a moment later.
+fn nudge(shared: &Shared, state: &State, pane: PaneId) -> Result<()> {
+    let p = state.pane(pane)?;
+    if p.exited {
+        return Ok(());
+    }
+    let (rows, cols) = p.screen.screen().size();
+    let cols = if cols > MIN_COLS { cols - 1 } else { cols + 1 };
+    state.send_to_holder(pane, Frame::Resize { rows, cols })?;
     let shared = shared.clone();
     std::thread::spawn(move || {
         std::thread::sleep(REDRAW_NUDGE);
@@ -1285,7 +1307,7 @@ fn resize(shared: &Shared, pane: PaneId, cols: u16, rows: u16, peer: Option<i32>
             let _ = state.send_to_holder(pane, Frame::Resize { rows, cols });
         }
     });
-    Ok(Response::Ok)
+    Ok(())
 }
 
 fn input(shared: &Shared, pane: PaneId, data: &str) -> Result<Response> {
@@ -1396,9 +1418,9 @@ mod tests {
     #[test]
     fn an_emulator_panic_starts_the_screen_over() {
         let mut screen = vt100::Parser::new_with_callbacks(1, 1, SCROLLBACK, TitleWatch::default());
-        process(PaneId::nil(), &mut screen, "一\n一\n".as_bytes());
+        assert!(!process(PaneId::nil(), &mut screen, "一\n一\n".as_bytes()));
         assert_eq!(screen.screen().size(), (MIN_ROWS, MIN_COLS));
-        process(PaneId::nil(), &mut screen, b"ok");
+        assert!(process(PaneId::nil(), &mut screen, b"ok"));
         assert!(screen.screen().contents().contains("ok"));
     }
 
