@@ -15,7 +15,7 @@ import { dropText } from "./drop.ts";
 import { StatusSounds, stillFinished } from "./finish.ts";
 import { clipboardKey, type OptionAsMeta, optionIsMeta, paneKey } from "./keys.ts";
 import { KeyLayout, type KeyProtocol, kittyKeyboard } from "./kitty.ts";
-import { isQueryReply } from "./replies.ts";
+import { replyFilter } from "./replies.ts";
 import { loadSounds, play, type SoundEntry, type SoundSettings } from "./sounds.ts";
 import "./style.css";
 import { Tabs } from "./tabs.ts";
@@ -153,8 +153,9 @@ function view(pane: Id): PaneView {
     }
   }
   const input = (data: string) => send({ op: "input", pane, data });
+  const replies = replyFilter(() => v.replaying > 0);
   term.onData((d) => {
-    if (!(v.replaying && isQueryReply(d))) input(encode(d));
+    if (replies.keep(d)) input(encode(d));
   });
   term.onBinary((d) => input(btoa(d)));
   const kitty = kittyKeyboard(term, (d) => {
@@ -162,6 +163,7 @@ function view(pane: Id): PaneView {
   });
   const wheel = appWheel(term, () => settings.app_scroll, (d) => input(encode(d)));
   term.attachCustomKeyEventHandler((e) => {
+    replies.key();
     const clip = clipboardKey(e, isMac);
     if (clip) {
       e.preventDefault();
