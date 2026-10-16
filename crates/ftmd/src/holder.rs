@@ -300,7 +300,7 @@ fn session_groups(session: libc::pid_t) -> Vec<libc::pid_t> {
 /// The process groups of the session `session` leads that still have a live process.
 #[cfg(target_os = "macos")]
 fn session_groups(session: libc::pid_t) -> Vec<libc::pid_t> {
-    let pid_size = std::mem::size_of::<libc::pid_t>();
+    let pid_size = size_of::<libc::pid_t>();
     // SAFETY: with no buffer, proc_listallpids only reports how many pids there are.
     let Ok(count) = usize::try_from(unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) }) else {
         return Vec::new();
@@ -313,7 +313,7 @@ fn session_groups(session: libc::pid_t) -> Vec<libc::pid_t> {
     // SAFETY: the buffer holds `bytes` bytes of pid_t, and proc_listallpids writes at most that many.
     let listed = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
     pids.truncate(usize::try_from(listed).unwrap_or(0).min(pids.len()));
-    let Ok(info_bytes) = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>()) else {
+    let Ok(info_bytes) = libc::c_int::try_from(size_of::<libc::proc_bsdinfo>()) else {
         return Vec::new();
     };
     let mut groups: Vec<libc::pid_t> = pids
