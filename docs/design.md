@@ -83,7 +83,7 @@ The built-in excludes (`DEFAULT_COPY_IGNORED_EXCLUDE` in `ftm-core/src/config.rs
 
 Steps:
 
-1. `git worktree add <wt> -b <branch> <base>`
+1. `git worktree add <wt> -b <branch> <base>`, or `git worktree add <wt> <branch>` for a branch that already exists. `<base>` is `--base`, else the repo config's `base`, else the remote's default branch: the current branch's upstream remote, else `origin`, and its default from `refs/remotes/<remote>/HEAD`, else `git ls-remote --symref`, else `<remote>/main` or `<remote>/master`. A repo with no remote starts from the source checkout's HEAD. A remote-tracking base (`origin/main`) is fetched first (`git fetch <remote> <branch>`, 60s at most, never prompting), so the branch starts from the remote's tip. If the fetch fails, ftmd logs a warning and uses the last fetch.
 2. If `--copy-changes`: `git diff HEAD --binary | git -C <wt> apply` (staged + unstaged edits to tracked files)
 3. If `--copy-changes`: copy `git ls-files --others --exclude-standard` (untracked, not ignored)
 4. Always: copy gitignored paths as `copy_ignored` says (`git ls-files --others --ignored --exclude-standard --directory`, so an ignored directory is one entry). Files go through `fs::copy`, which on macOS clones on APFS (copy-on-write, near free) and falls back to a byte copy; modes are kept. Symlinks are recreated as symlinks and never followed, so a link out of the repo stays a link. A directory holding `.git` (a nested repo or worktree, e.g. `.claude/worktrees/*`) and special files are skipped. Copying is best effort: a path that cannot be read is logged as a warning and the rest still come over. ftmd logs each skipped path at debug and the totals at info.

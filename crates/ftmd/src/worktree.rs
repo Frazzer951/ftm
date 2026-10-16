@@ -3,6 +3,7 @@ use ftm_core::config::{CopyIgnored, DEFAULT_COPY_IGNORED_EXCLUDE, RepoConfig};
 use ftm_core::{paths, repo};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 pub struct Created {
     pub path: PathBuf,
@@ -32,6 +33,91 @@ fn checkouts(dir: &Path) -> Option<(PathBuf, PathBuf)> {
     Some((src, repo::main_repo(dir)?))
 }
 
+/// Talking to a remote can hang on the network; a spawn waits for this at most before going on without it.
+const REMOTE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Runs a git command that talks to a remote, never prompting and giving up after `REMOTE_TIMEOUT`.
+fn git_remote(dir: &Path, args: &[&str]) -> Result<String> {
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .wrap_err("running git")?;
+    let deadline = Instant::now() + REMOTE_TIMEOUT;
+    while child.try_wait()?.is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("git {}: timed out after {}s", args.join(" "), REMOTE_TIMEOUT.as_secs());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        bail!("git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
+}
+
+/// The remote a new worktree branch starts from: the current branch's upstream remote, else `origin`.
+fn default_remote(src: &Path) -> Option<String> {
+    let remotes = git(src, &["remote"]).ok()?;
+    let upstream = git(src, &["symbolic-ref", "--short", "-q", "HEAD"])
+        .ok()
+        .and_then(|head| git(src, &["config", &format!("branch.{head}.remote")]).ok());
+    upstream
+        .into_iter()
+        .chain(["origin".to_string()])
+        .find(|r| remotes.lines().any(|l| l == r))
+}
+
+/// The remote's default branch as a remote-tracking ref (`origin/main`), or `None` for a repo with no remote, which
+/// then starts from the source checkout's HEAD.
+fn remote_default(src: &Path) -> Option<String> {
+    let remote = default_remote(src)?;
+    if let Ok(head) = git(
+        src,
+        &["symbolic-ref", "--short", "-q", &format!("refs/remotes/{remote}/HEAD")],
+    ) {
+        return Some(head);
+    }
+    let listed = git_remote(src, &["ls-remote", "--symref", &remote, "HEAD"])
+        .inspect_err(|e| tracing::warn!("asking {remote} for its default branch: {e:#}"))
+        .unwrap_or_default();
+    let symref = listed.lines().find_map(|l| {
+        l.strip_prefix("ref: refs/heads/")
+            .and_then(|r| r.strip_suffix("\tHEAD"))
+            .map(|b| format!("{remote}/{b}"))
+    });
+    symref.or_else(|| {
+        ["main", "master"]
+            .into_iter()
+            .map(|b| format!("{remote}/{b}"))
+            .find(|r| git(src, &["rev-parse", "--verify", "-q", &format!("refs/remotes/{r}")]).is_ok())
+    })
+}
+
+/// Brings a remote-tracking `base` up to date, so a new branch starts from the remote's tip rather than the last
+/// fetch. Offline, the last fetch is used.
+fn fetch_tracking(src: &Path, base: &str) {
+    let Ok(remotes) = git(src, &["remote"]) else { return };
+    let Some((remote, branch)) = remotes
+        .lines()
+        .filter_map(|r| Some((r, base.strip_prefix(r)?.strip_prefix('/')?)))
+        .max_by_key(|(r, _)| r.len())
+    else {
+        return;
+    };
+    if let Err(e) = git_remote(src, &["fetch", "--quiet", remote, branch]) {
+        tracing::warn!("fetching {base}, using the last fetch: {e:#}");
+    }
+}
+
 pub fn create(cwd: &Path, branch: &str, base: Option<&str>, copy_changes: bool) -> Result<Created> {
     let (src, repo) = checkouts(cwd).ok_or_else(|| eyre::eyre!("{} is not in a git repo", cwd.display()))?;
     let name = repo::repo_name(&repo);
@@ -54,8 +140,13 @@ pub fn create(cwd: &Path, branch: &str, base: Option<&str>, copy_changes: bool) 
     let path_str = path.to_string_lossy().into_owned();
     let new_branch = git(&src, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_err();
     if new_branch {
+        let base = base
+            .map(str::to_string)
+            .or(config.base.clone())
+            .or_else(|| remote_default(&src));
         let mut args = vec!["worktree", "add", "-b", branch, &path_str];
-        if let Some(base) = base.or(config.base.as_deref()) {
+        if let Some(base) = &base {
+            fetch_tracking(&src, base);
             args.push(base);
         }
         git(&src, &args)?;
