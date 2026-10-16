@@ -55,14 +55,8 @@ jobs:
             fi
           fi
 
-          # The patch after the committed version, so a nightly sorts above the last release and below the next one.
-          # A committed pre-release (0.2.0-rc.1) is already ahead of the last release: keep its core version.
           current=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
-          IFS=. read -r major minor patch <<<"${current%%-*}"
-          case $current in *-*) ;; *) patch=$((patch + 1)) ;; esac
-          # The run number keeps several nightlies a day unique and in order; unlike a time of day it never has the
-          # leading zero that semver, and so Cargo, rejects.
-          version="$major.$minor.$patch-nightly.$(date -u +%Y%m%d).$GITHUB_RUN_NUMBER"
+          version=$(scripts/nightly-version.sh "$current" "$GITHUB_RUN_NUMBER")
           echo "building $version from $GITHUB_SHA"
           {
             echo "build=true"
@@ -137,13 +131,9 @@ jobs:
       # GitHub turns the space in "FTM Nightly_<version>_<arch>.dmg" into a dot.
       - name: Render Casks/ftm@nightly.rb
         run: |
-          base=https://github.com/$GITHUB_REPOSITORY/releases/download/v$VERSION
-          sha() { curl -fsSL "$base/FTM.Nightly_${VERSION}_$1.dmg" | sha256sum | cut -d' ' -f1; }
-          arm=$(sha aarch64)
-          intel=$(sha x64)
           mkdir -p out
-          sed -e "s/@VERSION@/$VERSION/" -e "s/@SHA256_ARM@/$arm/" -e "s/@SHA256_INTEL@/$intel/" \
-            packaging/homebrew/ftm@nightly.rb >out/ftm@nightly.rb
+          scripts/render-package.sh cask packaging/homebrew/ftm@nightly.rb \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/v$VERSION" FTM.Nightly "$VERSION" >out/ftm@nightly.rb
           cat out/ftm@nightly.rb
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -184,14 +174,10 @@ jobs:
       # GitHub turns the space in "FTM Nightly_<version>_<arch>.deb" into a dot.
       - name: Render PKGBUILD
         run: |
-          base=https://github.com/$GITHUB_REPOSITORY/releases/download/v$VERSION
-          sha() { curl -fsSL "$1" | sha256sum | cut -d' ' -f1; }
           mkdir -p out
-          sed -e "s/@VERSION@/$VERSION/" \
-            -e "s/@SHA256_X86_64@/$(sha "$base/FTM.Nightly_${VERSION}_amd64.deb")/" \
-            -e "s/@SHA256_AARCH64@/$(sha "$base/FTM.Nightly_${VERSION}_arm64.deb")/" \
-            -e "s/@SHA256_LICENSE@/$(sha256sum LICENSE | cut -d' ' -f1)/" \
-            packaging/aur/ftm-nightly-bin/PKGBUILD >out/PKGBUILD
+          scripts/render-package.sh pkgbuild packaging/aur/ftm-nightly-bin/PKGBUILD \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/v$VERSION" FTM.Nightly "$VERSION" LICENSE \
+            >out/PKGBUILD
           cat out/PKGBUILD
       # The app's update check installs from this asset; it is never pushed to the AUR.
       - name: Attach the PKGBUILD to the pre-release
