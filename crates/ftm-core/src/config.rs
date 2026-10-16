@@ -121,8 +121,8 @@ pub struct SoundSettings {
 impl Default for SoundSettings {
     fn default() -> Self {
         SoundSettings {
-            needs_input: "Nudge".into(),
-            completed: "Chime".into(),
+            needs_input: "Clink".into(),
+            completed: "Ding".into(),
             volume: 0.7,
             wait_for_subagents: false,
         }
@@ -294,7 +294,7 @@ mod tests {
             dark: "Nord".into(),
             light: "Supacode Light".into(),
         };
-        assert_eq!(settings.sounds.completed, "Chime");
+        assert_eq!(settings.sounds.completed, "Ding");
         assert!(!settings.sounds.wait_for_subagents);
         settings.sounds.needs_input = String::new();
         settings.sounds.wait_for_subagents = true;
