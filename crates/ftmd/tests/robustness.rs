@@ -4,7 +4,7 @@
 mod common;
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
-use common::{Conn, Daemon, start_daemon, temp_root, wait_for};
+use common::{Conn, Daemon, start_daemon, temp_dir_at, temp_root, wait_for};
 use ftm_core::model::{Kind, Layout, PaneId, Status, Workspace};
 use ftm_core::protocol::{Event, Request, Response, SpawnRequest};
 use std::path::Path;
@@ -231,8 +231,8 @@ fn a_new_pane_is_announced_before_its_output() {
 #[test]
 fn agents_without_status_hooks_are_not_left_starting() {
     let dir = temp_root("no-hooks");
-    let settings = format!("/tmp/ftmd-{}-no-hooks.claude-settings.json", std::process::id());
-    std::fs::create_dir_all(&settings).unwrap();
+    // A dir where ftmd writes its hook settings, so writing them fails.
+    let _settings = temp_dir_at(format!("/tmp/ftmd-{}-no-hooks.claude-settings.json", std::process::id()).into());
     let daemon = start_daemon("no-hooks", |c| {
         c.env("FTM_AGENT_CMD", "true");
     });
@@ -257,7 +257,6 @@ fn agents_without_status_hooks_are_not_left_starting() {
         conn.list()[0].tabs.is_empty()
     });
     assert_eq!(conn.list()[0].status, Status::Idle);
-    let _ = std::fs::remove_dir(&settings);
 }
 
 /// SIGKILLs the session a test's pane runs in, if the test failed before closing it.

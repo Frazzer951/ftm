@@ -316,6 +316,13 @@ pub fn temp_root(name: &str) -> TempRoot {
     TempRoot(root)
 }
 
+/// A fresh dir at `path`, for a test that needs it somewhere `temp_root` does not put it; removed on drop.
+pub fn temp_dir_at(path: PathBuf) -> TempRoot {
+    let _ = std::fs::remove_dir_all(&path);
+    std::fs::create_dir_all(&path).unwrap();
+    TempRoot(path)
+}
+
 pub struct TempRoot(PathBuf);
 
 impl std::ops::Deref for TempRoot {
