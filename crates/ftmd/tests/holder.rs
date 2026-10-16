@@ -53,6 +53,7 @@ struct Reap(Vec<i32>);
 impl Drop for Reap {
     fn drop(&mut self) {
         for &pid in &self.0 {
+            // SAFETY: kill takes no pointers.
             unsafe { libc::kill(pid, libc::SIGKILL) };
         }
     }

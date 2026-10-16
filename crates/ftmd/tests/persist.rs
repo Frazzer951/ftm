@@ -197,6 +197,7 @@ fn panes_whose_holder_died_are_dropped() {
     // As after a reboot: ftmd is down and the holders are gone.
     daemon.stop();
     for (shell, holder) in doomed {
+        // SAFETY: kill takes no pointers.
         unsafe {
             libc::kill(holder, libc::SIGKILL);
             libc::kill(shell, libc::SIGKILL);
@@ -228,6 +229,8 @@ fn attach_on_loose_pty(socket: &Path, ws: WorkspaceId) -> (std::process::Child, 
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
+    // SAFETY: `master`, `slave` and `size` are live locals of the types openpty writes and reads; null name and termios
+    // are allowed.
     let rc = unsafe {
         libc::openpty(
             &raw mut master,
@@ -239,8 +242,10 @@ fn attach_on_loose_pty(socket: &Path, ws: WorkspaceId) -> (std::process::Child, 
     };
     assert_eq!(rc, 0);
     for fd in [master, slave] {
+        // SAFETY: F_SETFD takes no pointers; openpty just opened `fd`.
         unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
     }
+    // SAFETY: openpty succeeded, so both are newly opened fds that nothing else owns.
     let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
     let child = std::process::Command::new(ftm_bin())
         .args(["attach", &ws.to_string()])
@@ -254,7 +259,9 @@ fn attach_on_loose_pty(socket: &Path, ws: WorkspaceId) -> (std::process::Child, 
 }
 
 fn raw(fd: &OwnedFd) -> bool {
+    // SAFETY: termios is plain C data, for which all-zero bytes are a valid value.
     let mut t: libc::termios = unsafe { std::mem::zeroed() };
+    // SAFETY: `t` is a live, writable termios and `fd` is open while borrowed.
     assert_eq!(unsafe { libc::tcgetattr(fd.as_raw_fd(), &raw mut t) }, 0);
     t.c_lflag & libc::ICANON == 0
 }
@@ -294,6 +301,7 @@ fn attach_restores_the_terminal_when_killed() {
     for sig in [libc::SIGTERM, libc::SIGHUP] {
         let (mut child, _master, slave) = attach_on_loose_pty(&daemon.socket, ws.id);
         wait_for("raw mode", Duration::from_secs(10), || raw(&slave));
+        // SAFETY: kill takes no pointers; the child is unreaped until the wait below, so its pid is not reused.
         unsafe { libc::kill(child.id().cast_signed(), sig) };
         let status = child.wait().unwrap();
         assert_eq!(status.signal(), Some(sig));

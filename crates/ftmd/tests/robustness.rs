@@ -85,11 +85,13 @@ fn a_stalled_ftmd_reconnects_to_its_holders() {
     );
 
     let pid = daemon.pid();
+    // SAFETY: kill takes no pointers.
     unsafe { libc::kill(pid, libc::SIGSTOP) };
     // The flood only gets through once the holder has given up on the stopped ftmd.
     wait_for("the holder to stop waiting on ftmd", Duration::from_secs(30), || {
         dir.join("flooded").exists()
     });
+    // SAFETY: kill takes no pointers.
     unsafe { libc::kill(pid, libc::SIGCONT) };
     assert!(daemon.child().try_wait().unwrap().is_none());
 
@@ -146,6 +148,7 @@ fn running_out_of_descriptors_does_not_stop_ftmd() {
         rlim_max: open + 4,
     };
     assert_eq!(
+        // SAFETY: `limit` is a live rlimit, and a null old-limit pointer is allowed.
         unsafe { libc::prlimit(pid, libc::RLIMIT_NOFILE, &raw const limit, std::ptr::null_mut()) },
         0
     );

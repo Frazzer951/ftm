@@ -32,6 +32,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
     let origin = upgrade::Origin::now();
+    // SAFETY: still single-threaded: the tokio runtime, ftmd's first thread, starts below.
     let inherited = unsafe { upgrade::Inherited::take() };
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let result = runtime.block_on(daemon(inherited, origin));

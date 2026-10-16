@@ -57,6 +57,8 @@ static ORIGINAL: OnceLock<libc::termios> = OnceLock::new();
 const FATAL_SIGNALS: [libc::c_int; 4] = [libc::SIGTERM, libc::SIGHUP, libc::SIGINT, libc::SIGQUIT];
 
 extern "C" fn on_fatal(sig: libc::c_int) {
+    // SAFETY: tcsetattr, signal and raise are async-signal-safe, and ORIGINAL.get is an atomic load. ORIGINAL is set
+    // before this handler is installed, to the termios tcgetattr filled.
     unsafe {
         if let Some(original) = ORIGINAL.get() {
             libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, original);
@@ -71,6 +73,9 @@ struct RawMode(libc::termios);
 
 impl RawMode {
     fn enable() -> Result<Self> {
+        // SAFETY: termios is plain C data, so all-zero bytes are a valid value. Each call gets a pointer to a live
+        // local, and tcgetattr has filled `original` before it is stored or copied. on_fatal only makes
+        // async-signal-safe calls.
         unsafe {
             let mut original: libc::termios = std::mem::zeroed();
             if libc::tcgetattr(libc::STDIN_FILENO, &raw mut original) != 0 {
@@ -92,11 +97,14 @@ impl RawMode {
 
 impl Drop for RawMode {
     fn drop(&mut self) {
+        // SAFETY: `self.0` is the termios that tcgetattr filled in enable().
         unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw const self.0) };
     }
 }
 
 fn terminal_size() -> Option<(u16, u16)> {
+    // SAFETY: winsize is plain C data, so all-zero bytes are a valid value; TIOCGWINSZ writes one winsize to the live
+    // `ws`.
     unsafe {
         let mut ws: libc::winsize = std::mem::zeroed();
         (libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) == 0)
@@ -122,6 +130,7 @@ pub fn run(pane: PaneId) -> Result<()> {
     };
 
     let raw = RawMode::enable()?;
+    // SAFETY: on_winch only stores to an atomic, which is async-signal-safe.
     unsafe { libc::signal(libc::SIGWINCH, on_winch as *const () as libc::sighandler_t) };
     resize(&mut requests)?;
 

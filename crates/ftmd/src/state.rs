@@ -268,6 +268,8 @@ impl State {
         }
         cmd.stdin(Stdio::null()).stdout(Stdio::null());
         // Its own session, so nothing aimed at ftmd (a signal to its process group, its terminal closing) reaches it.
+        // SAFETY: between fork and exec the closure only calls setsid, which is async-signal-safe and does not
+        // allocate.
         unsafe {
             cmd.pre_exec(|| {
                 libc::setsid();

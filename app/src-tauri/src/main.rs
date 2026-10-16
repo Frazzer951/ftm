@@ -292,12 +292,17 @@ fn webview_configuration() -> Option<objc2::rc::Retained<objc2_web_kit::WKWebVie
 
     const NS_WRITING_TOOLS_BEHAVIOR_NONE: isize = -1;
     let mtm = objc2::MainThreadMarker::new()?;
+    // SAFETY: `mtm` proves this runs on the main thread, where WebKit objects must be created.
     let config = unsafe { objc2_web_kit::WKWebViewConfiguration::new(mtm) };
     // macOS 15.0+; older systems have no Writing Tools to turn off.
+    // SAFETY: every NSObject answers respondsToSelector:, which takes a SEL and returns BOOL; `config` is a live
+    // object.
     let supported: bool = unsafe { msg_send![&*config, respondsToSelector: sel!(setWritingToolsBehavior:)] };
     if !supported {
         return None;
     }
+    // SAFETY: respondsToSelector: just confirmed `config` implements setWritingToolsBehavior:, which takes an NSInteger
+    // (isize) and returns void.
     let _: () = unsafe { msg_send![&*config, setWritingToolsBehavior: NS_WRITING_TOOLS_BEHAVIOR_NONE] };
     Some(config)
 }
@@ -316,6 +321,7 @@ fn main() {
     // fall back to the shared-memory path unless the user chose otherwise. Set before any thread starts.
     #[cfg(target_os = "linux")]
     if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        // SAFETY: no other thread exists yet: crash_log::install only rotates the log and sets the panic hook.
         unsafe { std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1") };
     }
     let ftmd = daemon::Daemon::new();
