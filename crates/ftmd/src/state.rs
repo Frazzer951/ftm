@@ -272,7 +272,6 @@ impl State {
             });
         }
         let mut holder = cmd.spawn().wrap_err("starting pane holder")?;
-        let holder_pid = holder.id() as libc::pid_t;
 
         let deadline = Instant::now() + Duration::from_secs(5);
         let stream = loop {
@@ -284,11 +283,11 @@ impl State {
             }
             if Instant::now() > deadline {
                 let _ = holder.kill();
+                let _ = holder.wait();
                 bail!("pane holder did not come up on {}", holder_socket.display());
             }
             std::thread::sleep(Duration::from_millis(10));
         };
-        std::thread::spawn(move || holder.wait());
         // Before the replay goes in, so an unnamed agent's title printed before ftmd connected still names it.
         if startup.is_some_and(|s| s.agent && !s.named)
             && let Some(ws) = self.workspaces.get_mut(&workspace)
@@ -296,8 +295,9 @@ impl State {
             ws.agent_pane = Some(id);
         }
         if let Err(e) = self.attach_holder(shared, workspace, id, holder_socket.clone(), stream, startup.is_some()) {
-            // Closing its PTY hangs up the shell it started.
-            unsafe { libc::kill(holder_pid, libc::SIGKILL) };
+            // Closing its PTY hangs up the shell it started. Killed through the unreaped child, so the pid is still its.
+            let _ = holder.kill();
+            let _ = holder.wait();
             let _ = std::fs::remove_file(&holder_socket);
             if e.downcast_ref::<HolderVersion>().is_some() {
                 return Err(e.wrap_err(
@@ -306,6 +306,7 @@ impl State {
             }
             return Err(e);
         }
+        std::thread::spawn(move || holder.wait());
         Ok(id)
     }
 
