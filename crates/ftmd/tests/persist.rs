@@ -87,6 +87,10 @@ fn ftmd_restart_keeps_sessions() {
     let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode(&daemon.holders()), 0o700);
     assert_eq!(mode(&daemon.socket), 0o600);
+    // Saved a moment after the change.
+    wait_for("the tree to be saved", Duration::from_secs(10), || {
+        daemon.state_home().join("ftm").exists()
+    });
     assert_eq!(mode(&daemon.state_home().join("ftm")), 0o700);
     assert_eq!(mode(Path::new("/tmp")) & 0o777, 0o777);
 
@@ -537,6 +541,39 @@ fn finishing_a_turn_marks_the_workspace_unseen_until_looked_at() {
         }),
         Some(Response::Error { .. })
     ));
+}
+
+/// The status hook runs on every tool use, so a status that does not change must not be broadcast (or saved) again.
+#[test]
+fn an_unchanged_status_is_not_broadcast() {
+    let dir = temp_root("same-status");
+    let daemon = start_daemon("same-status", |_| {});
+    let mut req = Conn::open(&daemon.socket);
+    let id = spawn_terminal(&mut req, &dir, "agent").id;
+    let mut events = Conn::open(&daemon.socket);
+    events.send(&Request::Subscribe);
+    let set = |req: &mut Conn| {
+        req.send(&Request::SetStatus {
+            id,
+            status: Status::Working,
+            background_agents: 1,
+        })
+    };
+    set(&mut req);
+    set(&mut req);
+    req.send(&Request::Pin { id, pinned: true });
+    let mut statuses = 0;
+    loop {
+        let Event::Workspaces { workspaces } = events.line() else {
+            continue;
+        };
+        let ws = workspaces.into_iter().find(|w| w.id == id).unwrap();
+        if ws.pinned {
+            break;
+        }
+        statuses += usize::from(ws.status == Status::Working);
+    }
+    assert_eq!(statuses, 1);
 }
 
 /// Every pane's end is in ftmd's log with its cause, so a pane that dies unexpectedly leaves a trace.

@@ -110,6 +110,10 @@ async fn daemon(inherited: Option<upgrade::Inherited>, origin: Option<upgrade::O
             _ = terminate.recv() => break,
         }
     }
+    let flushing = state.clone();
+    if let Err(e) = tokio::task::spawn_blocking(move || state::flush(&flushing)).await? {
+        tracing::warn!("{e:#}");
+    }
     // Panes live on in their holders; the next ftmd reconnects to them.
     let _ = std::fs::remove_file(&socket);
     Ok(())

@@ -11,7 +11,8 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak, mpsc};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
@@ -29,6 +30,8 @@ const BUFFER_SLACK: usize = 256 << 10;
 const REDRAW_NUDGE: Duration = Duration::from_millis(150);
 /// Input is sent to a holder in frames of at most this size, far below `frame::MAX_PAYLOAD`.
 const INPUT_CHUNK: usize = 64 << 10;
+/// Changes within this long of each other are saved together: every tool use of every agent sets its status.
+const SAVE_DELAY: Duration = Duration::from_millis(250);
 
 pub struct State {
     workspaces: BTreeMap<WorkspaceId, Workspace>,
@@ -41,6 +44,7 @@ pub struct State {
     socket: PathBuf,
     holders: PathBuf,
     state_file: PathBuf,
+    saver: Arc<Saver>,
     /// Hook settings every agent gets via `--settings`, from `hooks::write`.
     claude_settings: Option<PathBuf>,
     /// The last `Event::UpdateBlocked`, replayed to every subscriber.
@@ -92,6 +96,89 @@ fn task_title(raw: &str) -> Option<String> {
     (!title.is_empty() && title != "Claude Code").then(|| title.chars().take(80).collect())
 }
 
+/// Writes the tree on its own thread, off the state lock: syncing a file can take a long while (F_FULLFSYNC on macOS),
+/// and everything else waits on that lock.
+#[derive(Default)]
+struct Saver {
+    /// Changes made so far. Bumped under the state lock, so a snapshot taken under it holds every change it counts.
+    changes: AtomicU64,
+    /// The changes the file on disk holds. Locked while writing, so an older snapshot never replaces a newer one.
+    written: Mutex<u64>,
+    requested: Mutex<bool>,
+    wake: Condvar,
+    writes: AtomicUsize,
+}
+
+struct Snapshot {
+    changes: u64,
+    path: PathBuf,
+    /// `None` when there is nothing to keep.
+    saved: Option<Saved>,
+}
+
+impl Saver {
+    fn request(&self) {
+        self.changes.fetch_add(1, Ordering::SeqCst);
+        *guard(&self.requested) = true;
+        self.wake.notify_one();
+    }
+
+    /// An empty tree leaves no file behind, so throwaway daemons (tests, smoke runs) clean up after themselves.
+    fn write(&self, snapshot: Snapshot) -> Result<()> {
+        let mut written = guard(&self.written);
+        if snapshot.changes <= *written {
+            return Ok(());
+        }
+        let path = &snapshot.path;
+        match snapshot.saved {
+            None => match std::fs::remove_file(path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+                _ => {},
+            },
+            Some(saved) => {
+                if let Some(dir) = path.parent() {
+                    paths::private_dir(dir, true)?;
+                }
+                let tmp = path.with_extension("json.tmp");
+                // Synced before the rename, so a crash leaves the old tree or the new one, never an empty file.
+                let mut file = std::fs::File::create(&tmp)?;
+                std::io::Write::write_all(&mut file, &serde_json::to_vec_pretty(&saved)?)?;
+                file.sync_all()?;
+                std::fs::rename(&tmp, path)?;
+            },
+        }
+        *written = snapshot.changes;
+        self.writes.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Saves a while after each request, until the state is gone.
+    fn run(&self, state: &Weak<Mutex<State>>) {
+        loop {
+            let mut requested = guard(&self.requested);
+            while !*requested {
+                if state.strong_count() == 0 {
+                    return;
+                }
+                requested = self
+                    .wake
+                    .wait_timeout(requested, Duration::from_secs(1))
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0;
+            }
+            drop(requested);
+            std::thread::sleep(SAVE_DELAY);
+            *guard(&self.requested) = false;
+            let Some(shared) = state.upgrade() else { return };
+            let snapshot = lock(&shared).snapshot();
+            drop(shared);
+            if let Err(e) = self.write(snapshot) {
+                tracing::warn!("saving the workspaces: {e:#}");
+            }
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct Saved {
     workspaces: Vec<Workspace>,
@@ -115,7 +202,8 @@ struct Startup<'a> {
 
 impl State {
     pub fn new(socket: PathBuf, claude_settings: Option<PathBuf>) -> Shared {
-        Arc::new(Mutex::new(State {
+        let saver = Arc::new(Saver::default());
+        let shared = Arc::new(Mutex::new(State {
             workspaces: BTreeMap::new(),
             folders: Vec::new(),
             folder_order: Vec::new(),
@@ -123,10 +211,17 @@ impl State {
             events: broadcast::channel(1024).0,
             holders: paths::holders_dir(&socket),
             state_file: paths::state_file(&socket),
+            saver: saver.clone(),
             socket,
             claude_settings,
             update_blocked: None,
-        }))
+        }));
+        let state = Arc::downgrade(&shared);
+        std::thread::Builder::new()
+            .name("saver".into())
+            .spawn(move || saver.run(&state))
+            .expect("starting the saver thread");
+        shared
     }
 
     fn list(&self) -> Vec<Workspace> {
@@ -136,9 +231,7 @@ impl State {
     /// Every change goes through here, so it is also where the tree is saved.
     fn emit_workspaces(&self) {
         let _ = self.events.send(Event::Workspaces { workspaces: self.list() });
-        if let Err(e) = self.save() {
-            tracing::warn!("saving {}: {e:#}", self.state_file.display());
-        }
+        self.saver.request();
     }
 
     fn folders_event(&self) -> Event {
@@ -151,9 +244,7 @@ impl State {
     fn emit_folders(&mut self) {
         self.folder_order = folder_order(std::mem::take(&mut self.folder_order), &self.folders);
         let _ = self.events.send(self.folders_event());
-        if let Err(e) = self.save() {
-            tracing::warn!("saving {}: {e:#}", self.state_file.display());
-        }
+        self.saver.request();
     }
 
     /// Moves `path` to the front of the remembered folders.
@@ -166,29 +257,22 @@ impl State {
         self.emit_folders();
     }
 
-    /// An empty tree leaves no file behind, so throwaway daemons (tests, smoke runs) clean up after themselves.
+    fn snapshot(&self) -> Snapshot {
+        let empty = self.workspaces.is_empty() && self.folders.is_empty();
+        Snapshot {
+            changes: self.saver.changes.load(Ordering::SeqCst),
+            path: self.state_file.clone(),
+            saved: (!empty).then(|| Saved {
+                workspaces: self.list(),
+                folders: self.folders.clone(),
+                folder_order: self.folder_order.clone(),
+            }),
+        }
+    }
+
+    /// Writes whatever the saver has not yet.
     fn save(&self) -> Result<()> {
-        if self.workspaces.is_empty() && self.folders.is_empty() {
-            match std::fs::remove_file(&self.state_file) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
-                _ => return Ok(()),
-            }
-        }
-        if let Some(dir) = self.state_file.parent() {
-            paths::private_dir(dir, true)?;
-        }
-        let tmp = self.state_file.with_extension("json.tmp");
-        let saved = Saved {
-            workspaces: self.list(),
-            folders: self.folders.clone(),
-            folder_order: self.folder_order.clone(),
-        };
-        // Synced before the rename, so a crash leaves the old tree or the new one, never an empty file.
-        let mut file = std::fs::File::create(&tmp)?;
-        std::io::Write::write_all(&mut file, &serde_json::to_vec_pretty(&saved)?)?;
-        file.sync_all()?;
-        std::fs::rename(&tmp, &self.state_file)?;
-        Ok(())
+        self.saver.write(self.snapshot())
     }
 
     fn workspace_mut(&mut self, id: WorkspaceId) -> Result<&mut Workspace> {
@@ -487,6 +571,14 @@ pub fn check_saved(shared: &Shared) -> Result<()> {
     read_saved(&path).map(drop)
 }
 
+/// For shutdown: the last changes may still be waiting for the saver.
+pub fn flush(shared: &Shared) -> Result<()> {
+    let state = lock(shared);
+    state
+        .save()
+        .wrap_err_with(|| format!("saving {}", state.state_file.display()))
+}
+
 /// Saves the tree and keeps the lock, so nothing changes or saves it again while a new ftmd takes over.
 pub fn freeze(shared: &Shared) -> Result<MutexGuard<'_, State>> {
     let state = lock(shared);
@@ -633,7 +725,11 @@ fn script(startup: Startup, agent: Option<&str>, settings: bool) -> Option<Strin
 }
 
 fn lock(shared: &Shared) -> MutexGuard<'_, State> {
-    shared.lock().unwrap_or_else(PoisonError::into_inner)
+    guard(shared)
+}
+
+fn guard<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// The first `Output` after (re)connecting is the holder's whole buffer, which rebuilds the screen after a restart.
@@ -887,9 +983,15 @@ pub fn handle(shared: &Shared, request: Request, peer: Option<i32>) -> Response 
             let mut state = lock(shared);
             state
                 .workspace_mut(id)
-                .map(|ws| set_status(ws, status, background_agents))
-                .map(|()| {
-                    state.emit_workspaces();
+                .map(|ws| {
+                    let before = (ws.status, ws.unseen, ws.background_agents);
+                    set_status(ws, status, background_agents);
+                    before != (ws.status, ws.unseen, ws.background_agents)
+                })
+                .map(|changed| {
+                    if changed {
+                        state.emit_workspaces();
+                    }
                     Response::Ok
                 })
         },
@@ -1245,8 +1347,33 @@ mod tests {
         state.emit_folders();
         assert_eq!(state.folder_order, paths(&["/c", "/b", "/0"]));
 
+        state.save().unwrap();
         let saved: Saved = serde_json::from_slice(&std::fs::read(&state.state_file).unwrap()).unwrap();
         assert_eq!(saved.folder_order, state.folder_order);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_burst_of_changes_is_saved_once() {
+        let dir = std::env::temp_dir().join(format!("ftmd-burst-{}", std::process::id()));
+        let shared = State::new(dir.join("ftmd.sock"), None);
+        lock(&shared).state_file = dir.join("state.json");
+        for i in 0..100 {
+            lock(&shared).remember_folder(format!("/{i}").into());
+        }
+        let saver = lock(&shared).saver.clone();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while *guard(&saver.written) < saver.changes.load(Ordering::SeqCst) {
+            assert!(Instant::now() < deadline, "the burst was never saved");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let saved: Saved = serde_json::from_slice(&std::fs::read(dir.join("state.json")).unwrap()).unwrap();
+        assert_eq!(saved.folders.len(), 100);
+        assert!(
+            saver.writes.load(Ordering::Relaxed) <= 2,
+            "{} writes",
+            saver.writes.load(Ordering::Relaxed)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
