@@ -7,6 +7,8 @@ authors = ["Luke Eltiste"]
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Frazzer951/ftm"
+# The locked tauri needs 1.90 (ftm, ftmd and ftm-core alone build on 1.89).
+rust-version = "1.90"
 publish = false
 version = "0.1.8"
 
