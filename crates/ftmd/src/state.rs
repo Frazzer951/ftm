@@ -409,7 +409,7 @@ fn handshake(stream: &UnixStream) -> Result<(UnixStream, (u16, u16), Vec<u8>)> {
         bail!("pane holder did not send its buffer");
     };
     read.set_read_timeout(None)?;
-    Ok((read, (rows, cols), replay))
+    Ok((read, (rows.max(1), cols.max(1)), replay))
 }
 
 #[derive(Debug)]
@@ -994,6 +994,8 @@ fn capture(shared: &Shared, pane: PaneId, raw: bool) -> Result<Response> {
 /// attach`), which drew the replay at some other size. The kernel sends no SIGWINCH for an unchanged size, and Node
 /// ignores one that does not change it, so the pane is nudged one column narrower and back to make its TUI repaint.
 fn resize(shared: &Shared, pane: PaneId, cols: u16, rows: u16) -> Result<Response> {
+    // A collapsed view can report no size at all; the emulator needs at least one cell.
+    let (rows, cols) = (rows.max(1), cols.max(1));
     let mut state = lock(shared);
     let p = state.pane_mut(pane)?;
     let unchanged = p.screen.screen().size() == (rows, cols);

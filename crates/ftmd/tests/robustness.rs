@@ -90,3 +90,30 @@ fn a_stalled_ftmd_reconnects_to_its_holders() {
         }
     });
 }
+
+fn capture(conn: &mut Conn, pane: PaneId) -> String {
+    match conn.send(&Request::Capture { pane, raw: false }) {
+        Response::Output { data } => String::from_utf8_lossy(&B64.decode(data).unwrap()).into_owned(),
+        r => panic!("{r:?}"),
+    }
+}
+
+#[test]
+fn a_zero_size_resize_leaves_the_pane_working() {
+    let dir = temp_root("zero-size");
+    let daemon = start_daemon("zero-size", |_| {});
+    let mut conn = Conn::open(&daemon.socket);
+    let (_, pane) = spawn_command(&mut conn, &dir, None);
+    for (rows, cols) in [(0, 80), (24, 0), (0, 0)] {
+        assert!(matches!(conn.send(&Request::Resize { pane, cols, rows }), Response::Ok));
+    }
+    conn.send(&Request::Resize {
+        pane,
+        cols: 80,
+        rows: 24,
+    });
+    conn.type_in(pane, "echo zero-$((1+1))\n");
+    wait_for("the pane to keep working", Duration::from_secs(10), || {
+        capture(&mut conn, pane).contains("zero-2")
+    });
+}
