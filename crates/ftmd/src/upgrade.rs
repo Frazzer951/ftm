@@ -295,14 +295,7 @@ fn probe(exe: &Path) -> Result<Handshake> {
 /// with the lock released and the old ftmd still whole.
 pub fn hand_over(exe: &Path, listener: RawFd, shared: &Shared) -> Result<Infallible> {
     let frozen = state::freeze(shared)?;
-    let mut fds = [0; 2];
-    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-        return Err(std::io::Error::last_os_error()).wrap_err("creating the readiness pipe");
-    }
-    let (read, write) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
-    for fd in [&read, &write] {
-        unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
-    }
+    let (read, write) = cloexec_pipe().wrap_err("creating the readiness pipe")?;
     let write_fd = write.as_raw_fd();
     let mut cmd = Command::new(exe);
     cmd.args(std::env::args_os().skip(1))
@@ -335,6 +328,24 @@ pub fn hand_over(exe: &Path, listener: RawFd, shared: &Shared) -> Result<Infalli
     let _ = child.wait();
     drop(frozen);
     Err(failure)
+}
+
+/// Close-on-exec from the start where the platform allows, so a pane holder started meanwhile never inherits it.
+fn cloexec_pipe() -> std::io::Result<(OwnedFd, OwnedFd)> {
+    let mut fds = [0; 2];
+    #[cfg(target_os = "linux")]
+    let made = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    #[cfg(not(target_os = "linux"))]
+    let made = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    if made != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let (read, write) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+    #[cfg(not(target_os = "linux"))]
+    for fd in [&read, &write] {
+        unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
+    }
+    Ok((read, write))
 }
 
 fn wait_ready(read: &OwnedFd, child: &mut std::process::Child) -> Result<()> {
@@ -391,5 +402,14 @@ mod tests {
         let origin = Origin::of(deleted.into());
         assert_eq!(origin.exe, exe);
         assert!(origin.fingerprint.is_none());
+    }
+
+    #[test]
+    fn the_readiness_pipe_is_close_on_exec() {
+        let (read, write) = cloexec_pipe().unwrap();
+        for fd in [read, write] {
+            let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
+            assert_eq!(flags & libc::FD_CLOEXEC, libc::FD_CLOEXEC);
+        }
     }
 }
