@@ -168,7 +168,10 @@ impl State {
             folders: self.folders.clone(),
             folder_order: self.folder_order.clone(),
         };
-        std::fs::write(&tmp, serde_json::to_vec_pretty(&saved)?)?;
+        // Synced before the rename, so a crash leaves the old tree or the new one, never an empty file.
+        let mut file = std::fs::File::create(&tmp)?;
+        std::io::Write::write_all(&mut file, &serde_json::to_vec_pretty(&saved)?)?;
+        file.sync_all()?;
         std::fs::rename(&tmp, &self.state_file)?;
         Ok(())
     }
@@ -474,7 +477,21 @@ pub fn update_blocked(shared: &Shared, version: Option<String>, reason: String) 
 /// machine rebooted) is dropped from its layout. Workspaces stay even when that leaves them without tabs.
 pub fn load(shared: &Shared) -> Result<()> {
     let mut state = lock(shared);
-    let Some(saved) = read_saved(&state.state_file)? else {
+    let saved = match read_saved(&state.state_file) {
+        Ok(saved) => saved,
+        Err(e) if e.downcast_ref::<serde_json::Error>().is_some() => {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            let aside = state.state_file.with_extension(format!("json.bad-{stamp}"));
+            std::fs::rename(&state.state_file, &aside)
+                .wrap_err_with(|| format!("moving {} aside", state.state_file.display()))?;
+            tracing::error!("{e:#}; moved it to {} and starting with no workspaces", aside.display());
+            None
+        },
+        Err(e) => return Err(e),
+    };
+    let Some(saved) = saved else {
         return Ok(());
     };
     for ws in saved.workspaces {

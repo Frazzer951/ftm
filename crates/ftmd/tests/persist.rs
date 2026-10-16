@@ -443,3 +443,39 @@ fn pane_exits_are_logged_with_their_cause() {
     let request = format!("ClosePane {{ pane: {closed} }} from pid {}", std::process::id());
     assert!(log.contains(&request), "{log}");
 }
+
+/// A state file ftmd cannot parse (cut short by a crash, say) is set aside, not a reason to never start again.
+#[test]
+fn an_unreadable_state_file_is_set_aside() {
+    let dir = temp_root("bad-state");
+    let mut daemon = start_daemon("bad-state", |_| {});
+    let mut req = Conn::open(&daemon.socket);
+    let ws = spawn_terminal(&mut req, &dir, "t");
+    req.send(&Request::Close {
+        id: ws.id,
+        remove_worktree: false,
+    });
+    assert_eq!(folders(&mut req).len(), 1);
+    drop(req);
+    daemon.stop();
+
+    let state_dir = daemon.state_home().join("ftm");
+    let state_file = std::fs::read_dir(&state_dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|e| e == "json"))
+        .expect("a saved state file");
+    std::fs::write(&state_file, "").unwrap();
+    daemon.restart();
+
+    let mut req = Conn::open(&daemon.socket);
+    assert!(req.list().is_empty());
+    assert!(folders(&mut req).is_empty());
+    let aside: Vec<_> = std::fs::read_dir(&state_dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().contains(".bad-"))
+        .collect();
+    assert_eq!(aside.len(), 1, "{aside:?}");
+}
