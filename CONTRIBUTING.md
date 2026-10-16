@@ -6,8 +6,8 @@ and agents fit together.
 
 ## Setup
 
-You need a stable Rust toolchain and Node 24 with npm. On Linux, also install the Tauri system libraries, WebKitGTK
-4.1 and GStreamer's good plugins. On Debian or Ubuntu:
+You need a stable Rust toolchain (1.90 or newer) and Node 24 with npm. On Linux, also install the Tauri system
+libraries, WebKitGTK 4.1 and GStreamer's good plugins. On Debian or Ubuntu:
 
 ```sh
 sudo apt install build-essential pkg-config libssl-dev libxdo-dev \
@@ -46,9 +46,13 @@ CI runs these on every pull request (Rust on Linux and macOS). Run them before y
 
 ```sh
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
 ```
+
+The workspace lints in the root `Cargo.toml` apply to every crate. Every `unsafe` block needs a `// SAFETY:`
+comment that says why it is sound, and an `#[allow]` or `#[expect]` needs a `reason = "..."`.
 
 ftmd's tests start real pane holders and shells. `cargo test -p ftm-core` alone is quick when you only touched
 shared code. Before adding one, read the notes at the top of `crates/ftmd/tests/common/mod.rs` on keeping it from
@@ -59,12 +63,39 @@ The app's frontend lives in `app/`:
 ```sh
 cd app
 npm ci
-npm run lint    # biome, warnings fail
-npm run build   # tsc --noEmit and vite build
+npm run lint       # biome, warnings fail
+npm run typecheck  # tsc over src/ and tests/
+npm test           # node --test
+npm run build      # tsc --noEmit and vite build
 ```
 
 Biome only lints here; its formatter is off, so match the surrounding style. Rust formatting follows
 `rustfmt.toml`.
+
+Shell scripts and workflows are linted too. With [actionlint](https://github.com/rhysd/actionlint) and
+[ShellCheck](https://www.shellcheck.net) installed (actionlint runs ShellCheck over each workflow's `run:` blocks):
+
+```sh
+actionlint
+shellcheck scripts/*.sh scripts/tests/*.sh
+for test in scripts/tests/*.sh; do "$test"; done
+```
+
+`scripts/tests/` covers the release scripts (`render-package.sh`, `nightly-version.sh`) against local fixtures.
+
+A pull request that touches `packaging/`, `scripts/`, the Tauri configs or the workflows also builds the release
+bundles (a Linux `.deb` and `.rpm`, a macOS nightly `.dmg`) and dry-runs `scripts/install.sh` on both, so packaging
+breakage shows up before the nightly. To try the install dry run yourself without touching your installed FTM:
+
+```sh
+scripts/install.sh --dry-run --no-launch --socket /tmp/ftm-dry/ftmd.sock --prefix /tmp/ftm-dry/prefix \
+  --bin-dir /tmp/ftm-dry/bin
+```
+
+A weekly audit runs [cargo-deny](https://github.com/EmbarkStudios/cargo-deny) against `deny.toml` (advisories,
+licenses, banned sources) and `npm audit --omit=dev --audit-level=high` in `app/`. It also runs on pull requests
+that change `Cargo.lock`, `deny.toml` or `app/package-lock.json`. Locally: `cargo deny check`. A new dependency
+under a license that `deny.toml` doesn't list fails it; add the license only if it is MIT-compatible.
 
 If a change alters behavior, settings or the protocol, update the README, `app/README.md` or `docs/design.md` in the
 same pull request.
