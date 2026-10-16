@@ -13,6 +13,7 @@ import { chromeColors } from "./colors";
 import { StatusSounds, stillFinished } from "./finish.ts";
 import { clipboardKey, type OptionAsMeta, optionIsMeta, paneKey } from "./keys.ts";
 import { type KeyProtocol, kittyKeyboard } from "./kitty.ts";
+import { isQueryReply } from "./replies.ts";
 import { loadSounds, play, type SoundEntry, type SoundSettings } from "./sounds";
 import "./style.css";
 import { Tabs } from "./tabs.ts";
@@ -144,12 +145,14 @@ function view(pane: Id): PaneView {
       console.warn("webgl unavailable, using the DOM renderer", e);
     }
   }
-  const input = (data: string) => {
-    if (!v.replaying) send({ op: "input", pane, data });
-  };
-  term.onData((d) => input(encode(d)));
+  const input = (data: string) => send({ op: "input", pane, data });
+  term.onData((d) => {
+    if (!(v.replaying && isQueryReply(d))) input(encode(d));
+  });
   term.onBinary((d) => input(btoa(d)));
-  const kitty = kittyKeyboard(term, (d) => input(encode(d)));
+  const kitty = kittyKeyboard(term, (d) => {
+    if (!v.replaying) input(encode(d));
+  });
   const wheel = appWheel(term, () => settings.app_scroll, (d) => input(encode(d)));
   term.attachCustomKeyEventHandler((e) => {
     const clip = clipboardKey(e, isMac);
