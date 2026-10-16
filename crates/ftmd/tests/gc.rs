@@ -268,3 +268,53 @@ fn gc_and_ftmd_agree_on_a_separate_git_dir_repo() {
     assert!(out.contains("removed sepstore/outer"), "{out}");
     assert!(!inner.exists() && !outer.exists());
 }
+
+/// Without a configured base, gc judges worktrees against the remote's default branch, the one ftmd starts them from,
+/// even when that is not `main`.
+#[test]
+fn gc_uses_the_remotes_default_branch() {
+    let bin = ftm_bin();
+    let root = temp_root("gc-master");
+    let (remote, repo, config, data) = (
+        root.join("remote.git"),
+        root.join("masterrepo"),
+        root.join("config"),
+        root.join("data"),
+    );
+    std::fs::create_dir_all(root.join("home")).unwrap();
+    git(&root, &["init", "-q", "--bare", "-b", "master", remote.to_str().unwrap()]);
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "master"]);
+    git(&repo, &["config", "user.name", "t"]);
+    git(&repo, &["config", "user.email", "t@t"]);
+    commit(&repo, "f", "init");
+    git(&repo, &["remote", "add", "origin", remote.to_str().unwrap()]);
+    git(&repo, &["push", "-qu", "origin", "master"]);
+
+    let daemon = start_daemon("gc-master", |c| {
+        c.env("HOME", root.join("home"))
+            .env("XDG_CONFIG_HOME", &config)
+            .env("XDG_DATA_HOME", &data);
+    });
+    let ftm = |args: &[&str]| {
+        let out = without_user_git_config(&mut Command::new(&bin))
+            .args(args)
+            .env("FTM_SOCKET", &daemon.socket)
+            .env("XDG_CONFIG_HOME", &config)
+            .env("XDG_DATA_HOME", &data)
+            .env_remove("FTM_WORKSPACE_ID")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "ftm {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let id = ftm(&["spawn", "terminal", "--path", repo.to_str().unwrap(), "--worktree", "feat"]);
+    ftm(&["close", "--id", id.trim()]);
+    let feat = data.join("ftm/worktrees/masterrepo/feat");
+    commit(&feat, "x", "feature work");
+    git(&repo, &["merge", "-q", "--no-ff", "-m", "merge", "feat"]);
+    git(&repo, &["push", "-q", "origin", "master"]);
+
+    let out = ftm(&["gc"]);
+    assert!(out.contains("remove  masterrepo/feat  (merged into origin/master)"), "{out}");
+}

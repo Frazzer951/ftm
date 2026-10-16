@@ -93,7 +93,7 @@ Worktrees live under `~/.local/share/ftm/worktrees/<repo>/<branch>` (`$XDG_DATA_
 
 ## Worktree cleanup
 
-`ftm gc` looks only at worktrees under the worktrees dir, so it never touches checkouts FTM did not make. The CLI runs the git checks itself and asks ftmd for the workspace tree, so ftmd must be running. It only knows about the ftmd on its socket, so a dev ftmd's workspaces are not seen by the installed `ftm`, and the other way round. For each repo it fetches the remote of `base` (default `origin/main`) without pruning, unless `--no-fetch` says to use the last fetch. Then it lists each worktree whose branch is done:
+`ftm gc` looks only at worktrees under the worktrees dir, so it never touches checkouts FTM did not make. The CLI runs the git checks itself and asks ftmd for the workspace tree, so ftmd must be running. It only knows about the ftmd on its socket, so a dev ftmd's workspaces are not seen by the installed `ftm`, and the other way round. For each repo it fetches the remote of `base` (by default the remote's default branch, found the way a new worktree's base is, else `origin/main`) without pruning, unless `--no-fetch` says to use the last fetch. Then it lists each worktree whose branch is done:
 
 - **merged**: the branch tip is an ancestor of `base`. A branch with no commits of its own counts as merged.
 - **squash-merged**: the branch's whole diff from where it left `base` matches a commit in `base` by patch id (`git cherry`).
