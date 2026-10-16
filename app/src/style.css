@@ -19,6 +19,11 @@ button:hover { background: var(--hover); }
 .section-head { display: flex; width: 100%; gap: 6px; align-items: center; background: none; border: none; border-radius: 0; padding: 8px 10px 4px; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); text-align: left; }
 .section-head:hover { background: none; color: var(--text); }
 .section-head .count { margin-left: auto; font-weight: 400; }
+.section-bar { display: flex; align-items: center; }
+.section-bar .section-head { flex: 1; min-width: 0; }
+.section-sort { visibility: hidden; background: none; border: none; border-radius: 3px; padding: 6px 8px 2px; font-size: 11px; color: var(--muted); }
+.section-sort:hover { background: none; color: var(--text); }
+.section-bar:hover .section-sort, .section-sort.active { visibility: visible; }
 .folder-icon { width: 9px; flex: none; color: var(--muted); font-size: 10px; }
 .ws { display: flex; align-items: center; gap: 8px; padding: 5px 10px; cursor: pointer; }
 .ws:hover { background: var(--surface); }

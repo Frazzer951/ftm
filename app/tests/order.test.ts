@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { moveItem, reorderWithin } from "../src/order.ts";
+import { defaultSort, moveItem, reorderWithin, sortRows } from "../src/order.ts";
 
 test("a dragged row lands before the row it was dropped on", () => {
   const rows = ["a", "b", "c", "d"];
@@ -17,4 +17,25 @@ test("reordering one section's rows leaves the others where they were", () => {
   const all = ["t1", "p1", "t2", "p2", "t3"];
   assert.deepEqual(reorderWithin(all, ["t3", "t1", "t2"]), ["t3", "p1", "t1", "p2", "t2"]);
   assert.deepEqual(reorderWithin(all, ["p2", "p1"]), ["t1", "p2", "t2", "p1", "t3"]);
+});
+
+test("sections sort by name or color, keeping manual order for ties", () => {
+  const palette = ["red", "green", "blue"];
+  const rows = [
+    { name: "beta", color: "blue" },
+    { name: "Alpha", color: null },
+    { name: "gamma", color: "#123456" },
+    { name: "ws10", color: "red" },
+    { name: "ws9", color: "blue" },
+  ];
+  const sort = (mode: "manual" | "name" | "color") =>
+    sortRows(rows, mode, (r) => r.name, (r) => r.color, palette).map((r) => r.name);
+  assert.deepEqual(sort("manual"), ["beta", "Alpha", "gamma", "ws10", "ws9"]);
+  assert.deepEqual(sort("name"), ["Alpha", "beta", "gamma", "ws9", "ws10"], "case-insensitive, numbers by value");
+  assert.deepEqual(sort("color"), ["ws10", "beta", "ws9", "gamma", "Alpha"], "palette, then hex, then none");
+});
+
+test("workspace sections start sorted by name, Folders in its dragged order", () => {
+  for (const section of ["pinned", "terminals", "agents"]) assert.equal(defaultSort(section), "name");
+  assert.equal(defaultSort("folders"), "manual");
 });

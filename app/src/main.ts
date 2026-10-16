@@ -15,7 +15,7 @@ import { dropText } from "./drop.ts";
 import { StatusSounds, statusDot, stillFinished } from "./finish.ts";
 import { clipboardKey, type OptionAsMeta, optionIsMeta, paneKey } from "./keys.ts";
 import { KeyLayout, type KeyProtocol, kittyKeyboard } from "./kitty.ts";
-import { moveItem, reorderWithin } from "./order.ts";
+import { defaultSort, moveItem, reorderWithin, type SortMode, sortRows } from "./order.ts";
 import { replyFilter } from "./replies.ts";
 import { loadSounds, play, type SoundEntry, type SoundSettings } from "./sounds.ts";
 import "./style.css";
@@ -828,28 +828,93 @@ function toggleSection(key: string) {
   renderSidebar();
 }
 
+const SORT_KEY = "ftm.sectionSort";
+/// Each section's sort, by section key; a section that is not listed has its `defaultSort`.
+const sectionSort: Record<string, SortMode> = (() => {
+  try {
+    return JSON.parse(localStorage.getItem(SORT_KEY) ?? "{}");
+  } catch {
+    return {};
+  }
+})();
+const sortOf = (key: string): SortMode => sectionSort[key] ?? defaultSort(key);
+
+function setSectionSort(key: string, mode: SortMode) {
+  if (mode === defaultSort(key)) delete sectionSort[key];
+  else sectionSort[key] = mode;
+  try {
+    localStorage.setItem(SORT_KEY, JSON.stringify(sectionSort));
+  } catch {
+    // Only the sort is lost.
+  }
+  renderSidebar();
+}
+
+const SORT_LABELS: Record<SortMode, [string, string]> = {
+  manual: ["⇅", "Manual (drag to rearrange)"],
+  name: ["A–Z", "Name"],
+  color: ["●", "Color"],
+};
+
+/// Section header's sort button: hidden until hovered while the section has its default sort.
+function sortButton(key: string, modes: SortMode[]): HTMLButtonElement {
+  const mode = sortOf(key);
+  const button = document.createElement("button");
+  button.className = "section-sort" + (mode === defaultSort(key) ? "" : " active");
+  button.textContent = SORT_LABELS[mode][0];
+  button.title = `Sort: ${SORT_LABELS[mode][1]}`;
+  button.onclick = () => {
+    const r = button.getBoundingClientRect();
+    showMenu(
+      r.left,
+      r.bottom,
+      modes.map((m) => [`${SORT_LABELS[m][1]}${m === mode ? " ✓" : ""}`, () => setSectionSort(key, m)]),
+    );
+  };
+  return button;
+}
+
+const sortWorkspaces = (list: Workspace[], mode: SortMode) =>
+  sortRows(list, mode, displayName, (w) => w.color, WORKSPACE_COLORS);
+
 /// Top to bottom: Pinned, Active Terminals, Active Agents, Folders. Children stay under their parent, wherever the
-/// parent is.
+/// parent is, sorted the way the parent's section is.
 function renderSidebar() {
   if (editing && workspaces.some((w) => w.id === editing)) return;
   editing = null;
   if (rowDrag?.moved) return;
   const ids = new Set(workspaces.map((w) => w.id));
   const top = workspaces.filter((w) => !w.parent || !ids.has(w.parent));
-  const sections: [string, string, HTMLElement[]][] = [
-    ["pinned", "Pinned", top.filter((w) => w.pinned).map(workspaceTree)],
-    ["terminals", "Active Terminals", top.filter((w) => !w.pinned && w.kind !== "agent").map(workspaceTree)],
-    ["agents", "Active Agents", top.filter((w) => !w.pinned && w.kind === "agent").map(workspaceTree)],
+  const trees = (key: string, list: Workspace[]) =>
+    sortWorkspaces(list, sortOf(key)).map((w) => workspaceTree(w, sortOf(key)));
+  const folderList = sidebarFolders();
+  const sections: [string, string, HTMLElement[], SortMode[]][] = [
+    ["pinned", "Pinned", trees("pinned", top.filter((w) => w.pinned)), ["manual", "name", "color"]],
+    [
+      "terminals",
+      "Active Terminals",
+      trees("terminals", top.filter((w) => !w.pinned && w.kind !== "agent")),
+      ["manual", "name", "color"],
+    ],
+    [
+      "agents",
+      "Active Agents",
+      trees("agents", top.filter((w) => !w.pinned && w.kind === "agent")),
+      ["manual", "name", "color"],
+    ],
     [
       "folders",
       "Folders",
-      sidebarFolders().map(folderRow),
+      sortRows(folderList, sortOf("folders") === "name" ? "name" : "manual", (f) => basename(f.path), () => null, []).map(
+        (f) => folderRow(f, sortOf("folders") !== "name"),
+      ),
+      ["manual", "name"],
     ],
   ];
   $("sections").replaceChildren(
     ...sections
       .filter(([key, , rows]) => rows.length > 0 || key === "folders")
-      .map(([key, title, rows]) => {
+      .map(([key, title, rows, modes]) => {
         const section = document.createElement("section");
         const head = document.createElement("button");
         head.className = "section-head";
@@ -859,7 +924,10 @@ function renderSidebar() {
         count.textContent = rows.length ? `${rows.length}` : "";
         head.append(count);
         head.onclick = () => toggleSection(key);
-        section.append(head);
+        const bar = document.createElement("div");
+        bar.className = "section-bar";
+        bar.append(head, sortButton(key, modes));
+        section.append(bar);
         if (!collapsed.has(key)) {
           const ul = document.createElement("ul");
           ul.append(...rows);
@@ -870,19 +938,23 @@ function renderSidebar() {
   );
 }
 
-function workspaceTree(ws: Workspace): HTMLLIElement {
+function workspaceTree(ws: Workspace, sort: SortMode): HTMLLIElement {
   const li = document.createElement("li");
-  li.append(workspaceRow(ws));
-  const children = workspaces.filter((w) => w.parent === ws.id);
+  li.append(workspaceRow(ws, sort === "manual"));
+  const children = sortWorkspaces(
+    workspaces.filter((w) => w.parent === ws.id),
+    sort,
+  );
   if (children.length) {
     const ul = document.createElement("ul");
-    ul.append(...children.map(workspaceTree));
+    ul.append(...children.map((w) => workspaceTree(w, sort)));
     li.append(ul);
   }
   return li;
 }
 
-function workspaceRow(ws: Workspace): HTMLElement {
+/// `draggable` while its section is in manual order.
+function workspaceRow(ws: Workspace, draggable: boolean): HTMLElement {
   const row = document.createElement("div");
   row.className = "ws" + (ws.id === selected ? " selected" : "");
   row.dataset.id = ws.id;
@@ -924,12 +996,14 @@ function workspaceRow(ws: Workspace): HTMLElement {
     closeWorkspace(ws.id);
   };
   row.append(close);
-  startRowDrag(
-    row,
-    ws.id,
-    () => siblingRows(row),
-    (target) => dropWorkspace(row, ws.id, target),
-  );
+  if (draggable) {
+    startRowDrag(
+      row,
+      ws.id,
+      () => siblingRows(row),
+      (target) => dropWorkspace(row, ws.id, target),
+    );
+  }
   row.onclick = () => {
     if (swallowRowClick) return;
     selected = ws.id;
@@ -1094,11 +1168,12 @@ function dropWorkspace(row: HTMLElement, id: Id, target: number) {
   });
 }
 
-function folderRow(folder: Folder): HTMLLIElement {
+/// `draggable` while the Folders section is in manual order.
+function folderRow(folder: Folder, draggable: boolean): HTMLLIElement {
   const li = document.createElement("li");
   const row = document.createElement("div");
   row.className = "ws folder";
-  startRowDrag(
+  if (draggable) startRowDrag(
     row,
     folder.path,
     () => [...document.querySelectorAll<HTMLElement>("#sections .ws.folder")],

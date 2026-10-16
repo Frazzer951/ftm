@@ -16,3 +16,37 @@ export function reorderWithin<T>(all: T[], group: T[]): T[] {
   let next = 0;
   return all.map((x) => (members.has(x) ? group[next++] : x));
 }
+
+/// How a sidebar section orders its rows: as dragged, by shown name, or by color.
+export type SortMode = "manual" | "name" | "color";
+
+/// A section's sort until the viewer picks one: Name for the workspace sections, Manual for Folders, whose dragged order
+/// came first.
+export const defaultSort = (section: string): SortMode => (section === "folders" ? "manual" : "name");
+
+/// Palette colors in `palette` order, then other (hex) colors, then rows without one. Ties keep manual order.
+function colorRank(color: string | null | undefined, palette: readonly string[]): [number, string] {
+  if (!color) return [palette.length + 1, ""];
+  const i = palette.indexOf(color);
+  return i >= 0 ? [i, ""] : [palette.length, color];
+}
+
+/// `items` (in manual order) as `mode` shows them; the sort is stable, so equal rows keep their manual order.
+export function sortRows<T>(
+  items: T[],
+  mode: SortMode,
+  name: (item: T) => string,
+  color: (item: T) => string | null | undefined,
+  palette: readonly string[],
+): T[] {
+  if (mode === "name") {
+    return [...items].sort((a, b) => name(a).localeCompare(name(b), undefined, { sensitivity: "base", numeric: true }));
+  }
+  if (mode === "color") {
+    return [...items].sort((a, b) => {
+      const [x, y] = [colorRank(color(a), palette), colorRank(color(b), palette)];
+      return x[0] - y[0] || x[1].localeCompare(y[1]);
+    });
+  }
+  return items;
+}
