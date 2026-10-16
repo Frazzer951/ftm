@@ -1012,8 +1012,14 @@ function startFolderDrag(row: HTMLElement, path: string) {
     if (drop && from >= 0) {
       order.splice(from, 1);
       order.splice(drag.target > from ? drag.target - 1 : drag.target, 0, path);
+      const before = folderOrder;
       folderOrder = order;
-      request({ op: "reorder_folders", paths: order }).catch(console.error);
+      request({ op: "reorder_folders", paths: order }).catch((err) => {
+        console.error(err);
+        if (folderOrder !== order) return;
+        folderOrder = before;
+        renderSidebar();
+      });
     }
     swallowFolderClick = true;
     setTimeout(() => {
@@ -1437,7 +1443,7 @@ function closePane() {
 /// Cmd+T/D/Shift+D/W on macOS; Ctrl+Shift+T/D/E/W on Linux (Ctrl+Shift+D can't also carry a second Shift).
 function shortcut(e: KeyboardEvent) {
   if (e.key === "Escape") closeMenu();
-  if (editing) return;
+  if (editing || document.querySelector("dialog[open]")) return;
   const mod = isMac ? e.metaKey && !e.ctrlKey && !e.altKey : e.ctrlKey && e.shiftKey && !e.metaKey && !e.altKey;
   if (!mod) return;
   const key = e.key.toLowerCase();
