@@ -32,12 +32,25 @@ export function readable(color: string, bg: string, toward: string, min = 2.5): 
   return toward;
 }
 
-/// The named colors a workspace's sidebar row can take, as ftmd accepts them, in sort order.
-export const WORKSPACE_COLORS = ["red", "orange", "yellow", "green", "cyan", "blue", "purple", "pink", "gray"];
+/// The named colors a workspace's sidebar row can take, as ftmd accepts them, in sort order. Fixed rather than taken
+/// from the theme: a theme's blue, magenta and their mixes can come out nearly the same, and each name should look like
+/// itself on every theme.
+export const WORKSPACE_PALETTE: Record<string, string> = {
+  red: "#ff4245",
+  orange: "#ff8c00",
+  yellow: "#ffd600",
+  green: "#30d158",
+  cyan: "#40c8e0",
+  blue: "#0091ff",
+  purple: "#bf5af2",
+  pink: "#ff6482",
+  gray: "#98989d",
+};
+export const WORKSPACE_COLORS = Object.keys(WORKSPACE_PALETTE);
 
 /// The app chrome's CSS variables for a theme: sidebar a little darker than the terminal, muted text blended from the
 /// foreground, accent from blue (palette 4), status dots from green/red/grey/blue, plus yellow for a finished turn not yet
-/// looked at, and the workspace row colors from the palette, each nudged until readable.
+/// looked at, each nudged until readable.
 export function chromeColors(bg: string, fg: string, p: string[]): { vars: Record<string, string>; dark: boolean } {
   const dark = luminance(bg) < 0.4;
   const sidebar = mix(bg, "#000000", dark ? 0.18 : 0.05);
@@ -62,15 +75,6 @@ export function chromeColors(bg: string, fg: string, p: string[]): { vars: Recor
     "--status-idle": readable(p[8], sidebar, fg, 2),
     "--status-done": readable(p[8], sidebar, fg, 2),
     "--status-unseen": readable(p[3], sidebar, fg),
-    "--ws-red": readable(p[1], sidebar, fg),
-    "--ws-orange": readable(mix(p[1], p[3], 0.5), sidebar, fg),
-    "--ws-yellow": readable(p[3], sidebar, fg),
-    "--ws-green": readable(p[2], sidebar, fg),
-    "--ws-cyan": readable(p[6], sidebar, fg),
-    "--ws-blue": readable(p[4], sidebar, fg),
-    "--ws-purple": readable(p[5], sidebar, fg),
-    "--ws-pink": readable(mix(p[5], p[9], 0.5), sidebar, fg),
-    "--ws-gray": readable(p[8], sidebar, fg, 2),
   };
   return { vars, dark };
 }

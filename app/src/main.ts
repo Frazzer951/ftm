@@ -10,7 +10,7 @@ import { LigaturesAddon } from "@xterm/addon-ligatures";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { chromeColors, WORKSPACE_COLORS } from "./colors.ts";
+import { chromeColors, WORKSPACE_COLORS, WORKSPACE_PALETTE } from "./colors.ts";
 import { dropText } from "./drop.ts";
 import { StatusSounds, statusDot, stillFinished } from "./finish.ts";
 import { clipboardKey, type OptionAsMeta, optionIsMeta, paneKey } from "./keys.ts";
@@ -940,8 +940,8 @@ function workspaceRow(ws: Workspace): HTMLElement {
   return row;
 }
 
-/// The CSS color for a workspace's `color`: the theme's take on a palette name, or the hex as given.
-const workspaceColor = (color: string) => (color.startsWith("#") ? color : `var(--ws-${color})`);
+/// The CSS color for a workspace's `color`: a palette name's fixed color, or the hex as given.
+const workspaceColor = (color: string) => WORKSPACE_PALETTE[color] ?? color;
 
 function setColor(ws: Workspace, color: string | null) {
   request({ op: "set_color", id: ws.id, color }).catch((err) => {

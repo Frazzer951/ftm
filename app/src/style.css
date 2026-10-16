@@ -58,15 +58,6 @@ button:hover { background: var(--hover); }
   --status-idle: #98989d;
   --status-done: #98989d;
   --status-unseen: #ffd600;
-  --ws-red: #ff4245;
-  --ws-orange: #ff9f0a;
-  --ws-yellow: #ffd600;
-  --ws-green: #30d158;
-  --ws-cyan: #40c8e0;
-  --ws-blue: #0091ff;
-  --ws-purple: #bf5af2;
-  --ws-pink: #ff6482;
-  --ws-gray: #98989d;
 }
 .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; box-sizing: border-box; }
 .dot.none { visibility: hidden; }
