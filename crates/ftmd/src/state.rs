@@ -912,14 +912,27 @@ fn spawn(shared: &Shared, req: SpawnRequest) -> Result<Response> {
     {
         bail!("no workspace {parent}");
     }
-    let (cwd, worktree, setup) = match &req.worktree_branch {
-        Some(branch) => {
-            let created = worktree::create(&req.cwd, branch, req.base.as_deref(), req.copy_changes)?;
+    let created = match &req.worktree_branch {
+        Some(branch) => Some(worktree::create(&req.cwd, branch, req.base.as_deref(), req.copy_changes)?),
+        None => None,
+    };
+    let result = open_spawned(shared, &req, created.as_ref());
+    if result.is_err()
+        && let Some(created) = &created
+    {
+        created.discard();
+    }
+    result
+}
+
+fn open_spawned(shared: &Shared, req: &SpawnRequest, created: Option<&worktree::Created>) -> Result<Response> {
+    let (cwd, worktree, setup) = match created {
+        Some(created) => {
             let worktree = Worktree {
-                repo: created.repo,
-                branch: branch.clone(),
+                repo: created.repo.clone(),
+                branch: created.branch.clone(),
             };
-            (created.path, Some(worktree), created.setup)
+            (created.path.clone(), Some(worktree), created.setup.clone())
         },
         None => (req.cwd.clone(), None, None),
     };

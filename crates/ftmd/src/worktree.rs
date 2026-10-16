@@ -7,6 +7,8 @@ use std::process::{Command, Stdio};
 pub struct Created {
     pub path: PathBuf,
     pub repo: PathBuf,
+    pub branch: String,
+    new_branch: bool,
     pub setup: Option<String>,
 }
 
@@ -39,40 +41,81 @@ pub fn create(cwd: &Path, branch: &str, base: Option<&str>, copy_changes: bool) 
     let (src, repo) = checkouts(cwd).ok_or_else(|| eyre::eyre!("{} is not in a git repo", cwd.display()))?;
     let name = repo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let config = RepoConfig::load(&paths::repo_config_path(&name))?;
+    let excludes = match &config.copy_ignored {
+        CopyIgnored::All(true) => Excludes::new(&config.copy_ignored_exclude)?,
+        _ => Excludes::default(),
+    };
+    if let CopyIgnored::Only(patterns) = &config.copy_ignored {
+        for pattern in patterns {
+            glob::Pattern::new(&src.join(pattern).to_string_lossy())
+                .wrap_err_with(|| format!("bad copy_ignored pattern {pattern}"))?;
+        }
+    }
 
     let path = paths::worktrees_dir().join(&name).join(branch);
     if path.exists() {
         bail!("{} already exists", path.display());
     }
     let path_str = path.to_string_lossy().into_owned();
-    if git(&src, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_ok() {
-        git(&src, &["worktree", "add", &path_str, branch])?;
-    } else {
+    let new_branch = git(&src, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_err();
+    if new_branch {
         let mut args = vec!["worktree", "add", "-b", branch, &path_str];
         if let Some(base) = base.or(config.base.as_deref()) {
             args.push(base);
         }
         git(&src, &args)?;
+    } else {
+        git(&src, &["worktree", "add", &path_str, branch])?;
     }
 
+    let created = Created {
+        path,
+        repo,
+        branch: branch.to_string(),
+        new_branch,
+        setup: config.setup.clone(),
+    };
+    if let Err(e) = fill(&src, &created.path, &config, &excludes, copy_changes) {
+        created.discard();
+        return Err(e);
+    }
+    Ok(created)
+}
+
+impl Created {
+    /// Undoes a `create` whose workspace never opened: force-removes the worktree, and its branch if `create` made it.
+    pub fn discard(&self) {
+        if let Err(e) = git(&self.repo, &["worktree", "remove", "--force", &self.path.to_string_lossy()]) {
+            tracing::warn!("removing {}: {e:#}", self.path.display());
+        }
+        if self.new_branch
+            && let Err(e) = git(&self.repo, &["branch", "-D", &self.branch])
+        {
+            tracing::warn!("deleting branch {}: {e:#}", self.branch);
+        }
+        prune_empty_parents(&self.path);
+    }
+}
+
+/// Copies the source checkout's changes (with `copy_changes`) and its configured ignored files into `path`.
+fn fill(src: &Path, path: &Path, config: &RepoConfig, excludes: &Excludes, copy_changes: bool) -> Result<()> {
     let mut copied = Copied::default();
     if copy_changes {
-        copy_tracked_changes(&src, &path)?;
-        let untracked = git(&src, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+        copy_tracked_changes(src, path)?;
+        let untracked = git(src, &["ls-files", "--others", "--exclude-standard", "-z"])?;
         for rel in split_nul(&untracked) {
-            copy_entry(&src, &path, &rel, &Excludes::default(), &mut copied);
+            copy_entry(src, path, &rel, &Excludes::default(), &mut copied);
         }
     }
     match &config.copy_ignored {
         CopyIgnored::All(false) => {},
         CopyIgnored::All(true) => {
-            let excludes = Excludes::new(&config.copy_ignored_exclude)?;
             let ignored = git(
-                &src,
+                src,
                 &["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"],
             )?;
             for rel in split_nul(&ignored) {
-                copy_entry(&src, &path, &rel, &excludes, &mut copied);
+                copy_entry(src, path, &rel, excludes, &mut copied);
             }
         },
         CopyIgnored::Only(patterns) => {
@@ -81,9 +124,9 @@ pub fn create(cwd: &Path, branch: &str, base: Option<&str>, copy_changes: bool) 
                 let matches = glob::glob(&full).wrap_err_with(|| format!("bad copy_ignored pattern {pattern}"))?;
                 for rel in matches
                     .flatten()
-                    .filter_map(|p| p.strip_prefix(&src).ok().map(Path::to_path_buf))
+                    .filter_map(|p| p.strip_prefix(src).ok().map(Path::to_path_buf))
                 {
-                    copy_entry(&src, &path, &rel, &Excludes::default(), &mut copied);
+                    copy_entry(src, path, &rel, &Excludes::default(), &mut copied);
                 }
             }
         },
@@ -96,12 +139,7 @@ pub fn create(cwd: &Path, branch: &str, base: Option<&str>, copy_changes: bool) 
         copied.skipped,
         copied.failed
     );
-
-    Ok(Created {
-        path,
-        repo,
-        setup: config.setup,
-    })
+    Ok(())
 }
 
 fn copy_tracked_changes(repo: &Path, dest: &Path) -> Result<()> {
@@ -230,6 +268,11 @@ pub fn remove(repo: &Path, path: &Path, branch: &str) -> Result<()> {
     if let Err(e) = git(repo, &["branch", "-d", branch]) {
         tracing::info!("keeping branch {branch}: {e:#}");
     }
+    prune_empty_parents(path);
+    Ok(())
+}
+
+fn prune_empty_parents(path: &Path) {
     let root = paths::worktrees_dir();
     let mut dir = path.parent();
     while let Some(d) = dir
@@ -239,5 +282,4 @@ pub fn remove(repo: &Path, path: &Path, branch: &str) -> Result<()> {
     {
         dir = d.parent();
     }
-    Ok(())
 }

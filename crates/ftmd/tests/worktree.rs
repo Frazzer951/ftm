@@ -132,3 +132,42 @@ fn copy_changes_ignores_the_users_diff_config() {
     assert_eq!(std::fs::read_to_string(wt.join("staged")).unwrap(), "new\n");
     assert_eq!(std::fs::read(wt.join("bin")).unwrap(), binary);
 }
+
+/// A spawn that fails after its worktree was made leaves no worktree or new branch behind, so a retry works; an
+/// existing branch it checked out is kept. A bad repo config fails before anything is made.
+#[test]
+fn failed_spawns_leave_nothing_behind() {
+    let env = Env::new("fail", "", |_, _| {});
+    let config = env.root.join("config/ftm/repos/failrepo.toml");
+    git(&env.repo, &["branch", "old"]);
+    git(&env.repo, &["branch", "kept"]);
+    std::fs::write(env.repo.join("f"), "changed on main\n").unwrap();
+    git(&env.repo, &["commit", "-qam", "change f"]);
+    std::fs::write(env.repo.join("f"), "edited\n").unwrap();
+    let left_behind = |branch: &str| {
+        assert!(!env.worktrees().join("failrepo").join(branch).exists(), "{branch} worktree left");
+        assert!(!git(&env.repo, &["worktree", "list"]).contains(branch), "{branch} still registered");
+    };
+
+    // The edits to f do not apply on `old` or `kept`, which have the original f.
+    let out = env.spawn(&env.repo, "team/retry", &["--base", "old", "--copy-changes"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("applying changes"));
+    left_behind("team/retry");
+    assert!(!env.worktrees().join("failrepo/team").exists());
+    assert!(git(&env.repo, &["branch", "--list", "team/retry"]).is_empty());
+    id(env.spawn(&env.repo, "team/retry", &["--copy-changes"]));
+
+    let out = env.spawn(&env.repo, "kept", &["--copy-changes"]);
+    assert!(!out.status.success());
+    left_behind("kept");
+    assert!(!git(&env.repo, &["branch", "--list", "kept"]).is_empty());
+
+    std::fs::write(&config, "copy_ignored_exclude = [\"[\"]\n").unwrap();
+    let out = env.spawn(&env.repo, "badconfig", &[]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("bad copy_ignored_exclude pattern"));
+    left_behind("badconfig");
+    assert!(git(&env.repo, &["branch", "--list", "badconfig"]).is_empty());
+    std::fs::write(&config, "").unwrap();
+    id(env.spawn(&env.repo, "badconfig", &[]));
+}
