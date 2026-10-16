@@ -1,8 +1,9 @@
 //! Helpers shared by the ftmd integration tests.
 //!
 //! Tests in a binary run in parallel, on CI boxes much slower than a laptop. To keep a new test from flaking:
-//! - Start ftmd with `start_daemon`/`start_daemon_logged`: its own socket, and state, config and data dirs, so it
-//!   never touches the user's daemon or files. Scratch dirs come from `temp_root`, which removes them on drop.
+//! - Start ftmd with `start_daemon`/`start_daemon_logged`: its own socket, and HOME, state, config and data dirs, so
+//!   it never touches the user's daemon or files. Run git through `git`, and `ftm` commands that run git (`ftm gc`)
+//!   through `without_user_git_config`. Scratch dirs come from `temp_root`, which removes them on drop.
 //! - Write a file that will be executed with `write_executable`/`copy_executable`, never `std::fs::write`/`copy`:
 //!   another thread's fork can hold the writable fd open and exec then fails with ETXTBSY.
 //! - Wait for a condition (`wait_for`, `wait_until`, `wait_for_output`), never a fixed sleep, with a deadline of
@@ -134,8 +135,8 @@ impl Drop for Daemon {
 
 /// macOS caps socket paths at ~104 bytes, so this stays in /tmp rather than the (long) per-user temp dir.
 /// Panes run `/bin/sh`, nothing FTM-related leaks in from the environment the tests run in (which may itself be an
-/// FTM pane), and the saved tree, config and worktrees go to a private dir rather than the user's; `configure` adds the
-/// rest.
+/// FTM pane), and HOME, the saved tree, config and worktrees are private dirs rather than the user's, so neither a
+/// login shell's profile nor git's global config comes in; `configure` adds the rest.
 pub fn start_daemon(name: &str, configure: impl FnOnce(&mut Command)) -> Daemon {
     start(name, Path::new(env!("CARGO_BIN_EXE_ftmd")), false, configure)
 }
@@ -152,9 +153,12 @@ fn start(name: &str, exe: &Path, logged: bool, configure: impl FnOnce(&mut Comma
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ftmd"));
     cmd.env("FTM_SOCKET", &socket)
         .env("SHELL", "/bin/sh")
+        .env("HOME", state_home.join("home"))
         .env("XDG_STATE_HOME", &state_home)
         .env("XDG_CONFIG_HOME", state_home.join("config"))
         .env("XDG_DATA_HOME", state_home.join("data"));
+    without_user_git_config(&mut cmd);
+    std::fs::create_dir_all(state_home.join("home")).unwrap();
     for key in [
         "FTM_WORKSPACE_ID",
         "FTM_PANE_ID",
@@ -277,8 +281,16 @@ pub fn wait_until(conn: &mut Conn, what: &str, ok: impl Fn(&[Workspace]) -> bool
     }
 }
 
+/// Keeps the user's and the system's git config (signing, hooks, templates) out of a git the test runs, directly or
+/// through ftmd or `ftm`.
+pub fn without_user_git_config(cmd: &mut Command) -> &mut Command {
+    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1")
+}
+
 pub fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
+    let out = without_user_git_config(Command::new("git").arg("-C").arg(dir).args(args))
+        .output()
+        .unwrap();
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
     String::from_utf8_lossy(&out.stdout).into_owned()
 }

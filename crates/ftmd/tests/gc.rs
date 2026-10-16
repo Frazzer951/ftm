@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{ftm_bin, git, start_daemon, temp_root};
+use common::{ftm_bin, git, start_daemon, temp_root, without_user_git_config};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -43,7 +43,7 @@ fn gc_removes_only_merged_clean_closed_worktrees() {
             .env("XDG_DATA_HOME", &data);
     });
     let ftm = |args: &[&str]| {
-        let out = Command::new(&bin)
+        let out = without_user_git_config(&mut Command::new(&bin))
             .args(args)
             .env("FTM_SOCKET", &daemon.socket)
             .env("XDG_CONFIG_HOME", &config)
