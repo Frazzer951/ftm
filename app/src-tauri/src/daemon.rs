@@ -197,11 +197,17 @@ impl Conn {
         Ok(Conn { write, read })
     }
 
+    /// macOS refuses this with EINVAL once ftmd has closed its end. A read then cannot block anyway: it returns what
+    /// ftmd sent before closing, then end of file.
+    fn set_read_timeout(&self, timeout: Option<Duration>) {
+        let _ = self.write.set_read_timeout(timeout);
+    }
+
     fn roundtrip(&mut self, request: &Request, timeout: Option<Duration>) -> Result<String, Failure> {
         let mut out = serde_json::to_vec(request).map_err(|e| Failure::Write(e.into()))?;
         out.push(b'\n');
+        self.set_read_timeout(timeout);
         self.write.write_all(&out).map_err(Failure::Write)?;
-        self.write.set_read_timeout(timeout).map_err(Failure::Read)?;
         let mut line = String::new();
         match self.read.read_line(&mut line) {
             Ok(0) => Err(Failure::Read(ErrorKind::UnexpectedEof.into())),
@@ -346,7 +352,7 @@ fn subscribe(
     }
     conn.roundtrip(&Request::Subscribe, Some(REPLY))
         .map_err(Failure::into_string)?;
-    conn.write.set_read_timeout(None).map_err(|e| e.to_string())?;
+    conn.set_read_timeout(None);
     let mut line = String::new();
     while live() {
         line.clear();
@@ -428,6 +434,23 @@ mod tests {
         let received = loses_first_reply(&daemon.0.socket);
         assert!(matches!(send(&daemon, &mut None, &Request::List), Ok(Response::Ok)));
         assert_eq!(received.load(Ordering::SeqCst), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_reply_sent_just_before_ftmd_closes_is_read() {
+        let dir = scratch("reply-close");
+        let daemon = no_ftmd(&dir);
+        let listener = UnixListener::bind(&daemon.0.socket).unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().unwrap()).read_line(&mut request).unwrap();
+            stream.write_all(&line(&Response::Ok)).unwrap();
+        });
+        let input =
+            serde_json::from_str(r#"{"op":"input","pane":"00000000-0000-0000-0000-000000000001","data":"Cg=="}"#).unwrap();
+        assert!(matches!(send(&daemon, &mut None, &input), Ok(Response::Ok)));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
