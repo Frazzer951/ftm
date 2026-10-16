@@ -222,13 +222,21 @@ fn panes_whose_holder_died_are_dropped() {
 /// ends its input without a SIGHUP. Returns the child and the terminal's master and slave.
 fn attach_on_loose_pty(socket: &Path, ws: WorkspaceId) -> (std::process::Child, OwnedFd, OwnedFd) {
     let (mut master, mut slave) = (0, 0);
-    let size = libc::winsize {
+    let mut size = libc::winsize {
         ws_row: 24,
         ws_col: 80,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
-    let rc = unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null(), &size) };
+    let rc = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &raw mut size,
+        )
+    };
     assert_eq!(rc, 0);
     for fd in [master, slave] {
         unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
