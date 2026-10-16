@@ -79,7 +79,7 @@ impl vt100::Callbacks for TitleWatch {
     }
 }
 
-/// Claude Code titles its terminal "<status glyph> <task summary>", with a spinner frame as the glyph while it works
+/// Claude Code titles its terminal `<status glyph> <task summary>`, with a spinner frame as the glyph while it works
 /// and plain "Claude Code" before it has a task. Keep the summary only, so the name does not flicker.
 fn task_title(raw: &str) -> Option<String> {
     let title = raw.trim_start_matches(|c: char| !c.is_alphanumeric()).trim();

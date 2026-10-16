@@ -52,6 +52,11 @@ jobs:
       - run: mkdir -p app/dist
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      - name: Check the docs build
+        if: runner.os == 'Linux'
+        run: cargo doc --workspace --no-deps --document-private-items --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
       - name: Test the nightly channel's paths
         run: cargo test -p ftm-core
         env:
