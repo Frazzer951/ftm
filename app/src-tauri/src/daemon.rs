@@ -367,7 +367,6 @@ fn subscribe(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixListener;
     use std::sync::atomic::AtomicUsize;
 
@@ -501,15 +500,20 @@ mod tests {
         let dir = scratch("dies");
         let binary = dir.join("ftmd");
         let launched = dir.join("launched");
-        std::fs::write(
-            &binary,
-            format!(
-                "#!/bin/sh\necho x >> '{}'\necho 'bind failed: boom' >&2\nexit 3\n",
-                launched.display()
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let script = format!(
+            "#!/bin/sh\necho x >> '{}'\necho 'bind failed: boom' >&2\nexit 3\n",
+            launched.display()
+        );
+        // Written by a child: a fork from another test thread would inherit a writable fd held here, and exec refuses
+        // a file open for writing (ETXTBSY).
+        let mut writer = Command::new("/bin/sh")
+            .args(["-c", r#"cat > "$1" && chmod 755 "$1""#, "sh"])
+            .arg(&binary)
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        writer.stdin.take().unwrap().write_all(script.as_bytes()).unwrap();
+        assert!(writer.wait().unwrap().success());
         let daemon = Daemon::at(dir.join("ftmd.sock"), binary);
         let started = Instant::now();
         let err = daemon.connect().unwrap_err();
