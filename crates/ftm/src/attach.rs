@@ -96,8 +96,15 @@ impl Drop for RawMode {
 fn terminal_size() -> Option<(u16, u16)> {
     unsafe {
         let mut ws: libc::winsize = std::mem::zeroed();
-        (libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) == 0 && ws.ws_row > 0).then_some((ws.ws_row, ws.ws_col))
+        (libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) == 0)
+            .then_some(ws)
+            .and_then(usable_size)
     }
+}
+
+/// Rows and columns, unless the terminal reports no size.
+fn usable_size(ws: libc::winsize) -> Option<(u16, u16)> {
+    (ws.ws_row > 0 && ws.ws_col > 0).then_some((ws.ws_row, ws.ws_col))
 }
 
 pub fn run(pane: PaneId) -> Result<()> {
@@ -192,3 +199,20 @@ pub fn run(pane: PaneId) -> Result<()> {
     std::process::exit(0);
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_terminal_without_a_size_is_not_sent() {
+        let size = |rows, cols| libc::winsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        assert_eq!(usable_size(size(24, 80)), Some((24, 80)));
+        assert_eq!(usable_size(size(0, 80)), None);
+        assert_eq!(usable_size(size(24, 0)), None);
+    }
+}
