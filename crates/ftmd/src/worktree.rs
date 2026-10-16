@@ -108,7 +108,7 @@ fn copy_tracked_changes(repo: &Path, dest: &Path) -> Result<()> {
     let diff = Command::new("git")
         .arg("-C")
         .arg(repo)
-        .args(["diff", "HEAD", "--binary"])
+        .args(["diff-index", "-p", "--binary", "HEAD"])
         .output()?;
     if !diff.status.success() || diff.stdout.is_empty() {
         return Ok(());

@@ -103,3 +103,32 @@ fn nested_worktrees_belong_to_the_main_repo() {
     assert!(!child_wt.exists());
     assert!(git(&env.repo, &["branch", "--list", "fix"]).is_empty());
 }
+
+/// `--copy-changes` carries modified, staged and binary files over whatever diff settings the user has.
+#[test]
+fn copy_changes_ignores_the_users_diff_config() {
+    let env = Env::new("copy", "copy_ignored = false\n", |c, root| {
+        let gitconfig = root.join("gitconfig");
+        std::fs::write(
+            &gitconfig,
+            "[diff]\n\tnoprefix = true\n\trelative = true\n\texternal = false\n[color]\n\tdiff = always\n",
+        )
+        .unwrap();
+        c.env("GIT_CONFIG_GLOBAL", gitconfig);
+    });
+    let binary: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
+    std::fs::write(env.repo.join("bin"), &binary[..100]).unwrap();
+    git(&env.repo, &["add", "bin"]);
+    git(&env.repo, &["commit", "-qm", "bin"]);
+
+    std::fs::write(env.repo.join("f"), "edited\n").unwrap();
+    std::fs::write(env.repo.join("staged"), "new\n").unwrap();
+    git(&env.repo, &["add", "staged"]);
+    std::fs::write(env.repo.join("bin"), &binary).unwrap();
+
+    id(env.spawn(&env.repo, "carry", &["--copy-changes"]));
+    let wt = env.worktrees().join("copyrepo/carry");
+    assert_eq!(std::fs::read_to_string(wt.join("f")).unwrap(), "edited\n");
+    assert_eq!(std::fs::read_to_string(wt.join("staged")).unwrap(), "new\n");
+    assert_eq!(std::fs::read(wt.join("bin")).unwrap(), binary);
+}
