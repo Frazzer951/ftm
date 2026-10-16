@@ -11,8 +11,9 @@ pub fn path() -> PathBuf {
     paths::socket_path().with_file_name("ftm-app.log")
 }
 
-/// Past this, the log moves to `ftm-app.log.old` at startup, so it never grows without bound but the last crash survives.
-const MAX_LOG_BYTES: u64 = 1024 * 1024;
+/// Past this, a log moves to `*.log.old` when it is next opened, so it never grows without bound but the last crash
+/// survives.
+pub const MAX_LOG_BYTES: u64 = 1024 * 1024;
 
 /// Appends every panic (message, location, backtrace) to [`path`], then runs the default hook as before.
 pub fn install() {
@@ -35,7 +36,7 @@ fn recorder(log: PathBuf) -> impl Fn(&PanicHookInfo<'_>) + Send + Sync + 'static
     }
 }
 
-fn rotate(log: &Path, max_bytes: u64) {
+pub fn rotate(log: &Path, max_bytes: u64) {
     if std::fs::metadata(log).is_ok_and(|m| m.len() > max_bytes) {
         let _ = std::fs::rename(log, log.with_extension("log.old"));
     }

@@ -315,6 +315,7 @@ fn main() {
     if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
         unsafe { std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1") };
     }
+    let ftmd = daemon::Daemon::new();
     let builder = tauri::Builder::default();
     #[cfg(target_os = "macos")]
     let builder = builder.menu(menu).activate_ignoring_other_apps(!background);
@@ -323,8 +324,8 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
-        .manage(daemon::Client::start())
-        .manage(daemon::Events::default())
+        .manage(daemon::Client::start(ftmd.clone()))
+        .manage(daemon::Events::new(ftmd))
         .setup(move |app| {
             // Launch finishes by activating the app (tao calls activate); a Prohibited app cannot be activated, so
             // start as one and become an ordinary accessory once launched (see Ready below).
