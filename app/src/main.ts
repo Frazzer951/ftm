@@ -35,7 +35,8 @@ interface Workspace {
   title: string | null;
   auto_title: string | null;
   pinned: boolean;
-  kind: "terminal" | "agent";
+  /// "unknown" for a kind or status from a newer ftmd than this app knows.
+  kind: "terminal" | "agent" | "unknown";
   cwd: string;
   worktree: { repo: string; branch: string } | null;
   status: string;
@@ -827,7 +828,7 @@ function renderSidebar() {
   const top = workspaces.filter((w) => !w.parent || !ids.has(w.parent));
   const sections: [string, string, HTMLElement[]][] = [
     ["pinned", "Pinned", top.filter((w) => w.pinned).map(workspaceTree)],
-    ["terminals", "Active Terminals", top.filter((w) => !w.pinned && w.kind === "terminal").map(workspaceTree)],
+    ["terminals", "Active Terminals", top.filter((w) => !w.pinned && w.kind !== "agent").map(workspaceTree)],
     ["agents", "Active Agents", top.filter((w) => !w.pinned && w.kind === "agent").map(workspaceTree)],
     [
       "folders",
@@ -1606,7 +1607,7 @@ const events = listen<FtmEvent>("ftm-event", ({ payload }) => {
       "update",
       `${build} is installed, but ftmd cannot switch to it without closing your sessions (${payload.reason}). Restarting ftmd finishes the update and closes every pane.`,
     );
-  } else if (live.has(payload.pane)) {
+  } else if (payload.event === "output" && live.has(payload.pane)) {
     const v = view(payload.pane);
     if (payload.reset) {
       v.term.reset();

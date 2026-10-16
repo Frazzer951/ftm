@@ -61,6 +61,7 @@ button:hover { background: var(--hover); }
 .dot.working { background: var(--status-working); }
 .dot.needs_input { background: var(--status-needs-input); }
 .dot.idle { background: var(--status-idle); }
+.dot.unknown { background: transparent; border: 1.5px dashed var(--status-idle); }
 .dot.done { background: transparent; border: 1.5px solid var(--status-done); }
 .dot.failed { background: transparent; border: 1.5px solid var(--status-needs-input); }
 .dot.unseen { background: var(--status-unseen); border: none; }
