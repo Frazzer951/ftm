@@ -377,13 +377,25 @@ pub fn copy_executable(from: &Path, to: &Path) {
     assert!(status.success(), "copying {} to {}", from.display(), to.display());
 }
 
-/// `ftm` is another package, so its binary is not a `CARGO_BIN_EXE_*` here; build it into the same target dir.
+/// `ftm` is another package, so its binary is not a `CARGO_BIN_EXE_*` here; build it into the same target dir, once
+/// per test binary. That build can relink `target/debug/ftm` (its features differ from a workspace test build's), so
+/// tests run a copy cargo never rewrites: running the shared path while cargo replaces it fails with ENOENT.
 pub fn ftm_bin() -> PathBuf {
-    let status = Command::new(env!("CARGO"))
-        .args(["build", "--quiet", "-p", "ftm", "--bin", "ftm"])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .status()
-        .unwrap();
-    assert!(status.success(), "building ftm");
-    Path::new(env!("CARGO_BIN_EXE_ftmd")).with_file_name("ftm")
+    static BIN: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    BIN.get_or_init(|| {
+        let status = Command::new(env!("CARGO"))
+            .args(["build", "--quiet", "--locked", "-p", "ftm", "--bin", "ftm"])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .status()
+            .unwrap();
+        assert!(status.success(), "building ftm");
+        let built = Path::new(env!("CARGO_BIN_EXE_ftmd")).with_file_name("ftm");
+        let dir = Path::new(env!("CARGO_TARGET_TMPDIR"));
+        let (tmp, bin) = (dir.join(format!("ftm.{}.tmp", std::process::id())), dir.join("ftm"));
+        copy_executable(&built, &tmp);
+        // A rename, so another test binary still running the last copy keeps it.
+        std::fs::rename(&tmp, &bin).unwrap();
+        bin
+    })
+    .clone()
 }
