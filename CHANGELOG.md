@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.10] - 2026-10-16
+
+### Other
+
+- feat: let ftm spawn agent pass extra arguments to Claude
+- feat(ftm): show ftmd's features in ftm ping
+
 ## [0.1.9] - 2026-10-16
 
 ### Daemon
