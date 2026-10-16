@@ -10,6 +10,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { chromeColors } from "./colors";
+import { StatusSounds, stillFinished } from "./finish.ts";
 import { clipboardKey, type OptionAsMeta, optionIsMeta, paneKey } from "./keys.ts";
 import { type KeyProtocol, kittyKeyboard } from "./kitty.ts";
 import { loadSounds, play, type SoundEntry, type SoundSettings } from "./sounds";
@@ -703,14 +704,11 @@ function setFocus(pane: Id) {
   });
 }
 
-let seenTree = false;
-
 /// Panes in some layout. Output can trail a pane's removal, and a view made for it then would never be disposed.
 let live = new Set<Id>();
 
 function onWorkspaces(list: Workspace[]) {
-  onStatusChanges(list, !seenTree);
-  seenTree = true;
+  onStatusChanges(list);
   workspaces = list;
   live = new Set(list.flatMap((w) => w.tabs.flatMap((t) => panesOf(t.layout))));
   for (const [id, v] of views) {
@@ -1197,8 +1195,7 @@ function descendantsNeedingInput(id: Id): number {
     .reduce((n, w) => n + (w.kind === "agent" && w.status === "needs_input" ? 1 : 0) + descendantsNeedingInput(w.id), 0);
 }
 
-const lastStatus = new Map<Id, string>();
-const lastUnseen = new Set<Id>();
+const statusSounds = new StatusSounds<Workspace>();
 const heldFinish = new Set<Id>();
 let heldTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -1208,34 +1205,22 @@ const FINISH_HOLD_MS = 1500;
 
 const finishCounts = (w: Workspace) => w.id !== selected || !document.hasFocus();
 
-/// A transition into needs_input plays its sound and sends a desktop notification. A turn finishing (ftmd marking the
-/// workspace unseen) plays the other sound, unless it is the workspace on screen: render() then marks it seen at once.
-/// With `wait_for_subagents`, a turn that ends with background subagents still running stays quiet, and the sound
-/// waits `FINISH_HOLD_MS` for the workspace to stay finished. The first tree after startup only records state.
-function onStatusChanges(list: Workspace[], initial: boolean) {
-  const waiting = list.filter((w) => w.kind === "agent" && w.status === "needs_input" && lastStatus.get(w.id) !== "needs_input");
-  const finished = list.filter((w) => w.unseen && !lastUnseen.has(w.id));
-  lastStatus.clear();
-  lastUnseen.clear();
-  for (const w of list) {
-    lastStatus.set(w.id, w.status);
-    if (w.unseen) lastUnseen.add(w.id);
-  }
-  if (initial) return;
-  if (waiting.length) {
-    playSound(soundSettings.needs_input);
-    notifyNeedsInput(waiting).catch(console.error);
-  } else if (!soundSettings.wait_for_subagents) {
-    if (finished.some(finishCounts)) playSound(soundSettings.completed);
-  } else {
-    const done = finished.filter((w) => !w.background_agents);
-    if (!done.length) return;
-    for (const w of done) heldFinish.add(w.id);
+/// Plays the sound a new tree calls for (see `StatusSounds`); needs_input also sends a desktop notification.
+function onStatusChanges(list: Workspace[]) {
+  const decision = statusSounds.update(list, soundSettings.wait_for_subagents, finishCounts);
+  if (!decision) return;
+  if ("hold" in decision) {
+    for (const w of decision.hold) heldFinish.add(w.id);
     clearTimeout(heldTimer);
     heldTimer = setTimeout(() => {
-      if (workspaces.some((w) => heldFinish.has(w.id) && w.unseen && finishCounts(w))) playSound(soundSettings.completed);
+      if (workspaces.some((w) => heldFinish.has(w.id) && stillFinished(w, finishCounts))) playSound(soundSettings.completed);
       heldFinish.clear();
     }, FINISH_HOLD_MS);
+  } else if (decision.sound === "needs_input") {
+    playSound(soundSettings.needs_input);
+    notifyNeedsInput(decision.waiting).catch(console.error);
+  } else {
+    playSound(soundSettings.completed);
   }
 }
 
