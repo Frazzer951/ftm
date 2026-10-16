@@ -211,6 +211,10 @@ fn agents_nest_report_status_and_clean_up() {
     assert_eq!(unnamed_ws.auto_title.as_deref(), Some("Task of unnamed-dir"));
     assert_eq!(unnamed_ws.display_name(), "Task of unnamed-dir");
     assert!(ftm(&bin, &socket, &["ls"]).contains("Task of unnamed-dir (unnamed-dir)"));
+    assert_eq!(
+        ftm(&bin, &socket, &["ping"]),
+        format!("ftmd {} (features: claude_args)", env!("CARGO_PKG_VERSION"))
+    );
     ftm(&bin, &socket, &["close", "--id", &unnamed.to_string()]);
 
     // Arguments after `--` reach Claude one argv entry each, after `-n` and before the brief, which `--` shields from
@@ -625,12 +629,21 @@ fn claude_args_are_refused_by_an_older_ftmd() {
     let socket = root.join("old.sock");
     let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
     let server = std::thread::spawn(move || {
-        let (stream, _) = listener.accept().unwrap();
-        let mut request = String::new();
-        std::io::BufRead::read_line(&mut std::io::BufReader::new(&stream), &mut request).unwrap();
-        (&stream).write_all(b"{\"result\":\"pong\",\"version\":\"0.1.8\"}\n").unwrap();
-        request
+        let mut requests = String::new();
+        for _ in 0..2 {
+            let (stream, _) = listener.accept().unwrap();
+            std::io::BufRead::read_line(&mut std::io::BufReader::new(&stream), &mut requests).unwrap();
+            (&stream).write_all(b"{\"result\":\"pong\",\"version\":\"0.1.8\"}\n").unwrap();
+        }
+        requests
     });
+    // Without features, `ftm ping` prints what it always did.
+    let ping = Command::new(ftm_bin())
+        .arg("ping")
+        .env("FTM_SOCKET", &socket)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&ping.stdout), "ftmd 0.1.8\n");
     let out = Command::new(ftm_bin())
         .args(["spawn", "agent", "--path", root.to_str().unwrap(), "--", "--resume", "x"])
         .env("FTM_SOCKET", &socket)
@@ -640,7 +653,7 @@ fn claude_args_are_refused_by_an_older_ftmd() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("ftmd 0.1.8 does not support claude arguments"));
     assert!(
-        server.join().unwrap().contains(r#""op":"ping""#),
-        "only a ping reaches the old ftmd"
+        server.join().unwrap().lines().all(|r| r.contains(r#""op":"ping""#)),
+        "only pings reach the old ftmd"
     );
 }

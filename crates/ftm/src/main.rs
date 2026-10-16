@@ -21,7 +21,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Check that ftmd is running
+    /// Check that ftmd is running; prints its version and, when it reports any, its features
     Ping,
     /// List workspaces as a parent/child tree
     Ls {
@@ -239,7 +239,8 @@ fn main() -> Result<()> {
     };
 
     match client::send(&request)? {
-        Response::Pong { version, .. } => println!("ftmd {version}"),
+        Response::Pong { version, features } if features.is_empty() => println!("ftmd {version}"),
+        Response::Pong { version, features } => println!("ftmd {version} (features: {})", features.join(", ")),
         Response::Spawned { workspace } => println!("{}", workspace.id),
         _ => {},
     }

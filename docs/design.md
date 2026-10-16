@@ -44,7 +44,7 @@ Everything a daemon keeps is keyed by its socket, so daemons on different socket
 ## CLI
 
 ```
-ftm ping
+ftm ping                                      # "ftmd <version>", plus " (features: ...)" when ftmd reports any
 ftm ls [--json]
 ftm spawn terminal|agent [--path P] [--name N] [--worktree BRANCH [--base REF] [--copy-changes]]
                          [--brief FILE] [--parent ID | --detached] [-- CLAUDE_ARGS...]
