@@ -23,12 +23,20 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
 }
 
-pub fn repo_root(dir: &Path) -> Option<PathBuf> {
-    git(dir, &["rev-parse", "--show-toplevel"]).ok().map(PathBuf::from)
+/// The checkout `dir` is in, and the main checkout of its repo: the parent of the common git dir, so a worktree made
+/// from inside another worktree is named, configured and removed by the repo it belongs to.
+fn checkouts(dir: &Path) -> Option<(PathBuf, PathBuf)> {
+    let src = PathBuf::from(git(dir, &["rev-parse", "--show-toplevel"]).ok()?);
+    let common = PathBuf::from(git(dir, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).ok()?);
+    let repo = match common.parent() {
+        Some(parent) if common.file_name().is_some_and(|n| n == ".git") => parent.to_path_buf(),
+        _ => src.clone(),
+    };
+    Some((src, repo))
 }
 
 pub fn create(cwd: &Path, branch: &str, base: Option<&str>, copy_changes: bool) -> Result<Created> {
-    let repo = repo_root(cwd).ok_or_else(|| eyre::eyre!("{} is not in a git repo", cwd.display()))?;
+    let (src, repo) = checkouts(cwd).ok_or_else(|| eyre::eyre!("{} is not in a git repo", cwd.display()))?;
     let name = repo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let config = RepoConfig::load(&paths::repo_config_path(&name))?;
 
@@ -37,22 +45,22 @@ pub fn create(cwd: &Path, branch: &str, base: Option<&str>, copy_changes: bool) 
         bail!("{} already exists", path.display());
     }
     let path_str = path.to_string_lossy().into_owned();
-    if git(&repo, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_ok() {
-        git(&repo, &["worktree", "add", &path_str, branch])?;
+    if git(&src, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_ok() {
+        git(&src, &["worktree", "add", &path_str, branch])?;
     } else {
         let mut args = vec!["worktree", "add", "-b", branch, &path_str];
         if let Some(base) = base.or(config.base.as_deref()) {
             args.push(base);
         }
-        git(&repo, &args)?;
+        git(&src, &args)?;
     }
 
     let mut copied = Copied::default();
     if copy_changes {
-        copy_tracked_changes(&repo, &path)?;
-        let untracked = git(&repo, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+        copy_tracked_changes(&src, &path)?;
+        let untracked = git(&src, &["ls-files", "--others", "--exclude-standard", "-z"])?;
         for rel in split_nul(&untracked) {
-            copy_entry(&repo, &path, &rel, &Excludes::default(), &mut copied);
+            copy_entry(&src, &path, &rel, &Excludes::default(), &mut copied);
         }
     }
     match &config.copy_ignored {
@@ -60,22 +68,22 @@ pub fn create(cwd: &Path, branch: &str, base: Option<&str>, copy_changes: bool) 
         CopyIgnored::All(true) => {
             let excludes = Excludes::new(&config.copy_ignored_exclude)?;
             let ignored = git(
-                &repo,
+                &src,
                 &["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"],
             )?;
             for rel in split_nul(&ignored) {
-                copy_entry(&repo, &path, &rel, &excludes, &mut copied);
+                copy_entry(&src, &path, &rel, &excludes, &mut copied);
             }
         },
         CopyIgnored::Only(patterns) => {
             for pattern in patterns {
-                let full = repo.join(pattern).to_string_lossy().into_owned();
+                let full = src.join(pattern).to_string_lossy().into_owned();
                 let matches = glob::glob(&full).wrap_err_with(|| format!("bad copy_ignored pattern {pattern}"))?;
                 for rel in matches
                     .flatten()
-                    .filter_map(|p| p.strip_prefix(&repo).ok().map(Path::to_path_buf))
+                    .filter_map(|p| p.strip_prefix(&src).ok().map(Path::to_path_buf))
                 {
-                    copy_entry(&repo, &path, &rel, &Excludes::default(), &mut copied);
+                    copy_entry(&src, &path, &rel, &Excludes::default(), &mut copied);
                 }
             }
         },
