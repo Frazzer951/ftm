@@ -17,9 +17,6 @@ type Reply = oneshot::Sender<Result<Response, String>>;
 const START_TIMEOUT: Duration = Duration::from_secs(5);
 /// After an ftmd launch dies at startup, requests fail at once for this long rather than each launching another.
 const LAUNCH_BACKOFF: Duration = Duration::from_secs(10);
-/// Creating or removing a worktree runs git, which can be slow on a large repo.
-const SLOW_REPLY: Duration = Duration::from_secs(300);
-const REPLY: Duration = Duration::from_secs(30);
 
 /// Where ftmd listens and how to start it. The request worker and the event thread share one, so only one of them
 /// launches ftmd at a time.
@@ -247,13 +244,6 @@ fn idempotent(request: &Request) -> bool {
     )
 }
 
-fn reply_timeout(request: &Request) -> Duration {
-    match request {
-        Request::Spawn(_) | Request::Close { .. } => SLOW_REPLY,
-        _ => REPLY,
-    }
-}
-
 /// Reconnects (starting ftmd if needed) and retries once when the connection has dropped: always if the request could
 /// not be written, but after a lost reply only if sending it again is harmless.
 fn send(daemon: &Daemon, conn: &mut Option<Conn>, request: &Request) -> Result<Response, String> {
@@ -262,7 +252,7 @@ fn send(daemon: &Daemon, conn: &mut Option<Conn>, request: &Request) -> Result<R
             Some(open) => open,
             None => conn.insert(Conn::open(daemon)?),
         };
-        match open.roundtrip(request, Some(reply_timeout(request))) {
+        match open.roundtrip(request, Some(request.reply_timeout())) {
             Ok(line) => {
                 return match serde_json::from_str(&line).map_err(|e| e.to_string())? {
                     Response::Error { message } => Err(message),
@@ -346,11 +336,13 @@ fn subscribe(
         }
         *slot = conn.write.try_clone().ok().map(|s| (generation, s));
     }
-    let pong = conn.roundtrip(&Request::Ping, Some(REPLY)).map_err(Failure::into_string)?;
+    let pong = conn
+        .roundtrip(&Request::Ping, Some(Request::Ping.reply_timeout()))
+        .map_err(Failure::into_string)?;
     if let Ok(Response::Pong { version }) = serde_json::from_str(&pong) {
         connected(version);
     }
-    conn.roundtrip(&Request::Subscribe, Some(REPLY))
+    conn.roundtrip(&Request::Subscribe, Some(Request::Ping.reply_timeout()))
         .map_err(Failure::into_string)?;
     conn.set_read_timeout(None);
     let mut line = String::new();
