@@ -8,7 +8,7 @@ import type { IDisposable, Terminal } from "@xterm/xterm";
 export interface KeyProtocol {
   readonly flags: number;
   /// The bytes for a keydown, or undefined when xterm's own encoding is already right for it.
-  encode(e: KeyEvent, altIsMeta: boolean): string | undefined;
+  encode(e: KeyEvent, altIsMeta: boolean, composedAlt?: boolean): string | undefined;
   /// After `term.reset()`, which does not go through the parser.
   reset(): void;
   dispose(): void;
@@ -47,50 +47,105 @@ const functional: Record<string, number> = {
   AudioVolumeMute: 57440,
 };
 
-const numpad: Record<string, number> = {
+/// Keypad keys that type text while NumLock is on: plain text unless a modifier other than Shift is held.
+const keypadText: Record<string, number> = {
   Decimal: 57409,
   Divide: 57410,
   Multiply: 57411,
   Subtract: 57412,
   Add: 57413,
-  Enter: 57414,
   Equal: 57415,
+  Comma: 57416,
 };
 
-function numpadCode(code: string): number | undefined {
-  if (!code.startsWith("Numpad")) return;
-  const rest = code.slice(6);
-  return /^[0-9]$/.test(rest) ? 57399 + Number(rest) : numpad[rest];
+/// What the keypad's digit keys report with NumLock off.
+const keypadNav: Record<string, number> = {
+  ArrowLeft: 57417,
+  ArrowRight: 57418,
+  ArrowUp: 57419,
+  ArrowDown: 57420,
+  PageUp: 57421,
+  PageDown: 57422,
+  Home: 57423,
+  End: 57424,
+  Insert: 57425,
+  Delete: 57426,
+};
+
+type Keypad = { code: number; text: boolean } | "enter" | "begin";
+
+function keypad(e: KeyEvent): Keypad | undefined {
+  if (!e.code.startsWith("Numpad")) return;
+  if (e.code === "NumpadEnter") return "enter";
+  if (e.key in keypadNav) return { code: keypadNav[e.key], text: false };
+  if (e.key === "Clear") return "begin";
+  const rest = e.code.slice(6);
+  if (/^[0-9]$/.test(rest)) return { code: 57399 + Number(rest), text: true };
+  return rest in keypadText ? { code: keypadText[rest], text: true } : undefined;
 }
 
-/// The unshifted key, from the physical key when Shift or a Meta Option has changed what `key` reports.
-function baseCode(e: KeyEvent, altMod: boolean): number | undefined {
-  if ((e.shiftKey || altMod) && /^(Key[A-Z]|Digit[0-9])$/.test(e.code)) return e.code.slice(-1).toLowerCase().charCodeAt(0);
+/// The US layout's unshifted and shifted character for each text key, which a macOS Meta Option is unwound to: it
+/// still composes, so `key` holds the composed character rather than the one on the key.
+const usKeys: Record<string, [string, string]> = {
+  Backquote: ["`", "~"],
+  Minus: ["-", "_"],
+  Equal: ["=", "+"],
+  BracketLeft: ["[", "{"],
+  BracketRight: ["]", "}"],
+  Backslash: ["\\", "|"],
+  Semicolon: [";", ":"],
+  Quote: ["'", '"'],
+  Comma: [",", "<"],
+  Period: [".", ">"],
+  Slash: ["/", "?"],
+  Space: [" ", " "],
+  ...Object.fromEntries([..."0123456789"].map((d, i) => [`Digit${d}`, [d, ")!@#$%^&*("[i]]])),
+  ...Object.fromEntries([..."abcdefghijklmnopqrstuvwxyz"].map((c) => [`Key${c.toUpperCase()}`, [c, c.toUpperCase()]])),
+};
+
+const codePoint = (c: string) => c.codePointAt(0) as number;
+
+/// The key's unshifted character, and the shifted one when Shift is held. Taken from `key`, so it follows the active
+/// layout, except where `key` cannot say: a composed Option, or a shifted symbol whose unshifted form only the
+/// physical key gives.
+function textKey(e: KeyEvent, composedAlt: boolean): { code: number; shifted?: number } | undefined {
+  const us = usKeys[e.code];
+  if (composedAlt && us) {
+    return { code: codePoint(us[0]), shifted: e.shiftKey ? codePoint(us[1]) : undefined };
+  }
   const chars = [...e.key];
   if (chars.length !== 1) return;
-  const cp = chars[0].codePointAt(0) as number;
-  return cp >= 65 && cp <= 90 ? cp + 32 : cp;
+  const ch = chars[0];
+  const lower = ch.toLowerCase();
+  const cased = lower !== ch.toUpperCase();
+  let base = cased && [...lower].length === 1 ? lower : ch;
+  if (e.shiftKey && !cased && us && (us[1] === ch || e.code.startsWith("Digit"))) base = us[0];
+  return { code: codePoint(base), shifted: e.shiftKey ? codePoint(ch) : undefined };
 }
 
 /// `altIsMeta` is false for a macOS Option that composes characters, which then is not a modifier at all.
-export function encodeKey(e: KeyEvent, flags: number, altIsMeta: boolean): string | undefined {
+/// `composedAlt` says Alt still composes `key` when it is Meta, as a macOS Option does.
+export function encodeKey(e: KeyEvent, flags: number, altIsMeta: boolean, composedAlt = false): string | undefined {
   if (!(flags & DISAMBIGUATE) || e.isComposing) return;
   const altMod = e.altKey && altIsMeta;
   const bits = (e.shiftKey ? SHIFT : 0) | (altMod ? ALT : 0) | (e.ctrlKey ? CTRL : 0) | (e.metaKey ? SUPER : 0);
-  const pad = numpadCode(e.code);
-  const func = pad ?? functional[e.key];
-  const code = func ?? baseCode(e, altMod);
-  if (code === undefined) return;
-  // Enter, Tab and Backspace keep their legacy bytes unmodified; other functional keys always get CSI u.
-  const legacyWhenBare = code === 13 || code === 9 || code === 127;
-  const csiU = (func !== undefined && !legacyWhenBare) || (bits !== 0 && func !== undefined) || (bits & ~SHIFT) !== 0;
-  if (!csiU) return;
-  let key = String(code);
-  if (flags & ALTERNATE_KEYS && e.shiftKey && func === undefined) {
-    const shifted = [...e.key].length === 1 ? (e.key.codePointAt(0) as number) : undefined;
-    if (shifted !== undefined && shifted !== code) key += `:${shifted}`;
+  const csi = (key: string | number) => (bits ? `\x1b[${key};${bits + 1}u` : `\x1b[${key}u`);
+  const pad = keypad(e);
+  if (pad === "begin") return bits ? `\x1b[1;${bits + 1}E` : "\x1b[E";
+  if (pad === "enter") return bits ? csi(57414) : undefined;
+  if (pad) return pad.text && (bits & ~SHIFT) === 0 ? undefined : csi(pad.code);
+  const func = functional[e.key];
+  if (func !== undefined) {
+    // Enter, Tab and Backspace keep their legacy bytes unmodified; other functional keys always get CSI u.
+    const legacyWhenBare = func === 13 || func === 9 || func === 127;
+    return legacyWhenBare && !bits ? undefined : csi(func);
   }
-  return bits ? `\x1b[${key};${bits + 1}u` : `\x1b[${key}u`;
+  if ((bits & ~SHIFT) === 0) return;
+  const text = textKey(e, altMod && composedAlt);
+  if (text === undefined) return;
+  let key = String(text.code);
+  if (flags & ALTERNATE_KEYS && text.shifted !== undefined && text.shifted !== text.code) key += `:${text.shifted}`;
+  return csi(key);
 }
 
 interface Screen {
@@ -148,7 +203,7 @@ export function kittyKeyboard(term: Pick<Terminal, "parser" | "buffer">, reply: 
     get flags() {
       return screen().flags;
     },
-    encode: (e, altIsMeta) => encodeKey(e, screen().flags, altIsMeta),
+    encode: (e, altIsMeta, composedAlt) => encodeKey(e, screen().flags, altIsMeta, composedAlt),
     reset() {
       main = fresh();
       alt = fresh();

@@ -93,14 +93,14 @@ pub struct ThemeEntry {
     pub theme: Theme,
 }
 
-/// Every theme file directly in `dir`; the file name is the theme's name.
+/// Every theme file directly in `dir`, symlinks followed; the file name is the theme's name.
 pub fn read_dir(dir: &Path, source: Source) -> Vec<ThemeEntry> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
     entries
         .flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .filter(|e| std::fs::metadata(e.path()).is_ok_and(|m| m.is_file()))
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
             if name.starts_with('.') || name.contains("LICENSE") || name.ends_with(".md") {
@@ -214,5 +214,26 @@ cursor-text = #1e1e1e\nselection-background = #3f638b\nselection-foreground = #f
             ]
         );
         assert_eq!(list[1].theme.background, "#000004");
+    }
+
+    #[test]
+    fn read_dir_follows_symlinks() {
+        let root = std::env::temp_dir().join(format!("ftm-themes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("store")).unwrap();
+        std::fs::create_dir_all(root.join("themes")).unwrap();
+        std::fs::write(root.join("store/real"), "background = #000001\n").unwrap();
+        std::fs::write(root.join("themes/Plain"), "background = #000002\n").unwrap();
+        std::os::unix::fs::symlink(root.join("store/real"), root.join("themes/Linked")).unwrap();
+        std::os::unix::fs::symlink(root.join("store"), root.join("themes/LinkedDir")).unwrap();
+        std::os::unix::fs::symlink(root.join("missing"), root.join("themes/Dangling")).unwrap();
+
+        let mut names: Vec<_> = read_dir(&root.join("themes"), Source::User)
+            .into_iter()
+            .map(|e| e.theme.name)
+            .collect();
+        names.sort();
+        assert_eq!(names, ["Linked", "Plain"]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

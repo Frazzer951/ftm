@@ -7,7 +7,9 @@ use ftm_core::paths;
 use ftm_core::protocol::{Event, Request, Response};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::RecvTimeoutError;
 use std::time::Duration;
 
 /// Ctrl+]. Followed by `d` it detaches; pressed twice it sends one to the pane.
@@ -39,6 +41,9 @@ impl Conn {
         self.write.write_all(&line)?;
         let mut reply = String::new();
         self.read.read_line(&mut reply)?;
+        if reply.is_empty() {
+            bail!("ftmd closed the connection without replying");
+        }
         match serde_json::from_str(&reply)? {
             Response::Error { message } => bail!(message),
             response => Ok(response),
@@ -46,7 +51,22 @@ impl Conn {
     }
 }
 
-/// Puts stdin in raw mode and restores it on drop, however attach ends.
+/// The terminal settings to put back, for the signal handlers.
+static ORIGINAL: OnceLock<libc::termios> = OnceLock::new();
+
+const FATAL_SIGNALS: [libc::c_int; 4] = [libc::SIGTERM, libc::SIGHUP, libc::SIGINT, libc::SIGQUIT];
+
+extern "C" fn on_fatal(sig: libc::c_int) {
+    unsafe {
+        if let Some(original) = ORIGINAL.get() {
+            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, original);
+        }
+        libc::signal(sig, libc::SIG_DFL);
+        libc::raise(sig);
+    }
+}
+
+/// Puts stdin in raw mode and restores it on drop, however attach ends, or on a signal that kills it.
 struct RawMode(libc::termios);
 
 impl RawMode {
@@ -56,9 +76,15 @@ impl RawMode {
             if libc::tcgetattr(libc::STDIN_FILENO, &mut original) != 0 {
                 bail!("stdin is not a terminal");
             }
+            let _ = ORIGINAL.set(original);
+            for sig in FATAL_SIGNALS {
+                libc::signal(sig, on_fatal as *const () as libc::sighandler_t);
+            }
             let mut raw = original;
             libc::cfmakeraw(&mut raw);
-            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw);
+            if libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw) != 0 {
+                bail!("putting the terminal in raw mode: {}", std::io::Error::last_os_error());
+            }
             Ok(RawMode(original))
         }
     }
@@ -73,8 +99,15 @@ impl Drop for RawMode {
 fn terminal_size() -> Option<(u16, u16)> {
     unsafe {
         let mut ws: libc::winsize = std::mem::zeroed();
-        (libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) == 0 && ws.ws_row > 0).then_some((ws.ws_row, ws.ws_col))
+        (libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) == 0)
+            .then_some(ws)
+            .and_then(usable_size)
     }
+}
+
+/// Rows and columns, unless the terminal reports no size.
+fn usable_size(ws: libc::winsize) -> Option<(u16, u16)> {
+    (ws.ws_row > 0 && ws.ws_col > 0).then_some((ws.ws_row, ws.ws_col))
 }
 
 pub fn run(pane: PaneId) -> Result<()> {
@@ -128,8 +161,11 @@ pub fn run(pane: PaneId) -> Result<()> {
         if WINCH.swap(false, Ordering::Relaxed) {
             resize(&mut requests)?;
         }
-        let Ok(bytes) = rx.recv_timeout(Duration::from_millis(50)) else {
-            continue;
+        let bytes = match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(bytes) => bytes,
+            Err(RecvTimeoutError::Timeout) => continue,
+            // Stdin is gone, so nothing can be typed or detach this view.
+            Err(RecvTimeoutError::Disconnected) => break true,
         };
         let mut send = Vec::with_capacity(bytes.len());
         let mut detach = false;
@@ -157,6 +193,29 @@ pub fn run(pane: PaneId) -> Result<()> {
         }
     };
     drop(raw);
-    println!("\r\n[{} pane {pane}]", if detached { "detached from" } else { "exited:" });
+    // Stdout may be gone with stdin.
+    let _ = writeln!(
+        std::io::stdout(),
+        "\r\n[{} pane {pane}]",
+        if detached { "detached from" } else { "exited:" }
+    );
     std::process::exit(0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_terminal_without_a_size_is_not_sent() {
+        let size = |rows, cols| libc::winsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        assert_eq!(usable_size(size(24, 80)), Some((24, 80)));
+        assert_eq!(usable_size(size(0, 80)), None);
+        assert_eq!(usable_size(size(24, 0)), None);
+    }
 }

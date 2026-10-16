@@ -100,11 +100,11 @@ fn gc_removes_only_merged_clean_closed_worktrees() {
     for line in [
         "remove  gcrepo/feat/merged  (merged into origin/main)",
         "remove  gcrepo/squashed  (squash-merged into origin/main)",
-        "remove  gcrepo/gone-pushed  (upstream branch deleted, everything pushed)",
+        "skip    gcrepo/gone-pushed  (upstream branch deleted, everything pushed; --include-upstream-deleted removes it)",
         "skip    gcrepo/gone-unpushed  (upstream branch deleted, local commits never pushed)",
         "skip    gcrepo/dirty  (uncommitted or untracked changes)",
         "skip    gcrepo/open  (open workspace open)",
-        "dry run: pass --yes to remove 3 worktree(s) and their branches",
+        "dry run: pass --yes to remove 2 worktree(s) and their branches",
     ] {
         assert!(listed.contains(line), "missing {line:?} in:\n{listed}");
     }
@@ -112,15 +112,26 @@ fn gc_removes_only_merged_clean_closed_worktrees() {
     for wt in [&merged, &squashed, &pushed] {
         assert!(wt.exists(), "dry run removed {}", wt.display());
     }
+    let opted = ftm(&["gc", "--include-upstream-deleted"]);
+    assert!(
+        opted.contains("remove  gcrepo/gone-pushed  (upstream branch deleted, everything pushed)"),
+        "{opted}"
+    );
 
+    let tracking = |r: &str| git(&repo, &["for-each-ref", &format!("refs/remotes/origin/{r}")]);
     let removed = ftm(&["gc", "--yes"]);
-    assert_eq!(removed.matches("removed ").count(), 3, "{removed}");
-    for (wt, branch) in [(&merged, "feat/merged"), (&squashed, "squashed"), (&pushed, "gone-pushed")] {
+    assert_eq!(removed.matches("removed ").count(), 2, "{removed}");
+    for (wt, branch) in [(&merged, "feat/merged"), (&squashed, "squashed")] {
         assert!(!wt.exists(), "{} still there", wt.display());
         assert!(git(&repo, &["branch", "--list", branch]).is_empty(), "{branch} still there");
     }
     assert!(!data.join("ftm/worktrees/gcrepo/feat").exists());
-    let tracking = |r: &str| git(&repo, &["for-each-ref", &format!("refs/remotes/origin/{r}")]);
+    assert!(pushed.exists() && !git(&repo, &["branch", "--list", "gone-pushed"]).is_empty());
+    assert!(!tracking("gone-pushed").is_empty(), "tracking ref removed without the flag");
+
+    let removed = ftm(&["gc", "--yes", "--include-upstream-deleted"]);
+    assert_eq!(removed.matches("removed ").count(), 1, "{removed}");
+    assert!(!pushed.exists() && git(&repo, &["branch", "--list", "gone-pushed"]).is_empty());
     assert!(tracking("gone-pushed").is_empty(), "stale tracking ref kept");
     assert!(!tracking("gone-unpushed").is_empty());
     for wt in [&unpushed, &dirty, &open, &active] {
@@ -130,4 +141,64 @@ fn gc_removes_only_merged_clean_closed_worktrees() {
     assert!(!list.contains("squashed") && list.contains("active"), "{list}");
 
     drop(daemon);
+}
+
+/// A removal that fails goes to stderr and makes gc exit non-zero; the rest are still removed.
+#[test]
+fn gc_reports_failed_removals() {
+    let bin = ftm_bin();
+    let root = temp_root("gc-fail");
+    let (repo, config, data) = (root.join("failgc"), root.join("config"), root.join("data"));
+    std::fs::create_dir_all(config.join("ftm/repos")).unwrap();
+    std::fs::create_dir_all(root.join("home")).unwrap();
+    std::fs::write(config.join("ftm/repos/failgc.toml"), "base = \"main\"\n").unwrap();
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["config", "user.name", "t"]);
+    git(&repo, &["config", "user.email", "t@t"]);
+    commit(&repo, "f", "init");
+
+    let daemon = start_daemon("gc-fail", |c| {
+        c.env("HOME", root.join("home"))
+            .env("XDG_CONFIG_HOME", &config)
+            .env("XDG_DATA_HOME", &data);
+    });
+    let ftm = |args: &[&str]| {
+        without_user_git_config(&mut Command::new(&bin))
+            .args(args)
+            .env("FTM_SOCKET", &daemon.socket)
+            .env("XDG_CONFIG_HOME", &config)
+            .env("XDG_DATA_HOME", &data)
+            .env_remove("FTM_WORKSPACE_ID")
+            .output()
+            .unwrap()
+    };
+    let worktree = |branch: &str| -> PathBuf {
+        let out = ftm(&["spawn", "terminal", "--path", repo.to_str().unwrap(), "--worktree", branch]);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        assert!(ftm(&["close", "--id", &id]).status.success());
+        data.join("ftm/worktrees/failgc").join(branch)
+    };
+    let locked = worktree("locked");
+    git(&repo, &["worktree", "lock", locked.to_str().unwrap()]);
+    let fine = worktree("fine");
+    // A held ref lock makes `branch -D` fail after the worktree is gone.
+    let stuck = worktree("pre/stuck");
+    std::fs::write(repo.join(".git/refs/heads/pre/stuck.lock"), "").unwrap();
+
+    let out = ftm(&["gc", "--yes", "--no-fetch"]);
+    let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(!out.status.success(), "{stdout}");
+    assert!(stderr.contains("failed  failgc/locked"), "{stderr}");
+    assert!(!stdout.contains("failed"), "{stdout}");
+    assert!(stdout.contains("removed failgc/fine"), "{stdout}");
+    assert!(locked.exists() && !fine.exists());
+    assert!(stdout.contains("removed failgc/pre/stuck"), "{stdout}");
+    assert!(
+        stderr.contains("failed  failgc/pre/stuck  (worktree removed, but:"),
+        "{stderr}"
+    );
+    assert!(!stuck.exists() && !data.join("ftm/worktrees/failgc/pre").exists());
+    assert!(!git(&repo, &["worktree", "list"]).contains("stuck"), "not pruned");
 }

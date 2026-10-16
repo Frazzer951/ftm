@@ -10,11 +10,14 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { chromeColors } from "./colors";
+import { StatusSounds, stillFinished } from "./finish.ts";
 import { clipboardKey, type OptionAsMeta, optionIsMeta, paneKey } from "./keys.ts";
 import { type KeyProtocol, kittyKeyboard } from "./kitty.ts";
+import { isQueryReply } from "./replies.ts";
 import { loadSounds, play, type SoundEntry, type SoundSettings } from "./sounds";
 import "./style.css";
 import { Tabs } from "./tabs.ts";
+import { compareVersions, versionNotice } from "./version.ts";
 import { type AppScroll, type AppWheel, appWheel } from "./wheel.ts";
 
 type Id = string;
@@ -32,7 +35,8 @@ interface Workspace {
   title: string | null;
   auto_title: string | null;
   pinned: boolean;
-  kind: "terminal" | "agent";
+  /// "unknown" for a kind or status from a newer ftmd than this app knows.
+  kind: "terminal" | "agent" | "unknown";
   cwd: string;
   worktree: { repo: string; branch: string } | null;
   status: string;
@@ -66,7 +70,9 @@ interface PaneView {
 
 const isMac = navigator.userAgent.includes("Mac");
 
-const report = (message: string) => invoke("log", { message }).catch(() => {});
+const report = (message: string) => {
+  invoke("log", { message }).catch(() => {});
+};
 const consoleError = console.error.bind(console);
 console.error = (...args: unknown[]) => {
   consoleError(...args);
@@ -94,7 +100,9 @@ const views = new Map<Id, PaneView>();
 
 // biome-ignore lint/suspicious/noExplicitAny: ftmd responses are untyped JSON whose shape depends on the op
 const request = (req: object): Promise<any> => invoke("request", { request: req });
-const send = (req: object) => invoke("send", { request: req }).catch(console.error);
+const send = (req: object) => {
+  invoke("send", { request: req }).catch(console.error);
+};
 
 function encode(text: string): string {
   let bin = "";
@@ -142,12 +150,14 @@ function view(pane: Id): PaneView {
       console.warn("webgl unavailable, using the DOM renderer", e);
     }
   }
-  const input = (data: string) => {
-    if (!v.replaying) send({ op: "input", pane, data });
-  };
-  term.onData((d) => input(encode(d)));
+  const input = (data: string) => send({ op: "input", pane, data });
+  term.onData((d) => {
+    if (!(v.replaying && isQueryReply(d))) input(encode(d));
+  });
   term.onBinary((d) => input(btoa(d)));
-  const kitty = kittyKeyboard(term, (d) => input(encode(d)));
+  const kitty = kittyKeyboard(term, (d) => {
+    if (!v.replaying) input(encode(d));
+  });
   const wheel = appWheel(term, () => settings.app_scroll, (d) => input(encode(d)));
   term.attachCustomKeyEventHandler((e) => {
     const clip = clipboardKey(e, isMac);
@@ -318,8 +328,9 @@ interface UpdateSettings {
 }
 let updateSettings: UpdateSettings = { check: null, channel: null };
 
-const playSound = (name: string, volume = soundSettings.volume) =>
+const playSound = (name: string, volume = soundSettings.volume) => {
   play(name, volume).catch((err) => console.error(`playing ${name}`, err));
+};
 
 /// A searchable list of installed families (monospace first, the rest behind "Show all fonts"), each drawn in its own
 /// font, with "Custom…" for a CSS font stack, and a preview line that shows ligatures on or off.
@@ -702,14 +713,11 @@ function setFocus(pane: Id) {
   });
 }
 
-let seenTree = false;
-
 /// Panes in some layout. Output can trail a pane's removal, and a view made for it then would never be disposed.
 let live = new Set<Id>();
 
 function onWorkspaces(list: Workspace[]) {
-  onStatusChanges(list, !seenTree);
-  seenTree = true;
+  onStatusChanges(list);
   workspaces = list;
   live = new Set(list.flatMap((w) => w.tabs.flatMap((t) => panesOf(t.layout))));
   for (const [id, v] of views) {
@@ -820,7 +828,7 @@ function renderSidebar() {
   const top = workspaces.filter((w) => !w.parent || !ids.has(w.parent));
   const sections: [string, string, HTMLElement[]][] = [
     ["pinned", "Pinned", top.filter((w) => w.pinned).map(workspaceTree)],
-    ["terminals", "Active Terminals", top.filter((w) => !w.pinned && w.kind === "terminal").map(workspaceTree)],
+    ["terminals", "Active Terminals", top.filter((w) => !w.pinned && w.kind !== "agent").map(workspaceTree)],
     ["agents", "Active Agents", top.filter((w) => !w.pinned && w.kind === "agent").map(workspaceTree)],
     [
       "folders",
@@ -1005,8 +1013,14 @@ function startFolderDrag(row: HTMLElement, path: string) {
     if (drop && from >= 0) {
       order.splice(from, 1);
       order.splice(drag.target > from ? drag.target - 1 : drag.target, 0, path);
+      const before = folderOrder;
       folderOrder = order;
-      request({ op: "reorder_folders", paths: order }).catch(console.error);
+      request({ op: "reorder_folders", paths: order }).catch((err) => {
+        console.error(err);
+        if (folderOrder !== order) return;
+        folderOrder = before;
+        renderSidebar();
+      });
     }
     swallowFolderClick = true;
     setTimeout(() => {
@@ -1157,7 +1171,7 @@ function startRename(id: Id) {
   };
   input.onkeydown = (e) => {
     e.stopPropagation();
-    if (e.key === "Enter") save();
+    if (e.key === "Enter") save().catch(console.error);
     else if (e.key === "Escape" && !done) finish();
     else input.classList.remove("invalid");
   };
@@ -1196,8 +1210,7 @@ function descendantsNeedingInput(id: Id): number {
     .reduce((n, w) => n + (w.kind === "agent" && w.status === "needs_input" ? 1 : 0) + descendantsNeedingInput(w.id), 0);
 }
 
-const lastStatus = new Map<Id, string>();
-const lastUnseen = new Set<Id>();
+const statusSounds = new StatusSounds<Workspace>();
 const heldFinish = new Set<Id>();
 let heldTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -1207,34 +1220,22 @@ const FINISH_HOLD_MS = 1500;
 
 const finishCounts = (w: Workspace) => w.id !== selected || !document.hasFocus();
 
-/// A transition into needs_input plays its sound and sends a desktop notification. A turn finishing (ftmd marking the
-/// workspace unseen) plays the other sound, unless it is the workspace on screen: render() then marks it seen at once.
-/// With `wait_for_subagents`, a turn that ends with background subagents still running stays quiet, and the sound
-/// waits `FINISH_HOLD_MS` for the workspace to stay finished. The first tree after startup only records state.
-function onStatusChanges(list: Workspace[], initial: boolean) {
-  const waiting = list.filter((w) => w.kind === "agent" && w.status === "needs_input" && lastStatus.get(w.id) !== "needs_input");
-  const finished = list.filter((w) => w.unseen && !lastUnseen.has(w.id));
-  lastStatus.clear();
-  lastUnseen.clear();
-  for (const w of list) {
-    lastStatus.set(w.id, w.status);
-    if (w.unseen) lastUnseen.add(w.id);
-  }
-  if (initial) return;
-  if (waiting.length) {
-    playSound(soundSettings.needs_input);
-    notifyNeedsInput(waiting).catch(console.error);
-  } else if (!soundSettings.wait_for_subagents) {
-    if (finished.some(finishCounts)) playSound(soundSettings.completed);
-  } else {
-    const done = finished.filter((w) => !w.background_agents);
-    if (!done.length) return;
-    for (const w of done) heldFinish.add(w.id);
+/// Plays the sound a new tree calls for (see `StatusSounds`); needs_input also sends a desktop notification.
+function onStatusChanges(list: Workspace[]) {
+  const decision = statusSounds.update(list, soundSettings.wait_for_subagents, finishCounts);
+  if (!decision) return;
+  if ("hold" in decision) {
+    for (const w of decision.hold) heldFinish.add(w.id);
     clearTimeout(heldTimer);
     heldTimer = setTimeout(() => {
-      if (workspaces.some((w) => heldFinish.has(w.id) && w.unseen && finishCounts(w))) playSound(soundSettings.completed);
+      if (workspaces.some((w) => heldFinish.has(w.id) && stillFinished(w, finishCounts))) playSound(soundSettings.completed);
       heldFinish.clear();
     }, FINISH_HOLD_MS);
+  } else if (decision.sound === "needs_input") {
+    playSound(soundSettings.needs_input);
+    notifyNeedsInput(decision.waiting).catch(console.error);
+  } else {
+    playSound(soundSettings.completed);
   }
 }
 
@@ -1443,7 +1444,7 @@ function closePane() {
 /// Cmd+T/D/Shift+D/W on macOS; Ctrl+Shift+T/D/E/W on Linux (Ctrl+Shift+D can't also carry a second Shift).
 function shortcut(e: KeyboardEvent) {
   if (e.key === "Escape") closeMenu();
-  if (editing) return;
+  if (editing || document.querySelector("dialog[open]")) return;
   const mod = isMac ? e.metaKey && !e.ctrlKey && !e.altKey : e.ctrlKey && e.shiftKey && !e.metaKey && !e.altKey;
   if (!mod) return;
   const key = e.key.toLowerCase();
@@ -1460,7 +1461,7 @@ function shortcut(e: KeyboardEvent) {
   if (!action) return;
   e.preventDefault();
   e.stopPropagation();
-  if (!e.repeat) action();
+  if (!e.repeat) Promise.resolve(action()).catch(console.error);
 }
 
 let openSpawn: (preset?: { folder?: string; worktree?: boolean }) => void = () => {};
@@ -1516,9 +1517,14 @@ function setupSpawnDialog() {
   $("add").onclick = () => openSpawn();
 
   $("pick").onclick = async () => {
-    const dir = await open({ directory: true, defaultPath: folder ?? undefined });
-    if (typeof dir === "string") await choose(dir);
-    showRecent();
+    try {
+      const dir = await open({ directory: true, defaultPath: folder ?? undefined });
+      if (typeof dir === "string") await choose(dir);
+      showRecent();
+    } catch (err) {
+      console.error(err);
+      error.textContent = String(err);
+    }
   };
 
   create.onclick = async (e) => {
@@ -1601,7 +1607,7 @@ const events = listen<FtmEvent>("ftm-event", ({ payload }) => {
       "update",
       `${build} is installed, but ftmd cannot switch to it without closing your sessions (${payload.reason}). Restarting ftmd finishes the update and closes every pane.`,
     );
-  } else if (live.has(payload.pane)) {
+  } else if (payload.event === "output" && live.has(payload.pane)) {
     const v = view(payload.pane);
     if (payload.reset) {
       v.term.reset();
@@ -1615,21 +1621,27 @@ const events = listen<FtmEvent>("ftm-event", ({ payload }) => {
   }
 });
 
-/// The daemon's version as of the last (re)connect; one older than the app may not know how to run a command.
-let daemonVersion: string | null = null;
+/// Whether the daemon, as of the last (re)connect, is at least as new as the app; an older one may not know how to
+/// run a command.
+let daemonCurrent = false;
 
 // Each (re)connect of the event stream reports the daemon's version, then replays any update_blocked.
 const daemon = listen<{ version: string; app_version: string }>("ftm-daemon", ({ payload }) => {
-  daemonVersion = payload.version === payload.app_version ? payload.version : null;
+  daemonCurrent = compareVersions(payload.version, payload.app_version) >= 0;
   notice("update", null);
-  notice(
-    "version",
-    payload.version === payload.app_version
-      ? null
-      : `FTM was updated (ftmd ${payload.version}, app ${payload.app_version}). Relaunch FTM to finish; your sessions stay open.`,
-  );
+  notice("version", versionNotice(payload.version, payload.app_version));
 });
-Promise.all([events, daemon]).then(() => invoke("subscribe"));
+/// Retried until it takes: without the stream, the sidebar stays empty.
+function subscribe(attempt = 0) {
+  invoke("subscribe")
+    .then(() => notice("subscribe", null))
+    .catch((err) => {
+      console.error("subscribing to ftmd", err);
+      notice("subscribe", `Could not connect to ftmd: ${err}. Retrying…`, "error");
+      setTimeout(() => subscribe(attempt + 1), Math.min(30_000, 1000 * 2 ** attempt));
+    });
+}
+Promise.all([events, daemon]).then(() => subscribe(), (err) => console.error("listening for ftmd events", err));
 
 interface Release {
   version: string;
@@ -1686,7 +1698,7 @@ async function checkForRelease() {
 /// Runs the install in a pane of its own, where makepkg shows its progress and sudo can ask for the password.
 async function installRelease(release: Release, script: string) {
   // An ftmd older than this app ignores the command and would open a bare shell.
-  if (daemonVersion === null) {
+  if (!daemonCurrent) {
     notice("release", `To install ${releaseName(release)}, run this in a terminal:\n\n${script}`, "info");
     return;
   }

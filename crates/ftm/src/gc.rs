@@ -45,7 +45,7 @@ fn ok(dir: &Path, args: &[&str]) -> bool {
 }
 
 /// Lists FTM worktrees whose branch is merged into the repo's base and, with `yes`, removes them and their branches.
-pub fn run(yes: bool, fetch: bool) -> Result<()> {
+pub fn run(yes: bool, fetch: bool, upstream_deleted: bool) -> Result<()> {
     let Response::Workspaces { workspaces } =
         client::send(&Request::List).wrap_err("gc needs ftmd running to see which worktrees have open workspaces")?
     else {
@@ -61,7 +61,7 @@ pub fn run(yes: bool, fetch: bool) -> Result<()> {
         }
     }
 
-    let mut removable = 0;
+    let (mut removable, mut failed) = (0, 0);
     for (repo, found) in by_repo {
         let name = repo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let config = RepoConfig::load(&paths::repo_config_path(&name))?;
@@ -70,7 +70,7 @@ pub fn run(yes: bool, fetch: bool) -> Result<()> {
         let live = if fetch { fetch_base(&repo, &base) } else { None };
         let mut removed_any = false;
         for wt in found {
-            match verdict(&repo, &wt.path, &base, &workspaces, live.as_ref()) {
+            match verdict(&repo, &wt.path, &base, &workspaces, live.as_ref(), upstream_deleted) {
                 Verdict::Keep => {},
                 Verdict::Skip(why) => println!("skip    {}  ({why})", wt.shown),
                 Verdict::Remove { branch, stale, why } => {
@@ -79,12 +79,19 @@ pub fn run(yes: bool, fetch: bool) -> Result<()> {
                         println!("remove  {}  ({why})", wt.shown);
                         continue;
                     }
-                    match remove(&repo, &wt.path, &branch, stale.as_deref(), &root) {
+                    match remove_worktree(&repo, &wt.path, &root) {
                         Ok(()) => {
                             removed_any = true;
-                            println!("removed {}  ({why})", wt.shown)
+                            println!("removed {}  ({why})", wt.shown);
+                            if let Err(e) = delete_branch(&repo, &branch, stale.as_deref()) {
+                                failed += 1;
+                                eprintln!("failed  {}  (worktree removed, but: {e:#})", wt.shown)
+                            }
                         },
-                        Err(e) => println!("failed  {}  ({e:#})", wt.shown),
+                        Err(e) => {
+                            failed += 1;
+                            eprintln!("failed  {}  ({e:#})", wt.shown)
+                        },
                     }
                 },
             }
@@ -95,6 +102,9 @@ pub fn run(yes: bool, fetch: bool) -> Result<()> {
     }
     if !yes && removable > 0 {
         println!("dry run: pass --yes to remove {removable} worktree(s) and their branches");
+    }
+    if failed > 0 {
+        bail!("{failed} worktree(s) could not be removed");
     }
     Ok(())
 }
@@ -192,7 +202,14 @@ fn upstream(repo: &Path, branch: &str, live: Option<&Live>) -> Upstream {
     }
 }
 
-fn verdict(repo: &Path, wt: &Path, base: &str, workspaces: &[Workspace], live: Option<&Live>) -> Verdict {
+fn verdict(
+    repo: &Path,
+    wt: &Path,
+    base: &str,
+    workspaces: &[Workspace],
+    live: Option<&Live>,
+    upstream_deleted: bool,
+) -> Verdict {
     let Ok(branch) = git(wt, &["symbolic-ref", "--short", "-q", "HEAD"]) else {
         return Verdict::Keep;
     };
@@ -216,6 +233,12 @@ fn verdict(repo: &Path, wt: &Path, base: &str, workspaces: &[Workspace], live: O
             },
             Upstream::Deleted { tip, .. } if tip != head => {
                 return Verdict::Skip("upstream branch deleted, local commits never pushed".into());
+            },
+            // A PR closed unmerged looks the same, and its commits would then live only in the reflog.
+            Upstream::Deleted { .. } if !upstream_deleted => {
+                return Verdict::Skip(
+                    "upstream branch deleted, everything pushed; --include-upstream-deleted removes it".into(),
+                );
             },
             Upstream::Deleted { tracking, .. } => {
                 stale = Some(tracking);
@@ -254,14 +277,9 @@ fn same_or_inside(path: &Path, dir: &Path) -> bool {
     canon(path).starts_with(canon(dir))
 }
 
-/// Never forced: `git worktree remove` refuses a dirty worktree. The branch is force-deleted since squash merges are
-/// not ancestors of the base; `verdict` has already checked it.
-fn remove(repo: &Path, wt: &Path, branch: &str, stale: Option<&str>, root: &Path) -> Result<()> {
+/// Never forced: `git worktree remove` refuses a dirty worktree.
+fn remove_worktree(repo: &Path, wt: &Path, root: &Path) -> Result<()> {
     git(repo, &["worktree", "remove", &wt.to_string_lossy()])?;
-    git(repo, &["branch", "-D", branch])?;
-    if let Some(tracking) = stale {
-        git(repo, &["update-ref", "-d", tracking])?;
-    }
     let mut dir = wt.parent();
     while let Some(d) = dir
         && d.starts_with(root)
@@ -269,6 +287,15 @@ fn remove(repo: &Path, wt: &Path, branch: &str, stale: Option<&str>, root: &Path
         && std::fs::remove_dir(d).is_ok()
     {
         dir = d.parent();
+    }
+    Ok(())
+}
+
+/// Force-deleted since squash merges are not ancestors of the base; `verdict` has already checked it.
+fn delete_branch(repo: &Path, branch: &str, stale: Option<&str>) -> Result<()> {
+    git(repo, &["branch", "-D", branch])?;
+    if let Some(tracking) = stale {
+        git(repo, &["update-ref", "-d", tracking])?;
     }
     Ok(())
 }

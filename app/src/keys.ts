@@ -53,7 +53,7 @@ export function paneKey(e: PaneKeyEvent, ctx: KeyContext): string | undefined {
     if (seq !== undefined) return seq;
   }
   // Cmd belongs to the app and the Edit menu on macOS, so it is never reported as Super.
-  if (ctx.kitty.flags) return ctx.mac && e.metaKey ? undefined : ctx.kitty.encode(e, ctx.altIsMeta);
+  if (ctx.kitty.flags) return ctx.mac && e.metaKey ? undefined : ctx.kitty.encode(e, ctx.altIsMeta, ctx.mac);
   // What Claude Code's /terminal-setup makes iTerm2 and VS Code send; Alt+Enter already sends it too.
   if (e.key === "Enter" && only(e, "shiftKey")) return "\x1b\r";
   if (!ctx.mac && only(e, "ctrlKey")) return ctrlEditKeys[e.key];

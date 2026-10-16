@@ -46,7 +46,9 @@ pub fn run(args: &[String]) -> Result<()> {
     };
     tracing_subscriber::fmt().with_writer(std::io::stderr).init();
     let socket = PathBuf::from(socket);
-    let pane: Arc<str> = socket.file_stem().unwrap_or_default().to_string_lossy().into();
+    let pane: Arc<str> = std::env::var(ftm_core::ENV_PANE_ID)
+        .unwrap_or_else(|_| socket.file_stem().unwrap_or_default().to_string_lossy().into_owned())
+        .into();
     let (rows, cols): (u16, u16) = (rows.parse()?, cols.parse()?);
     let _ = std::fs::remove_file(&socket);
     let listener = UnixListener::bind(&socket).wrap_err_with(|| format!("binding {}", socket.display()))?;

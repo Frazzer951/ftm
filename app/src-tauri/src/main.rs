@@ -103,18 +103,21 @@ struct GitInfo {
 /// Repo root, repo name and current branch (`HEAD` when detached) of `path`, or `None` outside a git repo.
 #[tauri::command]
 fn git_info(path: String) -> Option<GitInfo> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(Path::new(&path))
-        .args(["rev-parse", "--show-toplevel", "--git-common-dir", "--abbrev-ref", "HEAD"])
-        .output()
-        .ok()?;
+    let git = |args: &[&str]| Command::new("git").arg("-C").arg(Path::new(&path)).args(args).output().ok();
+    let out = git(&["rev-parse", "--show-toplevel", "--git-common-dir"])?;
     if !out.status.success() {
         return None;
     }
     let text = String::from_utf8_lossy(&out.stdout);
     let mut lines = text.lines();
-    let (root, common, branch) = (lines.next()?, lines.next()?, lines.next()?);
+    let (root, common) = (lines.next()?, lines.next()?);
+    // Unlike `rev-parse --abbrev-ref HEAD`, this also names the branch of a repo with no commits yet.
+    let branch = git(&["symbolic-ref", "--short", "-q", "HEAD"])
+        .filter(|out| out.status.success())
+        .map_or_else(
+            || "HEAD".to_string(),
+            |out| String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        );
     let common = Path::new(&path).join(common);
     let repo_dir = if common.file_name().is_some_and(|n| n == ".git") {
         common.parent()?
@@ -125,7 +128,7 @@ fn git_info(path: String) -> Option<GitInfo> {
     Some(GitInfo {
         root: root.to_string(),
         repo,
-        branch: branch.to_string(),
+        branch,
     })
 }
 
@@ -315,6 +318,7 @@ fn main() {
     if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
         unsafe { std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1") };
     }
+    let ftmd = daemon::Daemon::new();
     let builder = tauri::Builder::default();
     #[cfg(target_os = "macos")]
     let builder = builder.menu(menu).activate_ignoring_other_apps(!background);
@@ -323,8 +327,8 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
-        .manage(daemon::Client::start())
-        .manage(daemon::Events::default())
+        .manage(daemon::Client::start(ftmd.clone()))
+        .manage(daemon::Events::new(ftmd))
         .setup(move |app| {
             // Launch finishes by activating the app (tao calls activate); a Prohibited app cannot be activated, so
             // start as one and become an ordinary accessory once launched (see Ready below).
@@ -385,6 +389,65 @@ mod tests {
         // Only a sliver of the title bar, or only the window's lower part, is on screen.
         assert!(!title_bar_visible((-2500, 100, 2560, 1640), &[MAIN]));
         assert!(!title_bar_visible((100, -1000, 2560, 1640), &[MAIN]));
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args([
+                "-c",
+                "user.name=ftm",
+                "-c",
+                "user.email=ftm@example.com",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    fn info(dir: &Path) -> (String, String, String) {
+        let info = git_info(dir.to_string_lossy().into_owned()).expect("a git repo");
+        (info.root, info.repo, info.branch)
+    }
+
+    #[test]
+    fn git_info_names_the_repo_and_branch() {
+        let base = std::env::temp_dir().join(format!("ftm-git-info-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let repo = base.join("project");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo = repo.canonicalize().unwrap();
+        let root = repo.to_string_lossy().into_owned();
+
+        git(&repo, &["init", "-q", "-b", "trunk"]);
+        assert_eq!(info(&repo), (root.clone(), "project".into(), "trunk".into()));
+
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "first"]);
+        std::fs::create_dir(repo.join("sub")).unwrap();
+        assert_eq!(info(&repo.join("sub")), (root.clone(), "project".into(), "trunk".into()));
+
+        let worktree = base.join("feature-wt");
+        git(
+            &repo,
+            &["worktree", "add", "-q", "-b", "feature", &worktree.to_string_lossy()],
+        );
+        let worktree = worktree.canonicalize().unwrap();
+        assert_eq!(
+            info(&worktree),
+            (worktree.to_string_lossy().into_owned(), "project".into(), "feature".into())
+        );
+
+        git(&repo, &["checkout", "-q", "--detach"]);
+        assert_eq!(info(&repo), (root, "project".into(), "HEAD".into()));
+
+        assert!(git_info(base.to_string_lossy().into_owned()).is_none());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

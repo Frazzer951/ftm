@@ -19,6 +19,9 @@ pub type Shared = Arc<Mutex<State>>;
 
 const BUFFER_CAP: usize = 1 << 20;
 const SCROLLBACK: usize = 10_000;
+/// The emulator panics wrapping a line on one row, or a double-width character on one column.
+const MIN_ROWS: u16 = 2;
+const MIN_COLS: u16 = 2;
 /// Trimming only once the buffer is this far over the cap keeps the per-read cost amortized.
 const BUFFER_SLACK: usize = 256 << 10;
 /// Long enough that the TUI reads the narrower size before the real one comes back; two SIGWINCHs handled together
@@ -218,7 +221,7 @@ impl State {
         let id = PaneId::new_v4();
         let shell = shell();
         paths::private_dir(&self.holders, true).wrap_err_with(|| format!("creating {}", self.holders.display()))?;
-        let holder_socket = self.holders.join(format!("{id}.sock"));
+        let holder_socket = paths::holder_socket(&self.holders, id);
 
         let mut cmd = std::process::Command::new(own_exe()?);
         cmd.arg("pty-holder")
@@ -349,7 +352,7 @@ impl State {
     fn pane_output(&mut self, id: PaneId, bytes: &[u8], live: bool) {
         let Some(pane) = self.panes.get_mut(&id) else { return };
         pane.buffer.extend_from_slice(bytes);
-        pane.screen.process(bytes);
+        process(id, &mut pane.screen, bytes);
         let (workspace, titles) = (pane.workspace, std::mem::take(&mut pane.screen.callbacks_mut().0));
         if pane.buffer.len() > BUFFER_CAP + BUFFER_SLACK {
             let excess = pane.buffer.len() - BUFFER_CAP;
@@ -422,7 +425,18 @@ fn handshake(stream: &UnixStream) -> Result<(UnixStream, (u16, u16), Vec<u8>)> {
         bail!("pane holder did not send its buffer");
     };
     read.set_read_timeout(None)?;
-    Ok((read, (rows.max(1), cols.max(1)), replay))
+    Ok((read, (rows.max(MIN_ROWS), cols.max(MIN_COLS)), replay))
+}
+
+/// A panic in the emulator would otherwise end the pane's reader and leave the pane frozen; the screen starts over
+/// instead, while the raw output (what the app shows) carries on.
+fn process(id: PaneId, screen: &mut vt100::Parser<TitleWatch>, bytes: &[u8]) {
+    let processed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| screen.process(bytes)));
+    if processed.is_err() {
+        let (rows, cols) = screen.screen().size();
+        tracing::error!("pane {id}: the terminal emulator panicked; starting its screen over");
+        *screen = vt100::Parser::new_with_callbacks(rows.max(MIN_ROWS), cols.max(MIN_COLS), SCROLLBACK, TitleWatch::default());
+    }
 }
 
 #[derive(Debug)]
@@ -522,7 +536,13 @@ pub fn load(shared: &Shared) -> Result<()> {
         .collect();
     let (mut kept, mut dropped) = (0, 0);
     for (ws, pane) in panes {
-        let holder_socket = state.holders.join(format!("{pane}.sock"));
+        let holder_socket = [
+            paths::holder_socket(&state.holders, pane),
+            paths::legacy_holder_socket(&state.holders, pane),
+        ]
+        .into_iter()
+        .find(|p| p.exists())
+        .unwrap_or_else(|| paths::holder_socket(&state.holders, pane));
         let attached = UnixStream::connect(&holder_socket)
             .map_err(eyre::Report::from)
             .and_then(|stream| state.attach_holder(shared, ws, pane, holder_socket.clone(), stream, false));
@@ -670,7 +690,7 @@ fn pane_exited(shared: &Shared, id: PaneId, why: &str) {
             const NOTE: &[u8] = b"\r\n\x1b[31m[ftm] the agent exited before it started\x1b[0m\r\n";
             pane.exited = true;
             pane.buffer.extend_from_slice(NOTE);
-            pane.screen.process(NOTE);
+            process(id, &mut pane.screen, NOTE);
             set_status(ws, Status::Failed, 0);
             let _ = state.events.send(Event::Output {
                 pane: id,
@@ -898,14 +918,27 @@ fn spawn(shared: &Shared, req: SpawnRequest) -> Result<Response> {
     {
         bail!("no workspace {parent}");
     }
-    let (cwd, worktree, setup) = match &req.worktree_branch {
-        Some(branch) => {
-            let created = worktree::create(&req.cwd, branch, req.base.as_deref(), req.copy_changes)?;
+    let created = match &req.worktree_branch {
+        Some(branch) => Some(worktree::create(&req.cwd, branch, req.base.as_deref(), req.copy_changes)?),
+        None => None,
+    };
+    let result = open_spawned(shared, &req, created.as_ref());
+    if result.is_err()
+        && let Some(created) = &created
+    {
+        created.discard();
+    }
+    result
+}
+
+fn open_spawned(shared: &Shared, req: &SpawnRequest, created: Option<&worktree::Created>) -> Result<Response> {
+    let (cwd, worktree, setup) = match created {
+        Some(created) => {
             let worktree = Worktree {
-                repo: created.repo,
-                branch: branch.clone(),
+                repo: created.repo.clone(),
+                branch: created.branch.clone(),
             };
-            (created.path, Some(worktree), created.setup)
+            (created.path.clone(), Some(worktree), created.setup.clone())
         },
         None => (req.cwd.clone(), None, None),
     };
@@ -1074,8 +1107,8 @@ fn capture(shared: &Shared, pane: PaneId, raw: bool) -> Result<Response> {
 /// attach`), which drew the replay at some other size. The kernel sends no SIGWINCH for an unchanged size, and Node
 /// ignores one that does not change it, so the pane is nudged one column narrower and back to make its TUI repaint.
 fn resize(shared: &Shared, pane: PaneId, cols: u16, rows: u16, peer: Option<i32>) -> Result<Response> {
-    // A collapsed view can report no size at all; the emulator needs at least one cell.
-    let (rows, cols) = (rows.max(1), cols.max(1));
+    // A collapsed view can report no size at all.
+    let (rows, cols) = (rows.max(MIN_ROWS), cols.max(MIN_COLS));
     let mut state = lock(shared);
     let p = state.pane_mut(pane)?;
     if !p.attachers.is_empty() && !peer.is_some_and(|pid| p.attachers.contains(&pid)) {
@@ -1174,6 +1207,24 @@ mod tests {
         let saved: Saved = serde_json::from_str(r#"{"workspaces":[],"folders":[{"path":"/b","last_used":1}]}"#).unwrap();
         assert!(saved.folder_order.is_empty());
         assert_eq!(folder_order(saved.folder_order, &saved.folders), paths(&["/b"]));
+    }
+
+    #[test]
+    fn the_smallest_screen_takes_any_output() {
+        let mut parser = vt100::Parser::new_with_callbacks(MIN_ROWS, MIN_COLS, SCROLLBACK, TitleWatch::default());
+        let stress = "一二三\tabcdefgh\r\n\x1b[2;1H一x一\n\n\x1b[1;2r一一一\x1b[r\x1b[999C一\x1b[999B一\n";
+        for _ in 0..3 {
+            parser.process(stress.as_bytes());
+        }
+    }
+
+    #[test]
+    fn an_emulator_panic_starts_the_screen_over() {
+        let mut screen = vt100::Parser::new_with_callbacks(1, 1, SCROLLBACK, TitleWatch::default());
+        process(PaneId::nil(), &mut screen, "一\n一\n".as_bytes());
+        assert_eq!(screen.screen().size(), (MIN_ROWS, MIN_COLS));
+        process(PaneId::nil(), &mut screen, b"ok");
+        assert!(screen.screen().contents().contains("ok"));
     }
 
     #[test]
