@@ -32,10 +32,11 @@ fn main() -> Result<()> {
         return Ok(());
     }
     let inherited = unsafe { upgrade::Inherited::take() };
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?
-        .block_on(daemon(inherited))
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let result = runtime.block_on(daemon(inherited));
+    // A request stuck on a pane must not keep ftmd from exiting.
+    runtime.shutdown_timeout(std::time::Duration::from_secs(1));
+    result
 }
 
 async fn daemon(inherited: Option<upgrade::Inherited>) -> Result<()> {

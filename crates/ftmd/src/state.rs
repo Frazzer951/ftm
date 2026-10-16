@@ -11,7 +11,7 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
@@ -48,7 +48,8 @@ pub struct State {
 /// connection to it plus its own copy of the output.
 struct Pane {
     workspace: WorkspaceId,
-    holder: Arc<Mutex<UnixStream>>,
+    /// Frames for the holder, written by the pane's own thread so a holder that is slow to read stalls nothing else.
+    holder: mpsc::Sender<Frame>,
     holder_socket: PathBuf,
     buffer: Vec<u8>,
     /// Headless emulator fed the same output, so the current screen and scrollback can be read back as text.
@@ -325,7 +326,7 @@ impl State {
             id,
             Pane {
                 workspace,
-                holder: Arc::new(Mutex::new(stream)),
+                holder: holder_writer(id, stream)?,
                 holder_socket,
                 buffer: Vec::new(),
                 screen: vt100::Parser::new_with_callbacks(rows, cols, SCROLLBACK, TitleWatch::default()),
@@ -367,11 +368,27 @@ impl State {
         }
     }
 
-    fn send_to_holder(&self, pane: PaneId, frame: &Frame) -> Result<()> {
-        let holder = self.pane(pane)?.holder.clone();
-        let mut holder = holder.lock().unwrap_or_else(PoisonError::into_inner);
-        frame::write(&mut *holder, frame).wrap_err("writing to pane holder")
+    fn send_to_holder(&self, pane: PaneId, frame: Frame) -> Result<()> {
+        self.pane(pane)?
+            .holder
+            .send(frame)
+            .map_err(|_| eyre!("pane {pane}'s holder connection is closed"))
     }
+}
+
+fn holder_writer(id: PaneId, mut stream: UnixStream) -> Result<mpsc::Sender<Frame>> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name(format!("pane-{id}-in"))
+        .spawn(move || {
+            for frame in rx {
+                if frame::write(&mut stream, &frame).is_err() {
+                    return;
+                }
+            }
+        })
+        .wrap_err("starting pane writer")?;
+    Ok(tx)
 }
 
 #[derive(Debug)]
@@ -601,10 +618,7 @@ fn close_pane(shared: &Shared, id: PaneId, why: &str) {
 /// Asks the holder to kill everything on the pane's terminal (it does the SIGHUP, then SIGKILL after 2s), and
 /// returns a handle that finishes once the holder is gone, i.e. no process of the pane is left.
 fn reap(pane: Pane) -> std::thread::JoinHandle<()> {
-    {
-        let mut holder = pane.holder.lock().unwrap_or_else(PoisonError::into_inner);
-        let _ = frame::write(&mut *holder, &Frame::Kill);
-    }
+    let _ = pane.holder.send(Frame::Kill);
     std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(10);
         while pane.holder_socket.exists() && Instant::now() < deadline {
@@ -932,10 +946,10 @@ fn resize(shared: &Shared, pane: PaneId, cols: u16, rows: u16) -> Result<Respons
         return Ok(Response::Ok);
     }
     if !unchanged || cols < 2 {
-        state.send_to_holder(pane, &Frame::Resize { rows, cols })?;
+        state.send_to_holder(pane, Frame::Resize { rows, cols })?;
         return Ok(Response::Ok);
     }
-    state.send_to_holder(pane, &Frame::Resize { rows, cols: cols - 1 })?;
+    state.send_to_holder(pane, Frame::Resize { rows, cols: cols - 1 })?;
     let shared = shared.clone();
     std::thread::spawn(move || {
         std::thread::sleep(REDRAW_NUDGE);
@@ -944,26 +958,20 @@ fn resize(shared: &Shared, pane: PaneId, cols: u16, rows: u16) -> Result<Respons
             && !p.exited
         {
             let (rows, cols) = p.screen.screen().size();
-            let _ = state.send_to_holder(pane, &Frame::Resize { rows, cols });
+            let _ = state.send_to_holder(pane, Frame::Resize { rows, cols });
         }
     });
     Ok(Response::Ok)
 }
 
-/// Written outside the state lock: a pane that is not reading its input must not stall every other request.
 fn input(shared: &Shared, pane: PaneId, data: &str) -> Result<Response> {
     let bytes = B64.decode(data).wrap_err("input is not base64")?;
-    let holder = {
-        let state = lock(shared);
-        let p = state.pane(pane)?;
-        if p.exited {
-            return Ok(Response::Ok);
-        }
-        p.holder.clone()
-    };
-    let mut holder = holder.lock().unwrap_or_else(PoisonError::into_inner);
+    let state = lock(shared);
+    if state.pane(pane)?.exited {
+        return Ok(Response::Ok);
+    }
     for chunk in bytes.chunks(INPUT_CHUNK) {
-        frame::write(&mut *holder, &Frame::Input(chunk.to_vec())).wrap_err("writing to pane holder")?;
+        state.send_to_holder(pane, Frame::Input(chunk.to_vec()))?;
     }
     Ok(Response::Ok)
 }

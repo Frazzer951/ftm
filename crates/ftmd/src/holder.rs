@@ -10,6 +10,7 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -61,7 +62,17 @@ pub fn run(args: &[String]) -> Result<()> {
     drop(pair.slave);
     tracing::info!("pane {pane}: started {program} as pid {:?}", child.process_id());
     let reader = pair.master.try_clone_reader().map_err(|e| eyre!("{e}"))?;
-    let writer = Arc::new(Mutex::new(pair.master.take_writer().map_err(|e| eyre!("{e}"))?));
+    let mut writer = pair.master.take_writer().map_err(|e| eyre!("{e}"))?;
+    // A terminal whose program is not reading fills up and blocks writes, so they happen here and the connection keeps
+    // being read: a `Kill` or `Resize` behind a big paste still lands.
+    let (input, queued) = mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || {
+        for bytes in queued {
+            if writer.write_all(&bytes).and_then(|()| writer.flush()).is_err() {
+                return;
+            }
+        }
+    });
     let master = Arc::new(Mutex::new(pair.master));
     let child = Arc::new(Mutex::new(child));
     let shared = Arc::new(Mutex::new(Shared {
@@ -97,9 +108,9 @@ pub fn run(args: &[String]) -> Result<()> {
                 let _ = old.shutdown(std::net::Shutdown::Both);
             }
         }
-        let (pane, shared, writer, master, child) =
-            (pane.clone(), shared.clone(), writer.clone(), master.clone(), child.clone());
-        std::thread::spawn(move || serve(&pane, conn, &shared, &writer, &master, &child));
+        let (pane, shared, input, master, child) =
+            (pane.clone(), shared.clone(), input.clone(), master.clone(), child.clone());
+        std::thread::spawn(move || serve(&pane, conn, &shared, &input, &master, &child));
     }
     Ok(())
 }
@@ -157,15 +168,14 @@ fn serve(
     pane: &str,
     mut conn: UnixStream,
     shared: &Mutex<Shared>,
-    writer: &Mutex<Box<dyn Write + Send>>,
+    input: &Sender<Vec<u8>>,
     master: &Arc<Mutex<Box<dyn MasterPty + Send>>>,
     child: &Arc<Mutex<Box<dyn Child + Send + Sync>>>,
 ) {
     while let Ok(Some(frame)) = frame::read(&mut conn) {
         match frame {
             Frame::Input(bytes) => {
-                let mut w = lock(writer);
-                let _ = w.write_all(&bytes).and_then(|()| w.flush());
+                let _ = input.send(bytes);
             },
             Frame::Resize { rows, cols } => {
                 let mut s = lock(shared);
