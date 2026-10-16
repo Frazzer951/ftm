@@ -15,6 +15,7 @@ import { dropText } from "./drop.ts";
 import { StatusSounds, statusDot, stillFinished } from "./finish.ts";
 import { clipboardKey, type OptionAsMeta, optionIsMeta, paneKey } from "./keys.ts";
 import { KeyLayout, type KeyProtocol, kittyKeyboard } from "./kitty.ts";
+import { moveItem, reorderWithin } from "./order.ts";
 import { replyFilter } from "./replies.ts";
 import { loadSounds, play, type SoundEntry, type SoundSettings } from "./sounds.ts";
 import "./style.css";
@@ -832,7 +833,7 @@ function toggleSection(key: string) {
 function renderSidebar() {
   if (editing && workspaces.some((w) => w.id === editing)) return;
   editing = null;
-  if (folderDrag?.moved) return;
+  if (rowDrag?.moved) return;
   const ids = new Set(workspaces.map((w) => w.id));
   const top = workspaces.filter((w) => !w.parent || !ids.has(w.parent));
   const sections: [string, string, HTMLElement[]][] = [
@@ -923,7 +924,14 @@ function workspaceRow(ws: Workspace): HTMLElement {
     closeWorkspace(ws.id);
   };
   row.append(close);
+  startRowDrag(
+    row,
+    ws.id,
+    () => siblingRows(row),
+    (target) => dropWorkspace(row, ws.id, target),
+  );
   row.onclick = () => {
+    if (swallowRowClick) return;
     selected = ws.id;
     render();
   };
@@ -1001,19 +1009,15 @@ function sidebarFolders(): Folder[] {
   return [...ranked, ...folders.filter((f) => !listed.has(f.path)).sort(byName)];
 }
 
-/// A folder row being dragged to a new place in the Folders section. Pointer events rather than HTML5 drag and drop,
-/// which Tauri's native file-drop handler intercepts.
-let folderDrag: { path: string; x: number; y: number; moved: boolean; target: number } | null = null;
-/// Set between the end of a drag and the click that follows it, so dropping a folder does not also open its menu.
-let swallowFolderClick = false;
+/// A sidebar row being dragged to a new place among its siblings: a folder in the Folders section, or a workspace
+/// among the rows under the same parent in its section. Pointer events rather than HTML5 drag and drop, which Tauri's
+/// native file-drop handler intercepts.
+let rowDrag: { key: string; x: number; y: number; moved: boolean; target: number } | null = null;
+/// Set between the end of a drag and the click that follows it, so dropping a row does not also click it.
+let swallowRowClick = false;
 
-function folderRows(): HTMLElement[] {
-  return [...document.querySelectorAll<HTMLElement>("#sections .ws.folder")];
-}
-
-/// Index among the folder rows the dragged one would be dropped before, and the indicator shown there.
-function markFolderDrop(y: number): number {
-  const rows = folderRows();
+/// Index among `rows` the dragged one would be dropped before, and the indicator shown there.
+function markDrop(rows: HTMLElement[], y: number): number {
   let target = rows.findIndex((r) => {
     const box = r.getBoundingClientRect();
     return y < box.top + box.height / 2;
@@ -1026,41 +1030,33 @@ function markFolderDrop(y: number): number {
   return target;
 }
 
-function startFolderDrag(row: HTMLElement, path: string) {
+/// Lets `row` be dragged among `siblings()` (which include it); a drop calls `drop` with the index among them to put
+/// it before.
+function startRowDrag(row: HTMLElement, key: string, siblings: () => HTMLElement[], drop: (target: number) => void) {
   row.onpointerdown = (e) => {
-    if (e.button !== 0 || (e.target as HTMLElement).closest("button")) return;
-    folderDrag = { path, x: e.clientX, y: e.clientY, moved: false, target: -1 };
-    row.setPointerCapture(e.pointerId);
+    if (e.button !== 0 || (e.target as HTMLElement).closest("button, input")) return;
+    rowDrag = { key, x: e.clientX, y: e.clientY, moved: false, target: -1 };
   };
   row.onpointermove = (e) => {
-    if (!folderDrag || folderDrag.path !== path) return;
-    if (!folderDrag.moved && Math.hypot(e.clientX - folderDrag.x, e.clientY - folderDrag.y) < 4) return;
-    folderDrag.moved = true;
-    row.classList.add("dragging");
-    folderDrag.target = markFolderDrop(e.clientY);
-  };
-  const end = (drop: boolean) => {
-    const drag = folderDrag;
-    if (!drag || drag.path !== path) return;
-    folderDrag = null;
-    if (!drag.moved) return;
-    const order = sidebarFolders().map((f) => f.path);
-    const from = order.indexOf(path);
-    if (drop && from >= 0) {
-      order.splice(from, 1);
-      order.splice(drag.target > from ? drag.target - 1 : drag.target, 0, path);
-      const before = folderOrder;
-      folderOrder = order;
-      request({ op: "reorder_folders", paths: order }).catch((err) => {
-        console.error(err);
-        if (folderOrder !== order) return;
-        folderOrder = before;
-        renderSidebar();
-      });
+    if (!rowDrag || rowDrag.key !== key) return;
+    if (!rowDrag.moved) {
+      if (Math.hypot(e.clientX - rowDrag.x, e.clientY - rowDrag.y) < 4) return;
+      // Captured only once it is a drag, so clicks and double-clicks (rename) still reach what was under the pointer.
+      rowDrag.moved = true;
+      row.setPointerCapture(e.pointerId);
+      row.classList.add("dragging");
     }
-    swallowFolderClick = true;
+    rowDrag.target = markDrop(siblings(), e.clientY);
+  };
+  const end = (dropped: boolean) => {
+    const drag = rowDrag;
+    if (!drag || drag.key !== key) return;
+    rowDrag = null;
+    if (!drag.moved) return;
+    if (dropped) drop(drag.target);
+    swallowRowClick = true;
     setTimeout(() => {
-      swallowFolderClick = false;
+      swallowRowClick = false;
       renderSidebar();
     });
   };
@@ -1068,11 +1064,60 @@ function startFolderDrag(row: HTMLElement, path: string) {
   row.onpointercancel = () => end(false);
 }
 
+/// The workspace rows directly under the same list as `row`: its siblings in the sidebar.
+function siblingRows(row: HTMLElement): HTMLElement[] {
+  const ul = row.closest("ul");
+  return ul ? [...ul.querySelectorAll<HTMLElement>(":scope > li > .ws")] : [row];
+}
+
+function dropWorkspace(row: HTMLElement, id: Id, target: number) {
+  const group = moveItem(
+    siblingRows(row).map((r) => r.dataset.id ?? ""),
+    id,
+    target,
+  );
+  const order = reorderWithin(
+    workspaces.map((w) => w.id),
+    group,
+  );
+  const byId = new Map(workspaces.map((w) => [w.id, w]));
+  const before = workspaces;
+  const reordered = order.flatMap((i) => byId.get(i) ?? []);
+  workspaces = reordered;
+  request({ op: "reorder_workspaces", ids: order }).catch((err) => {
+    console.error(err);
+    notice("reorder", `Could not save the new order: ${err}`, "error");
+    // Undone unless a newer tree from ftmd has replaced it meanwhile.
+    if (workspaces !== reordered) return;
+    workspaces = before;
+    renderSidebar();
+  });
+}
+
 function folderRow(folder: Folder): HTMLLIElement {
   const li = document.createElement("li");
   const row = document.createElement("div");
   row.className = "ws folder";
-  startFolderDrag(row, folder.path);
+  startRowDrag(
+    row,
+    folder.path,
+    () => [...document.querySelectorAll<HTMLElement>("#sections .ws.folder")],
+    (target) => {
+      const before = folderOrder;
+      const order = moveItem(
+        sidebarFolders().map((f) => f.path),
+        folder.path,
+        target,
+      );
+      folderOrder = order;
+      request({ op: "reorder_folders", paths: order }).catch((err) => {
+        console.error(err);
+        if (folderOrder !== order) return;
+        folderOrder = before;
+        renderSidebar();
+      });
+    },
+  );
   row.title = folder.path;
   const icon = document.createElement("span");
   icon.className = "folder-icon";
@@ -1105,7 +1150,7 @@ function folderRow(folder: Folder): HTMLLIElement {
     menu(r.left, r.bottom);
   };
   row.onclick = (e) => {
-    if (swallowFolderClick) return;
+    if (swallowRowClick) return;
     menu(e.clientX, e.clientY);
   };
   row.oncontextmenu = (e) => {

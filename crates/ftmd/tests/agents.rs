@@ -213,7 +213,10 @@ fn agents_nest_report_status_and_clean_up() {
     assert!(ftm(&bin, &socket, &["ls"]).contains("Task of unnamed-dir (unnamed-dir)"));
     assert_eq!(
         ftm(&bin, &socket, &["ping"]),
-        format!("ftmd {} (features: claude_args, workspace_colors)", env!("CARGO_PKG_VERSION"))
+        format!(
+            "ftmd {} (features: claude_args, workspace_colors, workspace_order)",
+            env!("CARGO_PKG_VERSION")
+        )
     );
     ftm(&bin, &socket, &["close", "--id", &unnamed.to_string()]);
 

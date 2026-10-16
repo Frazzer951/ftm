@@ -6,7 +6,9 @@ use ftm_core::model::{
     Folder, Kind, Layout, PaneId, SplitDir, Status, Tab, TabId, WORKSPACE_COLORS, Workspace, WorkspaceId, Worktree,
     workspace_color,
 };
-use ftm_core::protocol::{Event, FEATURE_CLAUDE_ARGS, FEATURE_WORKSPACE_COLORS, Request, Response, SpawnRequest};
+use ftm_core::protocol::{
+    Event, FEATURE_CLAUDE_ARGS, FEATURE_WORKSPACE_COLORS, FEATURE_WORKSPACE_ORDER, Request, Response, SpawnRequest,
+};
 use ftm_core::{ENV_AGENT_CMD, ENV_NAME, ENV_PANE_ID, ENV_SOCKET, ENV_WORKSPACE_ID, paths};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -42,6 +44,8 @@ pub struct State {
     folders: Vec<Folder>,
     /// The sidebar's order, set by dragging: every path in `folders`, exactly once.
     folder_order: Vec<PathBuf>,
+    /// The sidebar's workspace order, set by dragging; `list` puts any workspace it lacks at the end.
+    workspace_order: Vec<WorkspaceId>,
     panes: HashMap<PaneId, Pane>,
     events: broadcast::Sender<Event>,
     socket: PathBuf,
@@ -189,6 +193,8 @@ struct Saved {
     folders: Vec<Folder>,
     #[serde(default)]
     folder_order: Vec<PathBuf>,
+    #[serde(default)]
+    workspace_order: Vec<WorkspaceId>,
 }
 
 /// What the first command in a pane runs before handing over to a login shell.
@@ -212,6 +218,7 @@ impl State {
             workspaces: BTreeMap::new(),
             folders: Vec::new(),
             folder_order: Vec::new(),
+            workspace_order: Vec::new(),
             panes: HashMap::new(),
             events: broadcast::channel(1024).0,
             holders: paths::holders_dir(&socket),
@@ -229,8 +236,11 @@ impl State {
         shared
     }
 
+    /// In sidebar order.
     fn list(&self) -> Vec<Workspace> {
-        self.workspaces.values().cloned().collect()
+        let listed = self.workspace_order.iter().filter_map(|id| self.workspaces.get(id));
+        let rest = self.workspaces.values().filter(|w| !self.workspace_order.contains(&w.id));
+        listed.chain(rest).cloned().collect()
     }
 
     /// Every change goes through here, so it is also where the tree is saved.
@@ -267,10 +277,14 @@ impl State {
         Snapshot {
             changes: self.saver.changes.load(Ordering::SeqCst),
             path: self.state_file.clone(),
-            saved: (!empty).then(|| Saved {
-                workspaces: self.list(),
-                folders: self.folders.clone(),
-                folder_order: self.folder_order.clone(),
+            saved: (!empty).then(|| {
+                let workspaces = self.list();
+                Saved {
+                    workspace_order: workspaces.iter().map(|w| w.id).collect(),
+                    workspaces,
+                    folders: self.folders.clone(),
+                    folder_order: self.folder_order.clone(),
+                }
             }),
         }
     }
@@ -617,6 +631,23 @@ fn folder_order(order: Vec<PathBuf>, folders: &[Folder]) -> Vec<PathBuf> {
     out
 }
 
+/// `order` cut down to the ids in `workspaces`, each once (the first time it appears), then the workspaces it lacks by
+/// displayed name: all of them from a state file that predates the order.
+fn workspace_order(
+    order: impl IntoIterator<Item = WorkspaceId>,
+    workspaces: &BTreeMap<WorkspaceId, Workspace>,
+) -> Vec<WorkspaceId> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<WorkspaceId> = order
+        .into_iter()
+        .filter(|id| workspaces.contains_key(id) && seen.insert(*id))
+        .collect();
+    let mut rest: Vec<&Workspace> = workspaces.values().filter(|w| !seen.contains(&w.id)).collect();
+    rest.sort_by_key(|w| (w.display_name().to_lowercase(), w.id));
+    out.extend(rest.into_iter().map(|w| w.id));
+    out
+}
+
 pub fn update_blocked(shared: &Shared, version: Option<String>, reason: String) {
     let mut state = lock(shared);
     let event = Event::UpdateBlocked { version, reason };
@@ -650,6 +681,7 @@ pub fn load(shared: &Shared) -> Result<()> {
     }
     state.folder_order = folder_order(saved.folder_order, &saved.folders);
     state.folders = saved.folders;
+    state.workspace_order = workspace_order(saved.workspace_order, &state.workspaces);
     let ids: Vec<WorkspaceId> = state.workspaces.keys().copied().collect();
     for ws in state.workspaces.values_mut() {
         if ws.parent.is_some_and(|p| !ids.contains(&p)) {
@@ -999,7 +1031,9 @@ pub fn handle(shared: &Shared, request: Request, peer: Option<i32>) -> Response 
     let result = match request {
         Request::Ping => Ok(Response::Pong {
             version: env!("CARGO_PKG_VERSION").to_string(),
-            features: [FEATURE_CLAUDE_ARGS, FEATURE_WORKSPACE_COLORS].map(String::from).to_vec(),
+            features: [FEATURE_CLAUDE_ARGS, FEATURE_WORKSPACE_COLORS, FEATURE_WORKSPACE_ORDER]
+                .map(String::from)
+                .to_vec(),
         }),
         Request::List => Ok(Response::Workspaces {
             workspaces: lock(shared).list(),
@@ -1058,6 +1092,13 @@ pub fn handle(shared: &Shared, request: Request, peer: Option<i32>) -> Response 
             let mut state = lock(shared);
             state.folder_order = paths;
             state.emit_folders();
+            Ok(Response::Ok)
+        },
+        Request::ReorderWorkspaces { ids } => {
+            let mut state = lock(shared);
+            let current: Vec<WorkspaceId> = state.list().iter().map(|w| w.id).collect();
+            state.workspace_order = workspace_order(ids.into_iter().chain(current), &state.workspaces);
+            state.emit_workspaces();
             Ok(Response::Ok)
         },
         Request::NewTab { workspace } => new_tab(shared, workspace),
@@ -1143,6 +1184,7 @@ fn open_spawned(shared: &Shared, req: &SpawnRequest, created: Option<&worktree::
     {
         bail!("no workspace {parent}");
     }
+    state.workspace_order.push(id);
     state.workspaces.insert(
         id,
         Workspace {
@@ -1464,6 +1506,26 @@ mod tests {
         assert_eq!(screen.screen().size(), (MIN_ROWS, MIN_COLS));
         assert!(process(PaneId::nil(), &mut screen, b"ok"));
         assert!(screen.screen().contents().contains("ok"));
+    }
+
+    #[test]
+    fn workspace_order_keeps_known_ids_and_appends_the_rest_by_shown_name() {
+        let ws = |name: &str, title: Option<&str>| -> Workspace {
+            serde_json::from_value(serde_json::json!({
+                "id": WorkspaceId::new_v4(), "parent": null, "name": name, "title": title, "kind": "terminal",
+                "cwd": "/", "worktree": null, "status": "idle", "tabs": [],
+            }))
+            .unwrap()
+        };
+        let (zeta, alpha, mid) = (ws("zeta", None), ws("zz", Some("Alpha")), ws("mid", None));
+        let ids = [zeta.id, alpha.id, mid.id];
+        let all: BTreeMap<WorkspaceId, Workspace> = [zeta, alpha, mid].into_iter().map(|w| (w.id, w)).collect();
+        // A state file from before the order: by the name the sidebar shows.
+        assert_eq!(workspace_order([], &all), vec![ids[1], ids[2], ids[0]]);
+        assert_eq!(
+            workspace_order([ids[0], WorkspaceId::new_v4(), ids[0], ids[2]], &all),
+            vec![ids[0], ids[2], ids[1]],
+        );
     }
 
     #[test]

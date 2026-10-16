@@ -31,10 +31,10 @@ button:hover { background: var(--hover); }
 .ws.colored::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--ws-color); }
 .ws.colored:hover { background: color-mix(in srgb, var(--ws-color) 10%, var(--surface)); }
 .ws.colored.selected { background: color-mix(in srgb, var(--ws-color) 12%, var(--selected)); }
-.ws.folder { user-select: none; -webkit-user-select: none; }
-.ws.folder.dragging { opacity: 0.5; }
-.ws.folder.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
-.ws.folder.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
+.ws.folder, .ws .name, .ws .sub { user-select: none; -webkit-user-select: none; }
+.ws.dragging { opacity: 0.5; }
+.ws.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
+.ws.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
 .ws .close { visibility: hidden; padding: 0 5px; }
 .ws:hover .close { visibility: visible; }
 :root {
