@@ -39,10 +39,14 @@ fn default_socket_path() -> PathBuf {
     base.join(SOCKET_DIR_NAME).join("ftmd.sock")
 }
 
+/// An XDG base dir variable's value, if it is set to an absolute path; the spec says to ignore anything else.
+fn xdg_dir(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    value.map(PathBuf::from).filter(|p| p.is_absolute())
+}
+
 /// `$XDG_CONFIG_HOME/ftm`, else `~/.config/ftm` on both platforms.
 pub fn config_dir() -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
+    xdg_dir(std::env::var_os("XDG_CONFIG_HOME"))
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"))
         .join("ftm")
 }
@@ -59,8 +63,7 @@ pub fn repo_config_path(repo_name: &str) -> PathBuf {
 /// `$XDG_DATA_HOME/ftm/worktrees`, else `~/.local/share/ftm/worktrees` on both platforms; macOS's own data dir has a
 /// space in it, which trips up shell scripts run inside worktrees.
 pub fn worktrees_dir() -> PathBuf {
-    std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
+    xdg_dir(std::env::var_os("XDG_DATA_HOME"))
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".local").join("share"))
         .join("ftm")
         .join("worktrees")
@@ -99,8 +102,7 @@ pub fn state_file(socket: &Path) -> PathBuf {
             }
         })
         .collect();
-    std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
+    xdg_dir(std::env::var_os("XDG_STATE_HOME"))
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".local").join("state"))
         .join("ftm")
         .join(format!("{key}.json"))
@@ -158,6 +160,14 @@ mod tests {
         ));
         assert!(!socket_dir_is_ours(Path::new("/tmp")));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn only_absolute_xdg_dirs_count() {
+        assert_eq!(xdg_dir(Some("/x/y".into())), Some(PathBuf::from("/x/y")));
+        assert_eq!(xdg_dir(Some("".into())), None);
+        assert_eq!(xdg_dir(Some("rel/dir".into())), None);
+        assert_eq!(xdg_dir(None), None);
     }
 
     #[test]
