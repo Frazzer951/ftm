@@ -84,13 +84,14 @@
         <div class="tabpanel" role="tabpanel" id="settings-panel-theme" aria-labelledby="settings-tab-theme">
           <div class="field">
             <span>Theme <span id="theme-count" class="count"></span></span>
+            <div id="theme-current" class="row">Current theme: <span id="theme-current-name"></span></div>
+            <div id="theme-slots" class="row" hidden>
+              <button type="button" data-slot="dark">Dark: <span id="theme-dark"></span></button>
+              <button type="button" data-slot="light">Light: <span id="theme-light"></span></button>
+            </div>
             <div class="row">
               <input type="search" id="theme-search" placeholder="Search themes" autocomplete="off" />
               <label class="inline"><input type="checkbox" id="theme-follow" /> Match system appearance</label>
-            </div>
-            <div id="theme-slots" class="row" hidden>
-              <button type="button" data-slot="dark">Dark: <b id="theme-dark"></b></button>
-              <button type="button" data-slot="light">Light: <b id="theme-light"></b></button>
             </div>
             <div id="theme-list" role="listbox"><p class="hint">Loading themes…</p></div>
           </div>

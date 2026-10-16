@@ -441,10 +441,37 @@ function setupSettingsDialog() {
   const themeSearch = $<HTMLInputElement>("theme-search");
   const follow = $<HTMLInputElement>("theme-follow");
   const target = () => (draft.follow_system ? draft[slot] : draft.name);
+  const swatches = (t: ThemeColors) => {
+    const s = document.createElement("span");
+    s.className = "swatches";
+    for (const c of t.palette.slice(0, 8)) {
+      const i = document.createElement("i");
+      i.style.background = c;
+      s.append(i);
+    }
+    return s;
+  };
+  // What Save will apply, drawn in the theme's own colors once the list has loaded.
+  const chip = (name: string) => {
+    const c = document.createElement("span");
+    c.className = "theme-chip";
+    const label = document.createElement("span");
+    label.textContent = name;
+    c.append(label);
+    const t = themeList.find((x) => x.name === name);
+    if (t) {
+      c.style.background = t.background;
+      c.style.color = t.foreground;
+      c.append(swatches(t));
+    }
+    return c;
+  };
   const renderThemes = () => {
+    $("theme-current").hidden = draft.follow_system;
     $("theme-slots").hidden = !draft.follow_system;
-    $("theme-dark").textContent = draft.dark;
-    $("theme-light").textContent = draft.light;
+    $("theme-current-name").replaceChildren(chip(draft.name));
+    $("theme-dark").replaceChildren(chip(draft.dark));
+    $("theme-light").replaceChildren(chip(draft.light));
     document.querySelectorAll<HTMLButtonElement>("#theme-slots button").forEach((b) => {
       b.classList.toggle("active", b.dataset.slot === slot);
     });
@@ -470,14 +497,7 @@ function setupSettingsDialog() {
       const name = document.createElement("span");
       name.className = "theme-name";
       name.textContent = t.name;
-      const swatches = document.createElement("span");
-      swatches.className = "swatches";
-      for (const c of t.palette.slice(0, 8)) {
-        const i = document.createElement("i");
-        i.style.background = c;
-        swatches.append(i);
-      }
-      b.append(name, swatches);
+      b.append(name, swatches(t));
       b.onclick = () => {
         if (draft.follow_system) draft[slot] = t.name;
         else draft.name = t.name;

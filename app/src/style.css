@@ -147,15 +147,18 @@ input[type="range"] { flex: 1; }
 #font-preview { padding: 8px 10px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--bg); white-space: nowrap; overflow: hidden; }
 .field .count { color: var(--muted); font-weight: 400; }
 #theme-search { flex: 1; background: var(--bg); color: inherit; border: 1px solid var(--border-strong); border-radius: 4px; padding: 4px 6px; }
-#theme-slots button { flex: 1; text-align: left; }
+#theme-slots button { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; text-align: left; }
+#theme-current-name, #theme-slots button > span { flex: 1; min-width: 0; display: flex; }
+.theme-chip { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 3px 8px; border: 1px solid var(--border-strong); border-radius: 3px; }
+.theme-chip > span:first-child { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.theme-chip .swatches, #theme-list .swatches { display: flex; gap: 2px; flex: none; }
+.theme-chip .swatches i, #theme-list .swatches i { width: 10px; height: 14px; border-radius: 2px; }
 #theme-slots button.active { border-color: var(--accent); background: var(--selected); }
 #theme-list { flex: 1; min-height: 120px; overflow-y: auto; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--bg); display: flex; flex-direction: column; gap: 1px; }
 #theme-list .group { padding: 6px 8px 2px; font-size: 10px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); }
 #theme-list button { display: flex; align-items: center; gap: 8px; text-align: left; border: 2px solid transparent; border-radius: 3px; padding: 5px 8px; flex: none; }
 #theme-list button.chosen { border-color: var(--accent); }
 #theme-list .theme-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#theme-list .swatches { display: flex; gap: 2px; flex: none; }
-#theme-list .swatches i { width: 10px; height: 14px; border-radius: 2px; }
 .sound-row { display: grid; grid-template-columns: 110px 1fr auto; gap: 6px; align-items: center; }
 .select-row { display: grid; grid-template-columns: 110px 1fr; gap: 6px; align-items: center; }
 .sound-row select, .select-row select { min-width: 0; background: var(--bg); color: inherit; border: 1px solid var(--border-strong); border-radius: 4px; padding: 3px 4px; }
