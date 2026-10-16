@@ -257,7 +257,7 @@ fn terminate(pane: &str, master: &Mutex<Box<dyn MasterPty + Send>>, child: &Mute
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    // Without a process table to check (macOS), the shell's group may still hold a job that ignored the hangup.
+    // The shell's group may still hold a job that ignored the hangup.
     signal_groups(shell, fg, libc::SIGKILL);
 }
 
@@ -297,7 +297,53 @@ fn session_groups(session: libc::pid_t) -> Vec<libc::pid_t> {
     groups
 }
 
-#[cfg(not(target_os = "linux"))]
+/// The process groups of the session `session` leads that still have a live process.
+#[cfg(target_os = "macos")]
+fn session_groups(session: libc::pid_t) -> Vec<libc::pid_t> {
+    let pid_size = std::mem::size_of::<libc::pid_t>();
+    // SAFETY: with no buffer, proc_listallpids only reports how many pids there are.
+    let Ok(count) = usize::try_from(unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) }) else {
+        return Vec::new();
+    };
+    // Room for processes started since.
+    let mut pids: Vec<libc::pid_t> = vec![0; count + 64];
+    let Ok(bytes) = libc::c_int::try_from(pids.len() * pid_size) else {
+        return Vec::new();
+    };
+    // SAFETY: the buffer holds `bytes` bytes of pid_t, and proc_listallpids writes at most that many.
+    let listed = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
+    pids.truncate(usize::try_from(listed).unwrap_or(0).min(pids.len()));
+    let Ok(info_bytes) = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>()) else {
+        return Vec::new();
+    };
+    let mut groups: Vec<libc::pid_t> = pids
+        .into_iter()
+        // SAFETY: getsid only reads the process table.
+        .filter(|&pid| pid > 0 && unsafe { libc::getsid(pid) } == session)
+        .filter_map(|pid| {
+            // SAFETY: proc_bsdinfo is plain integers, for which all zeroes is a valid value.
+            let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+            // SAFETY: `info` is a proc_bsdinfo, the size PROC_PIDTBSDINFO writes and the size passed.
+            let got = unsafe {
+                libc::proc_pidinfo(
+                    pid,
+                    libc::PROC_PIDTBSDINFO,
+                    0,
+                    std::ptr::from_mut(&mut info).cast(),
+                    info_bytes,
+                )
+            };
+            (got == info_bytes && info.pbi_status != libc::SZOMB)
+                .then(|| libc::pid_t::try_from(info.pbi_pgid).ok())
+                .flatten()
+        })
+        .collect();
+    groups.sort_unstable();
+    groups.dedup();
+    groups
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn session_groups(_session: libc::pid_t) -> Vec<libc::pid_t> {
     Vec::new()
 }
