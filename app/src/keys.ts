@@ -43,6 +43,7 @@ export function clipboardKey(e: PaneKeyEvent, mac: boolean): "copy" | "paste" | 
     return key === "c" ? "copy" : key === "v" ? "paste" : undefined;
   }
   if (e.key === "Insert" && only(e, "shiftKey")) return "paste";
+  return undefined;
 }
 
 /// The bytes to send instead of xterm's own encoding of a key, if any.
@@ -57,4 +58,5 @@ export function paneKey(e: PaneKeyEvent, ctx: KeyContext): string | undefined {
   // What Claude Code's /terminal-setup makes iTerm2 and VS Code send; Alt+Enter already sends it too.
   if (e.key === "Enter" && only(e, "shiftKey")) return "\x1b\r";
   if (!ctx.mac && only(e, "ctrlKey")) return ctrlEditKeys[e.key];
+  return undefined;
 }
