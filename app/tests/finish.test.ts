@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { StatusSounds, stillFinished, type Tracked } from "../src/finish.ts";
+import { StatusSounds, statusDot, stillFinished, type Tracked } from "../src/finish.ts";
 
 const ws = (id: string, status: string, unseen = false, background_agents = 0): Tracked => ({
   id,
@@ -71,4 +71,27 @@ test("a held finish is cancelled by a hand-back starting another turn within the
   assert.equal(stillFinished(ws("a", "idle", true, 1), always), false);
   assert.equal(stillFinished(ws("a", "idle", false), always), false);
   assert.equal(stillFinished(ws("a", "idle", true), () => false), false);
+});
+
+test("a terminal entering needs_input plays the needs-input sound", () => {
+  const term = (status: string): Tracked => ({ ...ws("t", status), kind: "terminal" });
+  const sounds = started(term("starting"));
+  const waiting = term("needs_input");
+  assert.deepEqual(sounds.update([waiting], true, always), { sound: "needs_input", waiting: [waiting] });
+});
+
+test("terminals show a dot only once Claude reports, agents always", () => {
+  const dot = (kind: string, status: string, unseen = false) => statusDot({ kind, status, unseen }).className;
+  assert.equal(dot("terminal", "starting"), "dot none");
+  assert.equal(dot("terminal", "done"), "dot none");
+  for (const s of ["working", "needs_input", "idle", "unknown"]) assert.equal(dot("terminal", s), `dot ${s}`);
+  assert.equal(dot("terminal", "idle", true), "dot unseen");
+  assert.equal(dot("terminal", "done", true), "dot unseen");
+  assert.deepEqual(statusDot({ kind: "terminal", status: "starting", unseen: false }), { className: "dot none", title: "" });
+  for (const s of ["starting", "working", "needs_input", "idle", "done"]) assert.equal(dot("agent", s), `dot ${s}`);
+  assert.equal(dot("agent", "idle", true), "dot unseen");
+  assert.deepEqual(statusDot({ kind: "agent", status: "needs_input", unseen: false }), {
+    className: "dot needs_input",
+    title: "needs input",
+  });
 });

@@ -6,6 +6,18 @@ export interface Tracked {
   background_agents: number;
 }
 
+/// Whether a workspace's status means anything: always for agents; for terminals, once a Claude session in it has
+/// reported through ftm's hooks (`starting` means it never has, `done` that Claude exited).
+export const reportsStatus = (w: Pick<Tracked, "kind" | "status">) =>
+  w.kind === "agent" || (w.status !== "starting" && w.status !== "done");
+
+/// The sidebar dot's class and tooltip.
+export function statusDot(w: Pick<Tracked, "kind" | "status" | "unseen">): { className: string; title: string } {
+  if (w.unseen) return { className: "dot unseen", title: "done, unseen" };
+  if (!reportsStatus(w)) return { className: "dot none", title: "" };
+  return { className: `dot ${w.status}`, title: w.status.replace("_", " ") };
+}
+
 interface Snapshot {
   status: string;
   unseen: boolean;
@@ -30,9 +42,7 @@ export class StatusSounds<T extends Tracked> {
 
   update(list: T[], waitForSubagents: boolean, counts: (w: T) => boolean): Decision<T> {
     const prev = this.last;
-    const waiting = list.filter(
-      (w) => w.kind === "agent" && w.status === "needs_input" && prev.get(w.id)?.status !== "needs_input",
-    );
+    const waiting = list.filter((w) => w.status === "needs_input" && prev.get(w.id)?.status !== "needs_input");
     const newlyUnseen = list.filter((w) => w.unseen && !prev.get(w.id)?.unseen);
     const handedBack = list.filter((w) => {
       const p = prev.get(w.id);
