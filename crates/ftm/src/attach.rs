@@ -41,6 +41,9 @@ impl Conn {
         self.write.write_all(&line)?;
         let mut reply = String::new();
         self.read.read_line(&mut reply)?;
+        if reply.is_empty() {
+            bail!("ftmd closed the connection without replying");
+        }
         match serde_json::from_str(&reply)? {
             Response::Error { message } => bail!(message),
             response => Ok(response),
