@@ -43,105 +43,122 @@
     <dialog id="settings">
       <form method="dialog" id="settings-form">
         <h3>Settings</h3>
-        <div class="field">
-          <span>Font</span>
-          <div class="font-picker">
-            <div class="row">
-              <input type="search" id="font-search" placeholder="Search fonts" autocomplete="off" />
-              <label class="inline"><input type="checkbox" id="font-all" /> Show all fonts</label>
+        <div id="settings-tabs" role="tablist" aria-label="Settings">
+          <button type="button" role="tab" id="settings-tab-font" aria-controls="settings-panel-font">Font</button>
+          <button type="button" role="tab" id="settings-tab-theme" aria-controls="settings-panel-theme">Theme</button>
+          <button type="button" role="tab" id="settings-tab-sounds" aria-controls="settings-panel-sounds">Sounds</button>
+          <button type="button" role="tab" id="settings-tab-input" aria-controls="settings-panel-input">Input</button>
+          <button type="button" role="tab" id="settings-tab-updates" aria-controls="settings-panel-updates">Updates</button>
+        </div>
+        <div class="tabpanel" role="tabpanel" id="settings-panel-font" aria-labelledby="settings-tab-font">
+          <div class="field">
+            <span>Font</span>
+            <div class="font-picker">
+              <div class="row">
+                <input type="search" id="font-search" placeholder="Search fonts" autocomplete="off" />
+                <label class="inline"><input type="checkbox" id="font-all" /> Show all fonts</label>
+              </div>
+              <div id="font-list" role="listbox"><p class="hint">Loading fonts…</p></div>
+              <input name="font_family" id="font-custom" placeholder='e.g. "FiraCode Nerd Font Mono", Menlo, monospace' hidden />
             </div>
-            <div id="font-list" role="listbox"><p class="hint">Loading fonts…</p></div>
-            <input name="font_family" id="font-custom" placeholder='e.g. "FiraCode Nerd Font Mono", Menlo, monospace' hidden />
+          </div>
+          <p id="font-hint" class="hint"></p>
+          <div class="field">
+            <span>Size</span>
+            <div class="stepper">
+              <button type="button" data-step="-0.5">−</button>
+              <input name="font_size" type="number" min="8" max="32" step="0.5" />
+              <button type="button" data-step="0.5">+</button>
+            </div>
+          </div>
+          <div class="field">
+            <span>Line height</span>
+            <div class="row">
+              <input name="line_height" type="range" min="0.9" max="1.6" step="0.05" />
+              <output id="line-height-value"></output>
+            </div>
+          </div>
+          <label><input type="checkbox" name="ligatures" /> Ligatures (=&gt; != -&gt; === and the like)</label>
+          <div id="font-preview" title="Preview">Sphinx of black quartz 0O1lI {}[]<br />=&gt; != -&gt; === &lt;= &gt;= :: !== /* */ &lt;!-- www</div>
+        </div>
+        <div class="tabpanel" role="tabpanel" id="settings-panel-theme" aria-labelledby="settings-tab-theme">
+          <div class="field">
+            <span>Theme <span id="theme-count" class="count"></span></span>
+            <div class="row">
+              <input type="search" id="theme-search" placeholder="Search themes" autocomplete="off" />
+              <label class="inline"><input type="checkbox" id="theme-follow" /> Match system appearance</label>
+            </div>
+            <div id="theme-slots" class="row" hidden>
+              <button type="button" data-slot="dark">Dark: <b id="theme-dark"></b></button>
+              <button type="button" data-slot="light">Light: <b id="theme-light"></b></button>
+            </div>
+            <div id="theme-list" role="listbox"><p class="hint">Loading themes…</p></div>
           </div>
         </div>
-        <p id="font-hint" class="hint"></p>
-        <div class="field">
-          <span>Size</span>
-          <div class="stepper">
-            <button type="button" data-step="-0.5">−</button>
-            <input name="font_size" type="number" min="8" max="32" step="0.5" />
-            <button type="button" data-step="0.5">+</button>
+        <div class="tabpanel" role="tabpanel" id="settings-panel-sounds" aria-labelledby="settings-tab-sounds">
+          <div class="field">
+            <span>Sounds</span>
+            <div class="sound-row">
+              <label for="sound-needs_input">Needs input</label>
+              <select id="sound-needs_input"></select>
+              <button type="button" data-preview="needs_input" title="Play">▶</button>
+            </div>
+            <div class="sound-row">
+              <label for="sound-completed">Agent finished</label>
+              <select id="sound-completed"></select>
+              <button type="button" data-preview="completed" title="Play">▶</button>
+            </div>
+            <label><input type="checkbox" id="sound-wait-subagents" /> Agent finished waits for background subagents</label>
+            <div class="sound-row">
+              <label for="sound-volume">Volume</label>
+              <input id="sound-volume" type="range" min="0" max="1" step="0.05" />
+              <output id="sound-volume-value"></output>
+            </div>
           </div>
         </div>
-        <div class="field">
-          <span>Line height</span>
-          <div class="row">
-            <input name="line_height" type="range" min="0.9" max="1.6" step="0.05" />
-            <output id="line-height-value"></output>
+        <div class="tabpanel" role="tabpanel" id="settings-panel-input" aria-labelledby="settings-tab-input">
+          <div id="keyboard-settings" class="field" hidden>
+            <span>Keyboard</span>
+            <div class="select-row">
+              <label for="option-as-meta">Option as Meta</label>
+              <select id="option-as-meta">
+                <option value="both">Both Option keys</option>
+                <option value="left">Left Option only</option>
+                <option value="right">Right Option only</option>
+                <option value="off">Off (Option types ∫ ƒ é…)</option>
+              </select>
+            </div>
+          </div>
+          <div class="field">
+            <span>Scrolling</span>
+            <div class="select-row">
+              <label for="app-scroll">Full-screen apps</label>
+              <select id="app-scroll">
+                <option value="rows">A step per row, like native terminals</option>
+                <option value="xterm">xterm.js steps (coarser)</option>
+              </select>
+            </div>
           </div>
         </div>
-        <label><input type="checkbox" name="ligatures" /> Ligatures (=&gt; != -&gt; === and the like)</label>
-        <div id="font-preview" title="Preview">Sphinx of black quartz 0O1lI {}[]<br />=&gt; != -&gt; === &lt;= &gt;= :: !== /* */ &lt;!-- www</div>
-        <div class="field">
-          <span>Theme <span id="theme-count" class="count"></span></span>
-          <div class="row">
-            <input type="search" id="theme-search" placeholder="Search themes" autocomplete="off" />
-            <label class="inline"><input type="checkbox" id="theme-follow" /> Match system appearance</label>
-          </div>
-          <div id="theme-slots" class="row" hidden>
-            <button type="button" data-slot="dark">Dark: <b id="theme-dark"></b></button>
-            <button type="button" data-slot="light">Light: <b id="theme-light"></b></button>
-          </div>
-          <div id="theme-list" role="listbox"><p class="hint">Loading themes…</p></div>
-        </div>
-        <div class="field">
-          <span>Sounds</span>
-          <div class="sound-row">
-            <label for="sound-needs_input">Needs input</label>
-            <select id="sound-needs_input"></select>
-            <button type="button" data-preview="needs_input" title="Play">▶</button>
-          </div>
-          <div class="sound-row">
-            <label for="sound-completed">Agent finished</label>
-            <select id="sound-completed"></select>
-            <button type="button" data-preview="completed" title="Play">▶</button>
-          </div>
-          <label><input type="checkbox" id="sound-wait-subagents" /> Agent finished waits for background subagents</label>
-          <div class="sound-row">
-            <label for="sound-volume">Volume</label>
-            <input id="sound-volume" type="range" min="0" max="1" step="0.05" />
-            <output id="sound-volume-value"></output>
-          </div>
-        </div>
-        <div id="keyboard-settings" class="field" hidden>
-          <span>Keyboard</span>
-          <div class="select-row">
-            <label for="option-as-meta">Option as Meta</label>
-            <select id="option-as-meta">
-              <option value="both">Both Option keys</option>
-              <option value="left">Left Option only</option>
-              <option value="right">Right Option only</option>
-              <option value="off">Off (Option types ∫ ƒ é…)</option>
-            </select>
-          </div>
-        </div>
-        <div class="field">
-          <span>Scrolling</span>
-          <div class="select-row">
-            <label for="app-scroll">Full-screen apps</label>
-            <select id="app-scroll">
-              <option value="rows">A step per row, like native terminals</option>
-              <option value="xterm">xterm.js steps (coarser)</option>
-            </select>
-          </div>
-        </div>
-        <div class="field">
-          <span>Updates</span>
-          <div class="select-row">
-            <label for="update-check">Check</label>
-            <select id="update-check">
-              <option value="">Automatic (pacman installs)</option>
-              <option value="true">On</option>
-              <option value="false">Off</option>
-            </select>
-          </div>
-          <div class="select-row">
-            <label for="update-channel">Channel</label>
-            <select id="update-channel">
-              <option value="">This build's</option>
-              <option value="stable">Stable</option>
-              <option value="nightly">Nightly</option>
-            </select>
+        <div class="tabpanel" role="tabpanel" id="settings-panel-updates" aria-labelledby="settings-tab-updates">
+          <div class="field">
+            <span>Updates</span>
+            <div class="select-row">
+              <label for="update-check">Check</label>
+              <select id="update-check">
+                <option value="">Automatic (pacman installs)</option>
+                <option value="true">On</option>
+                <option value="false">Off</option>
+              </select>
+            </div>
+            <div class="select-row">
+              <label for="update-channel">Channel</label>
+              <select id="update-channel">
+                <option value="">This build's</option>
+                <option value="stable">Stable</option>
+                <option value="nightly">Nightly</option>
+              </select>
+            </div>
           </div>
         </div>
         <p id="settings-error"></p>

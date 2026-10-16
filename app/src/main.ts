@@ -14,6 +14,7 @@ import { clipboardKey, type OptionAsMeta, optionIsMeta, paneKey } from "./keys.t
 import { type KeyProtocol, kittyKeyboard } from "./kitty.ts";
 import { loadSounds, play, type SoundEntry, type SoundSettings } from "./sounds";
 import "./style.css";
+import { Tabs } from "./tabs.ts";
 import { type AppScroll, type AppWheel, appWheel } from "./wheel.ts";
 
 type Id = string;
@@ -333,6 +334,20 @@ function setupSettingsDialog() {
   let family = settings.font_family;
   let customMode = false;
 
+  // The open tab outlives the dialog, so settings reopens where it was left.
+  const tabButtons = [...document.querySelectorAll<HTMLButtonElement>("#settings-tabs [role=tab]")];
+  const panels = tabButtons.map((t) => $(t.getAttribute("aria-controls") ?? ""));
+  // Hidden lists cannot scroll to their pick, so it is done when the tab shows.
+  const revealChosen = (id: string) =>
+    panels[tabButtons.findIndex((t) => t.id === id)]
+      ?.querySelector("#font-list .chosen:not(.custom), #theme-list .chosen")
+      ?.scrollIntoView({ block: "nearest" });
+  const tabs = new Tabs(tabButtons, panels, revealChosen);
+  for (const t of tabButtons) t.onclick = () => tabs.select(t.id);
+  $("settings-tabs").onkeydown = (e) => {
+    if (tabs.key(e.key)) e.preventDefault();
+  };
+
   const isStack = (f: string) => /[,"']/.test(f);
   const chosen = () => (customMode ? custom.value.trim() : family);
 
@@ -580,6 +595,10 @@ function setupSettingsDialog() {
     field("line_height").value = String(settings.line_height);
     field("ligatures").checked = settings.ligatures;
     $("keyboard-settings").hidden = !isMac;
+    panels.forEach((p, i) => {
+      tabs.setHidden(tabButtons[i].id, !p.querySelector(":scope > :not([hidden])"));
+    });
+    tabs.select(tabs.current);
     $<HTMLSelectElement>("option-as-meta").value = settings.option_as_meta;
     $<HTMLSelectElement>("app-scroll").value = settings.app_scroll;
     $<HTMLSelectElement>("update-check").value = updateSettings.check === null ? "" : String(updateSettings.check);
@@ -604,6 +623,18 @@ function setupSettingsDialog() {
 
   $("save-settings").onclick = async (e) => {
     e.preventDefault();
+    // Save skips the form's own validation, which would also refuse sizes off the stepper's half-point grid.
+    const invalid = [...form.elements].find(
+      (el): el is HTMLInputElement => el instanceof HTMLInputElement && !el.validity.valid && !el.validity.stepMismatch,
+    );
+    if (invalid) {
+      const tab = tabs.tabOf(invalid.closest<HTMLElement>("[role=tabpanel]") as HTMLElement);
+      if (tab) tabs.select(tab);
+      const label = invalid.closest(".field")?.querySelector(":scope > span")?.textContent;
+      $("settings-error").textContent = label ? `${label}: ${invalid.validationMessage}` : invalid.validationMessage;
+      invalid.focus();
+      return;
+    }
     const next: TerminalSettings = {
       font_family: chosen() || settings.font_family,
       font_size: Number(field("font_size").value) || settings.font_size,
