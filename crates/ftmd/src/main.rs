@@ -82,7 +82,15 @@ async fn daemon(inherited: Option<upgrade::Inherited>) -> Result<()> {
     loop {
         tokio::select! {
             accepted = listener.accept() => {
-                let (stream, _) = accepted?;
+                // Out of descriptors, say: the connection waits in the backlog, and the panes keep their reader.
+                let (stream, _) = match accepted {
+                    Ok(accepted) => accepted,
+                    Err(e) => {
+                        tracing::warn!("accepting a connection: {e}");
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        continue;
+                    },
+                };
                 let state = state.clone();
                 tokio::spawn(async move {
                     if let Err(e) = serve(stream, state).await {

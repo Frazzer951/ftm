@@ -117,3 +117,31 @@ fn a_zero_size_resize_leaves_the_pane_working() {
         capture(&mut conn, pane).contains("zero-2")
     });
 }
+
+/// Running out of file descriptors fails one accept, not the whole daemon (and with it every pane's connection).
+#[cfg(target_os = "linux")]
+#[test]
+fn running_out_of_descriptors_does_not_stop_ftmd() {
+    let mut daemon = start_daemon("emfile", |_| {});
+    let pid = daemon.pid();
+    let open = std::fs::read_dir(format!("/proc/{pid}/fd")).unwrap().count() as u64;
+    let limit = libc::rlimit {
+        rlim_cur: open + 4,
+        rlim_max: open + 4,
+    };
+    assert_eq!(
+        unsafe { libc::prlimit(pid, libc::RLIMIT_NOFILE, &limit, std::ptr::null_mut()) },
+        0
+    );
+
+    let flood: Vec<_> = (0..16)
+        .filter_map(|_| std::os::unix::net::UnixStream::connect(&daemon.socket).ok())
+        .collect();
+    assert!(!flood.is_empty());
+    std::thread::sleep(Duration::from_millis(500));
+    drop(flood);
+
+    assert!(daemon.child().try_wait().unwrap().is_none(), "ftmd exited");
+    let mut conn = Conn::open(&daemon.socket);
+    assert!(matches!(conn.send(&Request::Ping), Response::Pong { .. }));
+}
