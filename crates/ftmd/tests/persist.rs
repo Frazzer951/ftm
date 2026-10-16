@@ -85,13 +85,7 @@ fn ftmd_restart_keeps_sessions() {
     let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode(&daemon.holders()), 0o700);
     assert_eq!(mode(&daemon.socket), 0o600);
-    let state_dir = std::fs::read_dir(daemon.state_home())
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
-    assert_eq!(mode(&state_dir), 0o700);
+    assert_eq!(mode(&daemon.state_home().join("ftm")), 0o700);
     assert_eq!(mode(Path::new("/tmp")) & 0o777, 0o777);
 
     daemon.restart();

@@ -51,7 +51,8 @@ cargo test --workspace
 ```
 
 ftmd's tests start real pane holders and shells. `cargo test -p ftm-core` alone is quick when you only touched
-shared code.
+shared code. Before adding one, read the notes at the top of `crates/ftmd/tests/common/mod.rs` on keeping it from
+flaking.
 
 The app's frontend lives in `app/`:
 

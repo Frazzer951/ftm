@@ -1,10 +1,21 @@
 //! Helpers shared by the ftmd integration tests.
+//!
+//! Tests in a binary run in parallel, on CI boxes much slower than a laptop. To keep a new test from flaking:
+//! - Start ftmd with `start_daemon`/`start_daemon_logged`: its own socket, and HOME, state, config and data dirs, so
+//!   it never touches the user's daemon or files. Run git through `git`, and `ftm` commands that run git (`ftm gc`)
+//!   through `without_user_git_config`. Scratch dirs come from `temp_root`, which removes them on drop.
+//! - Write a file that will be executed with `write_executable`/`copy_executable`, never `std::fs::write`/`copy`:
+//!   another thread's fork can hold the writable fd open and exec then fails with ETXTBSY.
+//! - Wait for a condition (`wait_for`, `wait_until`, `wait_for_output`), never a fixed sleep, with a deadline of
+//!   seconds that a loaded CI box still meets.
+//! - Never change the process environment (`std::env::set_var`); pass values to the child `Command` instead.
+//! - Name everything per test (the `name` given to `start_daemon` and `temp_root` must be unique in the binary).
 #![allow(dead_code)]
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use ftm_core::model::{PaneId, Workspace};
 use ftm_core::protocol::{Event, Request, Response};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -15,7 +26,7 @@ pub struct Daemon {
     child: Child,
     pub socket: PathBuf,
     envs: Vec<(OsString, Option<OsString>)>,
-    state_home: PathBuf,
+    state_home: TempRoot,
     exe: PathBuf,
     /// ftmd's output, kept only by `start_daemon_logged`.
     log: Option<PathBuf>,
@@ -118,13 +129,14 @@ impl Drop for Daemon {
         self.stop();
         let _ = std::fs::remove_file(&self.socket);
         let _ = std::fs::remove_dir_all(&holders);
-        let _ = std::fs::remove_dir_all(&self.state_home);
+        let _ = std::fs::remove_file(self.socket.with_extension("claude-settings.json"));
     }
 }
 
 /// macOS caps socket paths at ~104 bytes, so this stays in /tmp rather than the (long) per-user temp dir.
 /// Panes run `/bin/sh`, nothing FTM-related leaks in from the environment the tests run in (which may itself be an
-/// FTM pane), and the saved tree goes to a private state dir; `configure` adds the rest.
+/// FTM pane), and HOME, the saved tree, config and worktrees are private dirs rather than the user's, so neither a
+/// login shell's profile nor git's global config comes in; `configure` adds the rest.
 pub fn start_daemon(name: &str, configure: impl FnOnce(&mut Command)) -> Daemon {
     start(name, Path::new(env!("CARGO_BIN_EXE_ftmd")), false, configure)
 }
@@ -141,7 +153,12 @@ fn start(name: &str, exe: &Path, logged: bool, configure: impl FnOnce(&mut Comma
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ftmd"));
     cmd.env("FTM_SOCKET", &socket)
         .env("SHELL", "/bin/sh")
-        .env("XDG_STATE_HOME", &state_home);
+        .env("HOME", state_home.join("home"))
+        .env("XDG_STATE_HOME", &state_home)
+        .env("XDG_CONFIG_HOME", state_home.join("config"))
+        .env("XDG_DATA_HOME", state_home.join("data"));
+    without_user_git_config(&mut cmd);
+    std::fs::create_dir_all(state_home.join("home")).unwrap();
     for key in [
         "FTM_WORKSPACE_ID",
         "FTM_PANE_ID",
@@ -264,8 +281,16 @@ pub fn wait_until(conn: &mut Conn, what: &str, ok: impl Fn(&[Workspace]) -> bool
     }
 }
 
+/// Keeps the user's and the system's git config (signing, hooks, templates) out of a git the test runs, directly or
+/// through ftmd or `ftm`.
+pub fn without_user_git_config(cmd: &mut Command) -> &mut Command {
+    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1")
+}
+
 pub fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
+    let out = without_user_git_config(Command::new("git").arg("-C").arg(dir).args(args))
+        .output()
+        .unwrap();
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
@@ -274,15 +299,42 @@ pub fn alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
-/// A fresh scratch dir under the (canonicalized) temp dir.
-pub fn temp_root(name: &str) -> PathBuf {
+/// A fresh scratch dir under the (canonicalized) temp dir, removed on drop.
+pub fn temp_root(name: &str) -> TempRoot {
     let root = std::env::temp_dir()
         .canonicalize()
         .unwrap()
         .join(format!("ftmd-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
-    root
+    TempRoot(root)
+}
+
+pub struct TempRoot(PathBuf);
+
+impl std::ops::Deref for TempRoot {
+    type Target = PathBuf;
+    fn deref(&self) -> &PathBuf {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for TempRoot {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<OsStr> for TempRoot {
+    fn as_ref(&self) -> &OsStr {
+        self.0.as_os_str()
+    }
+}
+
+impl Drop for TempRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 pub fn wait_for(what: &str, timeout: Duration, mut ok: impl FnMut() -> bool) {
@@ -291,6 +343,25 @@ pub fn wait_for(what: &str, timeout: Duration, mut ok: impl FnMut() -> bool) {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// Executables are written by a child process: a fork from another test thread inherits any writable fd this process
+/// holds on the file until that child execs, and exec refuses a file open for writing (ETXTBSY).
+pub fn write_executable(path: &Path, contents: &[u8]) {
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", r#"cat > "$1" && chmod 755 "$1""#, "sh"])
+        .arg(path)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(contents).unwrap();
+    assert!(child.wait().unwrap().success(), "writing {}", path.display());
+}
+
+/// See `write_executable`.
+pub fn copy_executable(from: &Path, to: &Path) {
+    let status = Command::new("cp").arg(from).arg(to).status().unwrap();
+    assert!(status.success(), "copying {} to {}", from.display(), to.display());
 }
 
 /// `ftm` is another package, so its binary is not a `CARGO_BIN_EXE_*` here; build it into the same target dir.

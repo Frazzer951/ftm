@@ -3,7 +3,7 @@
 mod common;
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
-use common::{Conn, alive, ftm_bin, git, start_daemon, temp_root, wait_for, wait_until};
+use common::{Conn, alive, ftm_bin, git, start_daemon, temp_root, wait_for, wait_until, write_executable};
 use ftm_core::model::{Kind, Status, Workspace, WorkspaceId};
 use ftm_core::protocol::{Request, Response};
 use std::collections::HashMap;
@@ -92,8 +92,7 @@ fn agents_nest_report_status_and_clean_up() {
     std::fs::create_dir_all(root.join("home")).unwrap();
 
     let fake = root.join("fake-claude");
-    std::fs::write(&fake, FAKE_AGENT).unwrap();
-    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&fake, FAKE_AGENT.as_bytes());
     std::fs::write(
         config.join("ftm/repos/agentrepo.toml"),
         format!(
@@ -317,7 +316,6 @@ fn agents_nest_report_status_and_clean_up() {
     assert!(ls(&bin, &socket).is_empty());
     drop(daemon);
     wait_for("child agent to die with ftmd", Duration::from_secs(1), || !alive(child_pid));
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The repo's setup is POSIX sh even when the login shell is fish, and an agent that exits before it ever reports a
@@ -419,7 +417,6 @@ fn setup_runs_in_sh_and_an_agent_that_never_starts_fails_visibly() {
         remove_worktree: false,
     });
     drop(daemon);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -564,5 +561,4 @@ fn worktrees_copy_ignored_files() {
 
     drop(daemon);
     std::fs::set_permissions(repo.join(".claude/sealed"), std::fs::Permissions::from_mode(0o755)).unwrap();
-    let _ = std::fs::remove_dir_all(&root);
 }

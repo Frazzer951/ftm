@@ -214,7 +214,8 @@ impl State {
             .args(["24", "80"])
             .arg(&ws.cwd)
             .arg(&shell);
-        match startup.and_then(|s| script(s, self.claude_settings.is_some())) {
+        let agent = std::env::var(ENV_AGENT_CMD).ok();
+        match startup.and_then(|s| script(s, agent.as_deref(), self.claude_settings.is_some())) {
             Some(script) => cmd.args(["-l", "-i", "-c", &script]),
             None => cmd.arg("-l"),
         };
@@ -496,15 +497,14 @@ fn shell() -> String {
 /// arguments are decided here rather than with `${VAR:+...}`, and values come in through quoted variables. The repo's
 /// setup and a terminal's command are POSIX sh whatever the login shell, so each runs in its own `sh` from
 /// `$FTM_SETUP` or `$FTM_COMMAND`.
-fn script(startup: Startup, settings: bool) -> Option<String> {
+fn script(startup: Startup, agent: Option<&str>, settings: bool) -> Option<String> {
     let setup = if startup.setup.is_some() {
         r#"/bin/sh -c "$FTM_SETUP"; "#
     } else {
         ""
     };
     if startup.agent {
-        let agent = std::env::var(ENV_AGENT_CMD).ok().filter(|c| !c.trim().is_empty());
-        let mut line = agent.unwrap_or_else(|| "claude".to_string());
+        let mut line = agent.filter(|c| !c.trim().is_empty()).unwrap_or("claude").to_string();
         if settings {
             line.push_str(r#" --settings "$FTM_CLAUDE_SETTINGS""#);
         }
@@ -1033,8 +1033,6 @@ mod tests {
 
     #[test]
     fn agent_script_passes_the_same_argv_in_every_shell() {
-        // SAFETY: no other test in this binary reads FTM_AGENT_CMD.
-        unsafe { std::env::set_var(ENV_AGENT_CMD, "printf '[%s]'") };
         let startup = |named, brief| Startup {
             agent: true,
             named,
@@ -1042,7 +1040,8 @@ mod tests {
             brief,
             command: None,
         };
-        assert!(!script(startup(false, None), false).unwrap().contains(" -n "));
+        let agent = Some("printf '[%s]'");
+        assert!(!script(startup(false, None), agent, false).unwrap().contains(" -n "));
         for shell in ["/bin/sh", "/bin/bash", "/bin/zsh", "/bin/fish", "/usr/bin/fish"]
             .into_iter()
             .filter(|s| Path::new(s).exists())
@@ -1055,7 +1054,7 @@ mod tests {
                 ),
                 (None, None, "[-n][n]"),
             ] {
-                let line = script(startup(true, brief), settings.is_some()).unwrap();
+                let line = script(startup(true, brief), agent, settings.is_some()).unwrap();
                 let line = line.split("; exec").next().unwrap().to_string();
                 let mut cmd = std::process::Command::new(shell);
                 cmd.args(["-c", &line]).env("FTM_NAME", "n");
