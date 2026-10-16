@@ -112,6 +112,10 @@ enum Command {
         /// Use the last fetch of the base instead of fetching it
         #[arg(long)]
         no_fetch: bool,
+        /// Also remove worktrees whose upstream branch was deleted after everything was pushed, which may be a PR
+        /// closed unmerged
+        #[arg(long)]
+        include_upstream_deleted: bool,
     },
     /// Type text into a pane
     Send {
@@ -206,7 +210,11 @@ fn main() -> Result<()> {
             return Ok(());
         },
         Command::Attach { target } => return attach::run(resolve_pane(target)?),
-        Command::Gc { yes, no_fetch } => return gc::run(yes, !no_fetch),
+        Command::Gc {
+            yes,
+            no_fetch,
+            include_upstream_deleted,
+        } => return gc::run(yes, !no_fetch, include_upstream_deleted),
         Command::Send { target, text, enter } => return send(resolve_pane(target)?, &text, enter),
     };
 

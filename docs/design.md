@@ -56,6 +56,7 @@ ftm capture <pane|workspace> [--raw]          # screen + scrollback as text; --r
 ftm send <pane|workspace> <text> [--enter]    # type into a pane; a workspace id means its first pane
 ftm attach <pane|workspace>                   # this terminal shows the pane; Ctrl+] then d detaches
 ftm gc [--yes] [--no-fetch]                   # list merged FTM worktrees; --yes removes them and their branches
+       [--include-upstream-deleted]           # also ones whose upstream was deleted (maybe closed unmerged)
 ```
 
 Planned: `ftm tab`/`ftm split`.
@@ -96,7 +97,7 @@ Worktrees live under `~/.local/share/ftm/worktrees/<repo>/<branch>` (`$XDG_DATA_
 
 - **merged**: the branch tip is an ancestor of `base`. A branch with no commits of its own counts as merged.
 - **squash-merged**: the branch's whole diff from where it left `base` matches a commit in `base` by patch id (`git cherry`).
-- **upstream deleted**: the remote branch is gone (per `git ls-remote`) and the branch tip equals the last fetched tip of its remote-tracking ref, so everything was pushed. This catches PRs merged in a way the two checks above miss, such as a rebase merge. It cannot tell such a PR from one that was closed unmerged.
+- **upstream deleted**, only with `--include-upstream-deleted`: the remote branch is gone (per `git ls-remote`) and the branch tip equals the last fetched tip of its remote-tracking ref, so everything was pushed. This catches PRs merged in a way the two checks above miss, such as a rebase merge. It cannot tell such a PR from one that was closed unmerged, whose commits would then survive only in the reflog, so without the flag these worktrees are skipped with a reason naming it.
 
 A done worktree is skipped, with the reason printed, when any of these hold:
 
@@ -114,6 +115,8 @@ Without `--yes`, gc only lists. With `--yes`, it runs:
 3. deletes the stale remote-tracking ref of an upstream-deleted branch
 4. prunes empty `prefix/` directories
 5. `git worktree prune` per repo
+
+A worktree whose removal fails, or whose branch or tracking ref could not be deleted after it, is reported on stderr and makes gc exit non-zero.
 
 Detached worktrees and unmerged branches are not listed.
 

@@ -45,7 +45,7 @@ fn ok(dir: &Path, args: &[&str]) -> bool {
 }
 
 /// Lists FTM worktrees whose branch is merged into the repo's base and, with `yes`, removes them and their branches.
-pub fn run(yes: bool, fetch: bool) -> Result<()> {
+pub fn run(yes: bool, fetch: bool, upstream_deleted: bool) -> Result<()> {
     let Response::Workspaces { workspaces } =
         client::send(&Request::List).wrap_err("gc needs ftmd running to see which worktrees have open workspaces")?
     else {
@@ -70,7 +70,7 @@ pub fn run(yes: bool, fetch: bool) -> Result<()> {
         let live = if fetch { fetch_base(&repo, &base) } else { None };
         let mut removed_any = false;
         for wt in found {
-            match verdict(&repo, &wt.path, &base, &workspaces, live.as_ref()) {
+            match verdict(&repo, &wt.path, &base, &workspaces, live.as_ref(), upstream_deleted) {
                 Verdict::Keep => {},
                 Verdict::Skip(why) => println!("skip    {}  ({why})", wt.shown),
                 Verdict::Remove { branch, stale, why } => {
@@ -202,7 +202,14 @@ fn upstream(repo: &Path, branch: &str, live: Option<&Live>) -> Upstream {
     }
 }
 
-fn verdict(repo: &Path, wt: &Path, base: &str, workspaces: &[Workspace], live: Option<&Live>) -> Verdict {
+fn verdict(
+    repo: &Path,
+    wt: &Path,
+    base: &str,
+    workspaces: &[Workspace],
+    live: Option<&Live>,
+    upstream_deleted: bool,
+) -> Verdict {
     let Ok(branch) = git(wt, &["symbolic-ref", "--short", "-q", "HEAD"]) else {
         return Verdict::Keep;
     };
@@ -226,6 +233,12 @@ fn verdict(repo: &Path, wt: &Path, base: &str, workspaces: &[Workspace], live: O
             },
             Upstream::Deleted { tip, .. } if tip != head => {
                 return Verdict::Skip("upstream branch deleted, local commits never pushed".into());
+            },
+            // A PR closed unmerged looks the same, and its commits would then live only in the reflog.
+            Upstream::Deleted { .. } if !upstream_deleted => {
+                return Verdict::Skip(
+                    "upstream branch deleted, everything pushed; --include-upstream-deleted removes it".into(),
+                );
             },
             Upstream::Deleted { tracking, .. } => {
                 stale = Some(tracking);

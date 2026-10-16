@@ -100,11 +100,11 @@ fn gc_removes_only_merged_clean_closed_worktrees() {
     for line in [
         "remove  gcrepo/feat/merged  (merged into origin/main)",
         "remove  gcrepo/squashed  (squash-merged into origin/main)",
-        "remove  gcrepo/gone-pushed  (upstream branch deleted, everything pushed)",
+        "skip    gcrepo/gone-pushed  (upstream branch deleted, everything pushed; --include-upstream-deleted removes it)",
         "skip    gcrepo/gone-unpushed  (upstream branch deleted, local commits never pushed)",
         "skip    gcrepo/dirty  (uncommitted or untracked changes)",
         "skip    gcrepo/open  (open workspace open)",
-        "dry run: pass --yes to remove 3 worktree(s) and their branches",
+        "dry run: pass --yes to remove 2 worktree(s) and their branches",
     ] {
         assert!(listed.contains(line), "missing {line:?} in:\n{listed}");
     }
@@ -112,15 +112,26 @@ fn gc_removes_only_merged_clean_closed_worktrees() {
     for wt in [&merged, &squashed, &pushed] {
         assert!(wt.exists(), "dry run removed {}", wt.display());
     }
+    let opted = ftm(&["gc", "--include-upstream-deleted"]);
+    assert!(
+        opted.contains("remove  gcrepo/gone-pushed  (upstream branch deleted, everything pushed)"),
+        "{opted}"
+    );
 
+    let tracking = |r: &str| git(&repo, &["for-each-ref", &format!("refs/remotes/origin/{r}")]);
     let removed = ftm(&["gc", "--yes"]);
-    assert_eq!(removed.matches("removed ").count(), 3, "{removed}");
-    for (wt, branch) in [(&merged, "feat/merged"), (&squashed, "squashed"), (&pushed, "gone-pushed")] {
+    assert_eq!(removed.matches("removed ").count(), 2, "{removed}");
+    for (wt, branch) in [(&merged, "feat/merged"), (&squashed, "squashed")] {
         assert!(!wt.exists(), "{} still there", wt.display());
         assert!(git(&repo, &["branch", "--list", branch]).is_empty(), "{branch} still there");
     }
     assert!(!data.join("ftm/worktrees/gcrepo/feat").exists());
-    let tracking = |r: &str| git(&repo, &["for-each-ref", &format!("refs/remotes/origin/{r}")]);
+    assert!(pushed.exists() && !git(&repo, &["branch", "--list", "gone-pushed"]).is_empty());
+    assert!(!tracking("gone-pushed").is_empty(), "tracking ref removed without the flag");
+
+    let removed = ftm(&["gc", "--yes", "--include-upstream-deleted"]);
+    assert_eq!(removed.matches("removed ").count(), 1, "{removed}");
+    assert!(!pushed.exists() && git(&repo, &["branch", "--list", "gone-pushed"]).is_empty());
     assert!(tracking("gone-pushed").is_empty(), "stale tracking ref kept");
     assert!(!tracking("gone-unpushed").is_empty());
     for wt in [&unpushed, &dirty, &open, &active] {
@@ -184,7 +195,10 @@ fn gc_reports_failed_removals() {
     assert!(stdout.contains("removed failgc/fine"), "{stdout}");
     assert!(locked.exists() && !fine.exists());
     assert!(stdout.contains("removed failgc/pre/stuck"), "{stdout}");
-    assert!(stderr.contains("failed  failgc/pre/stuck  (worktree removed, but:"), "{stderr}");
+    assert!(
+        stderr.contains("failed  failgc/pre/stuck  (worktree removed, but:"),
+        "{stderr}"
+    );
     assert!(!stuck.exists() && !data.join("ftm/worktrees/failgc/pre").exists());
     assert!(!git(&repo, &["worktree", "list"]).contains("stuck"), "not pruned");
 }
