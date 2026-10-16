@@ -1,4 +1,4 @@
-import type { KeyEvent, KeyProtocol } from "./kitty.ts";
+import type { KeyEvent, KeyLayout, KeyProtocol } from "./kitty.ts";
 
 /// iTerm2's "Natural Text Editing": what shells' emacs keymaps understand, unlike xterm's `\e[1;3D` and friends.
 const textEditKeys: Record<string, { alt?: string; meta?: string }> = {
@@ -28,6 +28,7 @@ export interface KeyContext {
   /// Whether the Option held for this event is Meta rather than a key that composes characters (macOS only).
   altIsMeta: boolean;
   kitty: Pick<KeyProtocol, "flags" | "encode">;
+  layout?: KeyLayout;
 }
 
 type PaneKeyEvent = KeyEvent & Pick<KeyboardEvent, "type">;
@@ -43,6 +44,7 @@ export function clipboardKey(e: PaneKeyEvent, mac: boolean): "copy" | "paste" | 
     return key === "c" ? "copy" : key === "v" ? "paste" : undefined;
   }
   if (e.key === "Insert" && only(e, "shiftKey")) return "paste";
+  return undefined;
 }
 
 /// The bytes to send instead of xterm's own encoding of a key, if any.
@@ -53,8 +55,9 @@ export function paneKey(e: PaneKeyEvent, ctx: KeyContext): string | undefined {
     if (seq !== undefined) return seq;
   }
   // Cmd belongs to the app and the Edit menu on macOS, so it is never reported as Super.
-  if (ctx.kitty.flags) return ctx.mac && e.metaKey ? undefined : ctx.kitty.encode(e, ctx.altIsMeta, ctx.mac);
+  if (ctx.kitty.flags) return ctx.mac && e.metaKey ? undefined : ctx.kitty.encode(e, ctx.altIsMeta, ctx.mac, ctx.layout);
   // What Claude Code's /terminal-setup makes iTerm2 and VS Code send; Alt+Enter already sends it too.
   if (e.key === "Enter" && only(e, "shiftKey")) return "\x1b\r";
   if (!ctx.mac && only(e, "ctrlKey")) return ctrlEditKeys[e.key];
+  return undefined;
 }

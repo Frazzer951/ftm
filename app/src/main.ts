@@ -10,13 +10,13 @@ import { LigaturesAddon } from "@xterm/addon-ligatures";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { chromeColors } from "./colors";
+import { chromeColors } from "./colors.ts";
 import { dropText } from "./drop.ts";
 import { StatusSounds, stillFinished } from "./finish.ts";
 import { clipboardKey, type OptionAsMeta, optionIsMeta, paneKey } from "./keys.ts";
-import { type KeyProtocol, kittyKeyboard } from "./kitty.ts";
-import { isQueryReply } from "./replies.ts";
-import { loadSounds, play, type SoundEntry, type SoundSettings } from "./sounds";
+import { KeyLayout, type KeyProtocol, kittyKeyboard } from "./kitty.ts";
+import { replyFilter } from "./replies.ts";
+import { loadSounds, play, type SoundEntry, type SoundSettings } from "./sounds.ts";
 import "./style.css";
 import { Tabs } from "./tabs.ts";
 import { compareVersions, versionNotice } from "./version.ts";
@@ -153,8 +153,9 @@ function view(pane: Id): PaneView {
     }
   }
   const input = (data: string) => send({ op: "input", pane, data });
+  const replies = replyFilter(() => v.replaying > 0);
   term.onData((d) => {
-    if (!(v.replaying && isQueryReply(d))) input(encode(d));
+    if (replies.keep(d)) input(encode(d));
   });
   term.onBinary((d) => input(btoa(d)));
   const kitty = kittyKeyboard(term, (d) => {
@@ -162,6 +163,7 @@ function view(pane: Id): PaneView {
   });
   const wheel = appWheel(term, () => settings.app_scroll, (d) => input(encode(d)));
   term.attachCustomKeyEventHandler((e) => {
+    replies.key();
     const clip = clipboardKey(e, isMac);
     if (clip) {
       e.preventDefault();
@@ -171,7 +173,7 @@ function view(pane: Id): PaneView {
     }
     const altIsMeta = !isMac || optionIsMeta(settings.option_as_meta, optionsDown);
     if (isMac && e.type === "keydown") term.options.macOptionIsMeta = altIsMeta;
-    const seq = paneKey(e, { mac: isMac, altIsMeta, kitty });
+    const seq = paneKey(e, { mac: isMac, altIsMeta, kitty, layout });
     if (seq === undefined) return true;
     e.preventDefault();
     term.input(seq);
@@ -269,11 +271,14 @@ let settings: TerminalSettings = {
 
 /// Which Option keys are down, for Option as Meta on one side only; key events only say that some Alt is held.
 const optionsDown = new Set<string>();
+/// Learned from every key typed anywhere in the window.
+const layout = new KeyLayout();
 for (const type of ["keydown", "keyup"] as const)
   window.addEventListener(
     type,
     (e) => {
       if (e.code === "AltLeft" || e.code === "AltRight") optionsDown[type === "keydown" ? "add" : "delete"](e.code);
+      layout.learn(e);
     },
     true,
   );
@@ -1658,20 +1663,18 @@ let daemonCurrent = false;
 // Each (re)connect of the event stream reports the daemon's version, then replays any update_blocked.
 const daemon = listen<{ version: string; app_version: string }>("ftm-daemon", ({ payload }) => {
   daemonCurrent = compareVersions(payload.version, payload.app_version) >= 0;
+  notice("subscribe", null);
   notice("update", null);
   notice("version", versionNotice(payload.version, payload.app_version));
 });
-/// Retried until it takes: without the stream, the sidebar stays empty.
-function subscribe(attempt = 0) {
-  invoke("subscribe")
-    .then(() => notice("subscribe", null))
-    .catch((err) => {
-      console.error("subscribing to ftmd", err);
-      notice("subscribe", `Could not connect to ftmd: ${err}. Retrying…`, "error");
-      setTimeout(() => subscribe(attempt + 1), Math.min(30_000, 1000 * 2 ** attempt));
-    });
-}
-Promise.all([events, daemon]).then(() => subscribe(), (err) => console.error("listening for ftmd events", err));
+// The stream keeps retrying in the background; without it the sidebar stays empty, so say why.
+const daemonError = listen<string>("ftm-daemon-error", ({ payload }) => {
+  console.error("ftmd event stream", payload);
+  notice("subscribe", `Could not connect to ftmd: ${payload}\n\nRetrying…`, "error");
+});
+Promise.all([events, daemon, daemonError])
+  .then(() => invoke("subscribe"))
+  .catch((err) => console.error("subscribing to ftmd events", err));
 
 interface Release {
   version: string;

@@ -8,6 +8,14 @@
     "enabled": true,
     "rules": {
       "preset": "recommended",
+      "correctness": {
+        // node --test runs the .ts files directly, so imports need their extension.
+        "useImportExtensions": "error"
+      },
+      "nursery": {
+        "noFloatingPromises": "warn",
+        "noMisusedPromises": "warn"
+      },
       "style": {
         // Short class-name and path joins read fine as string concatenation.
         "useTemplate": "off",

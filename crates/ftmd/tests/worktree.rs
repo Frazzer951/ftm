@@ -172,3 +172,76 @@ fn failed_spawns_leave_nothing_behind() {
     std::fs::write(&config, "").unwrap();
     id(env.spawn(&env.repo, "badconfig", &[]));
 }
+
+/// With no base given or configured, a new branch starts from the remote's default branch as the remote has it now,
+/// not from local main or the last fetch; offline, from the last fetch.
+#[test]
+fn new_worktrees_start_from_the_fetched_remote_default() {
+    let env = Env::new("fresh", "", |_, _| {});
+    let remote = env.root.join("fresh-remote.git");
+    git(&env.root, &["init", "-q", "--bare", "-b", "main", remote.to_str().unwrap()]);
+    git(&env.repo, &["remote", "add", "origin", remote.to_str().unwrap()]);
+    git(&env.repo, &["push", "-q", "origin", "main"]);
+    let local = git(&env.repo, &["rev-parse", "main"]);
+
+    let other = env.root.join("fresh-other");
+    git(&env.root, &["clone", "-q", remote.to_str().unwrap(), other.to_str().unwrap()]);
+    git(
+        &other,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "upstream",
+        ],
+    );
+    git(&other, &["push", "-q", "origin", "main"]);
+    let upstream = git(&other, &["rev-parse", "main"]);
+    assert_eq!(
+        git(&env.repo, &["rev-parse", "origin/main"]),
+        local,
+        "origin/main starts stale"
+    );
+
+    id(env.spawn(&env.repo, "fresh", &[]));
+    assert_eq!(
+        git(&env.worktrees().join("freshrepo/fresh"), &["rev-parse", "HEAD"]),
+        upstream
+    );
+
+    id(env.spawn(&env.repo, "pinned", &["--base", "main"]));
+    assert_eq!(
+        git(&env.worktrees().join("freshrepo/pinned"), &["rev-parse", "HEAD"]),
+        local,
+        "an explicit base wins"
+    );
+
+    git(
+        &env.repo,
+        &["remote", "set-url", "origin", env.root.join("gone.git").to_str().unwrap()],
+    );
+    id(env.spawn(&env.repo, "offline", &[]));
+    assert_eq!(
+        git(&env.worktrees().join("freshrepo/offline"), &["rev-parse", "HEAD"]),
+        upstream,
+        "the last fetch"
+    );
+}
+
+#[test]
+fn without_a_remote_new_worktrees_start_from_head() {
+    let env = Env::new("noremote", "", |_, _| {});
+    git(&env.repo, &["checkout", "-q", "-b", "side"]);
+    git(&env.repo, &["commit", "-q", "--allow-empty", "-m", "side"]);
+    let head = git(&env.repo, &["rev-parse", "HEAD"]);
+    id(env.spawn(&env.repo, "fromhead", &[]));
+    assert_eq!(
+        git(&env.worktrees().join("noremoterepo/fromhead"), &["rev-parse", "HEAD"]),
+        head
+    );
+}

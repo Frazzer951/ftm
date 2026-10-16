@@ -1,0 +1,111 @@
+name: Bundle check
+
+# Builds the release bundles the way build.yml does, without uploading them, when a pull request touches what they
+# depend on. Otherwise packaging breakage only shows up in the next nightly.
+
+on:
+  pull_request:
+    paths:
+      - packaging/**
+      - scripts/**
+      - app/src-tauri/tauri*.json
+      - app/src-tauri/icons/**
+      - .github/workflows/**
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bundle:
+    name: bundle (${{ matrix.target }}, ${{ matrix.channel || 'stable' }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, bundles: "deb,rpm", channel: "" }
+          - { os: macos-latest, target: aarch64-apple-darwin, bundles: "app,dmg", channel: nightly }
+    runs-on: ${{ matrix.os }}
+    env:
+      FTM_CHANNEL: ${{ matrix.channel }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Tauri system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev libxdo-dev \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: bundle-${{ matrix.target }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci
+        working-directory: app
+      - run: scripts/set-version.sh 0.0.0-ci.1
+      - run: scripts/sidecars.sh ${{ matrix.target }}
+      - name: Build the bundles
+        working-directory: app
+        env:
+          TARGET: ${{ matrix.target }}
+          BUNDLES: ${{ matrix.bundles }}
+          CHANNEL: ${{ matrix.channel }}
+        run: |
+          args=(--target "$TARGET" --bundles "$BUNDLES" --config src-tauri/tauri.bundle.conf.json)
+          [ "$CHANNEL" = nightly ] && args+=(--config src-tauri/tauri.nightly.conf.json)
+          npx tauri build "${args[@]}"
+
+  install-dry-run:
+    name: install.sh --dry-run (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Tauri system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev libxdo-dev \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: install
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: Dry-run the install against a scratch socket and prefix
+        env:
+          XDG_DATA_HOME: ${{ runner.temp }}/data
+        run: |
+          set -o pipefail
+          scripts/install.sh --dry-run --no-launch --socket "$RUNNER_TEMP/ftmd.sock" \
+            --prefix "$RUNNER_TEMP/prefix" --bin-dir "$RUNNER_TEMP/bin" | tee "$RUNNER_TEMP/install.log"
+          grep -q '^would: ' "$RUNNER_TEMP/install.log"
+          if [ -e "$RUNNER_TEMP/prefix" ] || [ -e "$RUNNER_TEMP/bin" ] || [ -e "$XDG_DATA_HOME" ]; then
+            echo "::error::--dry-run wrote to the install prefix, bin dir or applications dir"
+            exit 1
+          fi

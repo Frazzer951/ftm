@@ -10,7 +10,7 @@
 //!   seconds that a loaded CI box still meets.
 //! - Never change the process environment (`std::env::set_var`); pass values to the child `Command` instead.
 //! - Name everything per test (the `name` given to `start_daemon` and `temp_root` must be unique in the binary).
-#![allow(dead_code)]
+#![allow(dead_code, reason = "each test binary uses a different subset of the helpers")]
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use ftm_core::model::{PaneId, Workspace};
@@ -56,11 +56,13 @@ impl Daemon {
 
     /// SIGTERM: ftmd exits and leaves the panes to their holders. Also stops an ftmd this one handed over to.
     pub fn stop(&mut self) {
-        unsafe { libc::kill(self.child.id() as i32, libc::SIGTERM) };
+        // SAFETY: kill takes no pointers; the child is unreaped until the wait below, so its pid is not reused.
+        unsafe { libc::kill(self.child.id().cast_signed(), libc::SIGTERM) };
         let _ = self.child.wait();
         if let Some(pid) = self.log.as_ref().and_then(|_| self.latest_pid())
-            && pid != self.child.id() as i32
+            && pid != self.child.id().cast_signed()
         {
+            // SAFETY: kill takes no pointers.
             unsafe { libc::kill(pid, libc::SIGTERM) };
             let deadline = Instant::now() + Duration::from_secs(10);
             while alive(pid) && Instant::now() < deadline {
@@ -76,7 +78,7 @@ impl Daemon {
     }
 
     pub fn pid(&self) -> i32 {
-        self.child.id() as i32
+        self.child.id().cast_signed()
     }
 
     /// The first ftmd's process, to see whether it has exited.
@@ -170,7 +172,10 @@ fn start(name: &str, exe: &Path, logged: bool, configure: impl FnOnce(&mut Comma
         cmd.env_remove(key);
     }
     configure(&mut cmd);
-    let envs: Vec<_> = cmd.get_envs().map(|(k, v)| (k.to_owned(), v.map(|v| v.to_owned()))).collect();
+    let envs: Vec<_> = cmd
+        .get_envs()
+        .map(|(k, v)| (k.to_owned(), v.map(ToOwned::to_owned)))
+        .collect();
     let log = logged.then(|| state_home.join("ftmd.log"));
     let child = Daemon::spawn(exe, &envs, &socket, log.as_deref());
     Daemon {
@@ -296,6 +301,7 @@ pub fn git(dir: &Path, args: &[&str]) -> String {
 }
 
 pub fn alive(pid: i32) -> bool {
+    // SAFETY: kill with signal 0 takes no pointers and delivers nothing; it only checks that `pid` exists.
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
@@ -308,6 +314,13 @@ pub fn temp_root(name: &str) -> TempRoot {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     TempRoot(root)
+}
+
+/// A fresh dir at `path`, for a test that needs it somewhere `temp_root` does not put it; removed on drop.
+pub fn temp_dir_at(path: PathBuf) -> TempRoot {
+    let _ = std::fs::remove_dir_all(&path);
+    std::fs::create_dir_all(&path).unwrap();
+    TempRoot(path)
 }
 
 pub struct TempRoot(PathBuf);
@@ -364,13 +377,25 @@ pub fn copy_executable(from: &Path, to: &Path) {
     assert!(status.success(), "copying {} to {}", from.display(), to.display());
 }
 
-/// `ftm` is another package, so its binary is not a `CARGO_BIN_EXE_*` here; build it into the same target dir.
+/// `ftm` is another package, so its binary is not a `CARGO_BIN_EXE_*` here; build it into the same target dir, once
+/// per test binary. That build can relink `target/debug/ftm` (its features differ from a workspace test build's), so
+/// tests run a copy cargo never rewrites: running the shared path while cargo replaces it fails with ENOENT.
 pub fn ftm_bin() -> PathBuf {
-    let status = Command::new(env!("CARGO"))
-        .args(["build", "--quiet", "-p", "ftm", "--bin", "ftm"])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .status()
-        .unwrap();
-    assert!(status.success(), "building ftm");
-    Path::new(env!("CARGO_BIN_EXE_ftmd")).with_file_name("ftm")
+    static BIN: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    BIN.get_or_init(|| {
+        let status = Command::new(env!("CARGO"))
+            .args(["build", "--quiet", "--locked", "-p", "ftm", "--bin", "ftm"])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .status()
+            .unwrap();
+        assert!(status.success(), "building ftm");
+        let built = Path::new(env!("CARGO_BIN_EXE_ftmd")).with_file_name("ftm");
+        let dir = Path::new(env!("CARGO_TARGET_TMPDIR"));
+        let (tmp, bin) = (dir.join(format!("ftm.{}.tmp", std::process::id())), dir.join("ftm"));
+        copy_executable(&built, &tmp);
+        // A rename, so another test binary still running the last copy keeps it.
+        std::fs::rename(&tmp, &bin).unwrap();
+        bin
+    })
+    .clone()
 }

@@ -87,6 +87,10 @@ fn ftmd_restart_keeps_sessions() {
     let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode(&daemon.holders()), 0o700);
     assert_eq!(mode(&daemon.socket), 0o600);
+    // Saved a moment after the change.
+    wait_for("the tree to be saved", Duration::from_secs(10), || {
+        daemon.state_home().join("ftm").exists()
+    });
     assert_eq!(mode(&daemon.state_home().join("ftm")), 0o700);
     assert_eq!(mode(Path::new("/tmp")) & 0o777, 0o777);
 
@@ -197,6 +201,7 @@ fn panes_whose_holder_died_are_dropped() {
     // As after a reboot: ftmd is down and the holders are gone.
     daemon.stop();
     for (shell, holder) in doomed {
+        // SAFETY: kill takes no pointers.
         unsafe {
             libc::kill(holder, libc::SIGKILL);
             libc::kill(shell, libc::SIGKILL);
@@ -228,10 +233,12 @@ fn attach_on_loose_pty(socket: &Path, ws: WorkspaceId) -> (std::process::Child, 
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
+    // SAFETY: `master`, `slave` and `size` are live locals of the types openpty writes and reads; null name and termios
+    // are allowed.
     let rc = unsafe {
         libc::openpty(
-            &mut master,
-            &mut slave,
+            &raw mut master,
+            &raw mut slave,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             &raw mut size,
@@ -239,8 +246,10 @@ fn attach_on_loose_pty(socket: &Path, ws: WorkspaceId) -> (std::process::Child, 
     };
     assert_eq!(rc, 0);
     for fd in [master, slave] {
+        // SAFETY: F_SETFD takes no pointers; openpty just opened `fd`.
         unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
     }
+    // SAFETY: openpty succeeded, so both are newly opened fds that nothing else owns.
     let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
     let child = std::process::Command::new(ftm_bin())
         .args(["attach", &ws.to_string()])
@@ -254,8 +263,10 @@ fn attach_on_loose_pty(socket: &Path, ws: WorkspaceId) -> (std::process::Child, 
 }
 
 fn raw(fd: &OwnedFd) -> bool {
+    // SAFETY: termios is plain C data, for which all-zero bytes are a valid value.
     let mut t: libc::termios = unsafe { std::mem::zeroed() };
-    assert_eq!(unsafe { libc::tcgetattr(fd.as_raw_fd(), &mut t) }, 0);
+    // SAFETY: `t` is a live, writable termios and `fd` is open while borrowed.
+    assert_eq!(unsafe { libc::tcgetattr(fd.as_raw_fd(), &raw mut t) }, 0);
     t.c_lflag & libc::ICANON == 0
 }
 
@@ -294,7 +305,8 @@ fn attach_restores_the_terminal_when_killed() {
     for sig in [libc::SIGTERM, libc::SIGHUP] {
         let (mut child, _master, slave) = attach_on_loose_pty(&daemon.socket, ws.id);
         wait_for("raw mode", Duration::from_secs(10), || raw(&slave));
-        unsafe { libc::kill(child.id() as i32, sig) };
+        // SAFETY: kill takes no pointers; the child is unreaped until the wait below, so its pid is not reused.
+        unsafe { libc::kill(child.id().cast_signed(), sig) };
         let status = child.wait().unwrap();
         assert_eq!(status.signal(), Some(sig));
         assert!(!raw(&slave), "terminal left raw after signal {sig}");
@@ -529,6 +541,39 @@ fn finishing_a_turn_marks_the_workspace_unseen_until_looked_at() {
         }),
         Some(Response::Error { .. })
     ));
+}
+
+/// The status hook runs on every tool use, so a status that does not change must not be broadcast (or saved) again.
+#[test]
+fn an_unchanged_status_is_not_broadcast() {
+    let dir = temp_root("same-status");
+    let daemon = start_daemon("same-status", |_| {});
+    let mut req = Conn::open(&daemon.socket);
+    let id = spawn_terminal(&mut req, &dir, "agent").id;
+    let mut events = Conn::open(&daemon.socket);
+    events.send(&Request::Subscribe);
+    let set = |req: &mut Conn| {
+        req.send(&Request::SetStatus {
+            id,
+            status: Status::Working,
+            background_agents: 1,
+        })
+    };
+    set(&mut req);
+    set(&mut req);
+    req.send(&Request::Pin { id, pinned: true });
+    let mut statuses = 0;
+    loop {
+        let Event::Workspaces { workspaces } = events.line() else {
+            continue;
+        };
+        let ws = workspaces.into_iter().find(|w| w.id == id).unwrap();
+        if ws.pinned {
+            break;
+        }
+        statuses += usize::from(ws.status == Status::Working);
+    }
+    assert_eq!(statuses, 1);
 }
 
 /// Every pane's end is in ftmd's log with its cause, so a pane that dies unexpectedly leaves a trace.

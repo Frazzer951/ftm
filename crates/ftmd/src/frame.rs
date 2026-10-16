@@ -50,7 +50,8 @@ pub fn write(w: &mut impl Write, frame: &Frame) -> io::Result<()> {
     };
     let mut out = Vec::with_capacity(5 + payload.len());
     out.push(tag);
-    out.extend((payload.len() as u32).to_be_bytes());
+    let len = u32::try_from(payload.len()).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "frame too large"))?;
+    out.extend(len.to_be_bytes());
     out.extend(payload);
     w.write_all(&out)?;
     w.flush()
@@ -142,7 +143,7 @@ mod tests {
         head.extend(u32::MAX.to_be_bytes());
         assert_eq!(read_err(&head), io::ErrorKind::InvalidData);
         let mut head = vec![INPUT];
-        head.extend((MAX_PAYLOAD as u32).to_be_bytes());
+        head.extend(u32::try_from(MAX_PAYLOAD).unwrap().to_be_bytes());
         assert_eq!(read_err(&head), io::ErrorKind::UnexpectedEof);
     }
 }

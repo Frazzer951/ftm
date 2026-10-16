@@ -4,7 +4,7 @@
 mod common;
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
-use common::{Conn, Daemon, start_daemon, temp_root, wait_for};
+use common::{Conn, Daemon, start_daemon, temp_dir_at, temp_root, wait_for};
 use ftm_core::model::{Kind, Layout, PaneId, Status, Workspace};
 use ftm_core::protocol::{Event, Request, Response, SpawnRequest};
 use std::path::Path;
@@ -31,7 +31,7 @@ fn spawn_command(conn: &mut Conn, cwd: &Path, command: Option<&str>) -> (Workspa
 }
 
 fn holder_sockets(daemon: &Daemon) -> usize {
-    std::fs::read_dir(daemon.holders()).map_or(0, |d| d.count())
+    std::fs::read_dir(daemon.holders()).map_or(0, Iterator::count)
 }
 
 #[test]
@@ -85,11 +85,13 @@ fn a_stalled_ftmd_reconnects_to_its_holders() {
     );
 
     let pid = daemon.pid();
+    // SAFETY: kill takes no pointers.
     unsafe { libc::kill(pid, libc::SIGSTOP) };
     // The flood only gets through once the holder has given up on the stopped ftmd.
     wait_for("the holder to stop waiting on ftmd", Duration::from_secs(30), || {
         dir.join("flooded").exists()
     });
+    // SAFETY: kill takes no pointers.
     unsafe { libc::kill(pid, libc::SIGCONT) };
     assert!(daemon.child().try_wait().unwrap().is_none());
 
@@ -146,7 +148,8 @@ fn running_out_of_descriptors_does_not_stop_ftmd() {
         rlim_max: open + 4,
     };
     assert_eq!(
-        unsafe { libc::prlimit(pid, libc::RLIMIT_NOFILE, &limit, std::ptr::null_mut()) },
+        // SAFETY: `limit` is a live rlimit, and a null old-limit pointer is allowed.
+        unsafe { libc::prlimit(pid, libc::RLIMIT_NOFILE, &raw const limit, std::ptr::null_mut()) },
         0
     );
 
@@ -209,7 +212,7 @@ fn a_new_pane_is_announced_before_its_output() {
     while !seen.contains("early-2") {
         match events.line() {
             Event::Workspaces { workspaces } => {
-                announced |= workspaces.iter().any(|w| w.tabs.iter().any(|t| t.layout.contains(pane)))
+                announced |= workspaces.iter().any(|w| w.tabs.iter().any(|t| t.layout.contains(pane)));
             },
             Event::Output { pane: p, data, reset } if p == pane => {
                 assert!(announced, "output for pane {pane} before any layout had it");
@@ -228,8 +231,8 @@ fn a_new_pane_is_announced_before_its_output() {
 #[test]
 fn agents_without_status_hooks_are_not_left_starting() {
     let dir = temp_root("no-hooks");
-    let settings = format!("/tmp/ftmd-{}-no-hooks.claude-settings.json", std::process::id());
-    std::fs::create_dir_all(&settings).unwrap();
+    // A dir where ftmd writes its hook settings, so writing them fails.
+    let _settings = temp_dir_at(format!("/tmp/ftmd-{}-no-hooks.claude-settings.json", std::process::id()).into());
     let daemon = start_daemon("no-hooks", |c| {
         c.env("FTM_AGENT_CMD", "true");
     });
@@ -254,5 +257,107 @@ fn agents_without_status_hooks_are_not_left_starting() {
         conn.list()[0].tabs.is_empty()
     });
     assert_eq!(conn.list()[0].status, Status::Idle);
-    let _ = std::fs::remove_dir(&settings);
+}
+
+/// SIGKILLs the session a test's pane runs in, if the test failed before closing it.
+struct KillSession(std::path::PathBuf);
+
+impl Drop for KillSession {
+    fn drop(&mut self) {
+        if let Some(pid) = std::fs::read_to_string(&self.0)
+            .ok()
+            .and_then(|s| s.trim().parse::<i32>().ok())
+        {
+            // SAFETY: getsid takes no pointers.
+            let sid = unsafe { libc::getsid(pid) };
+            if sid > 0 {
+                let _ = std::process::Command::new("pkill")
+                    .args(["-KILL", "-s", &sid.to_string()])
+                    .status();
+            }
+        }
+    }
+}
+
+/// Stops ftmd until the holder of a flooding pane hangs up on it, and has `queued` sent while it is stopped.
+fn stall_until_hung_up(daemon: &Daemon, dir: &Path, queued: Request) -> std::thread::JoinHandle<Option<Response>> {
+    let pid = daemon.pid();
+    // SAFETY: kill takes no pointers.
+    unsafe { libc::kill(pid, libc::SIGSTOP) };
+    wait_for("the holder to stop waiting on ftmd", Duration::from_secs(30), || {
+        dir.join("flooded").exists()
+    });
+    let socket = daemon.socket.clone();
+    let (sent, wait) = std::sync::mpsc::channel();
+    let request = std::thread::spawn(move || {
+        let mut conn = Conn::open(&socket);
+        conn.set_read_timeout(Duration::from_secs(30));
+        let _ = sent.send(());
+        conn.try_send(&queued)
+    });
+    wait.recv().unwrap();
+    // Queued in ftmd's socket before it runs again.
+    std::thread::sleep(Duration::from_millis(200));
+    // SAFETY: kill takes no pointers.
+    unsafe { libc::kill(pid, libc::SIGCONT) };
+    request
+}
+
+/// A pane closed while ftmd is reconnecting to its holder still has its processes killed, rather than the Kill going
+/// to the connection the holder already hung up on.
+#[test]
+fn closing_a_pane_whose_holder_hung_up_kills_it() {
+    let dir = temp_root("close-hung-up");
+    let daemon = start_daemon("close-hung-up", |_| {});
+    let mut conn = Conn::open(&daemon.socket);
+    let _cleanup = KillSession(dir.join("pid"));
+    let (_, pane) = spawn_command(
+        &mut conn,
+        &dir,
+        Some("echo $$ > pid; sleep 1; yes | head -c 3000000; touch flooded; sleep 300"),
+    );
+
+    let closed = stall_until_hung_up(&daemon, &dir, Request::ClosePane { pane });
+    assert!(matches!(closed.join().unwrap(), Some(Response::Ok)));
+    wait_for("the pane's holder to exit", Duration::from_secs(15), || {
+        holder_sockets(&daemon) == 0
+    });
+}
+
+/// A resize sent while the holder has hung up on ftmd still reaches the terminal once ftmd reconnects.
+#[test]
+fn a_resize_while_the_holder_hung_up_still_lands() {
+    let dir = temp_root("resize-hung-up");
+    let daemon = start_daemon("resize-hung-up", |_| {});
+    let mut conn = Conn::open(&daemon.socket);
+    let _cleanup = KillSession(dir.join("pid"));
+    let (_, pane) = spawn_command(
+        &mut conn,
+        &dir,
+        Some("echo $$ > pid; sleep 1; yes | head -c 3000000; touch flooded; read x; stty size > size"),
+    );
+
+    let resized = stall_until_hung_up(
+        &daemon,
+        &dir,
+        Request::Resize {
+            pane,
+            cols: 100,
+            rows: 30,
+        },
+    );
+    assert!(matches!(resized.join().unwrap(), Some(Response::Ok)));
+    assert!(matches!(
+        conn.try_send(&Request::Input {
+            pane,
+            data: B64.encode("\n"),
+        }),
+        Some(Response::Ok)
+    ));
+    let mut size = String::new();
+    wait_for("the shell to report its size", Duration::from_secs(15), || {
+        size = std::fs::read_to_string(dir.join("size")).unwrap_or_default();
+        size.ends_with('\n')
+    });
+    assert_eq!(size.trim(), "30 100");
 }

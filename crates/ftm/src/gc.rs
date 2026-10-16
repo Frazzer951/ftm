@@ -4,6 +4,7 @@ use ftm_core::config::RepoConfig;
 use ftm_core::model::Workspace;
 use ftm_core::paths;
 use ftm_core::protocol::{Request, Response};
+use ftm_core::repo::{main_repo, remote_default, repo_name};
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -63,9 +64,11 @@ pub fn run(yes: bool, fetch: bool, upstream_deleted: bool) -> Result<()> {
 
     let (mut removable, mut failed) = (0, 0);
     for (repo, found) in by_repo {
-        let name = repo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let config = RepoConfig::load(&paths::repo_config_path(&name))?;
-        let base = config.base.unwrap_or_else(|| DEFAULT_BASE.into());
+        let config = RepoConfig::load(&paths::repo_config_path(&repo_name(&repo)))?;
+        let base = config
+            .base
+            .or_else(|| remote_default(&repo, |w| eprintln!("{}: {w}", repo.display())))
+            .unwrap_or_else(|| DEFAULT_BASE.into());
 
         let live = if fetch { fetch_base(&repo, &base) } else { None };
         let mut removed_any = false;
@@ -85,12 +88,12 @@ pub fn run(yes: bool, fetch: bool, upstream_deleted: bool) -> Result<()> {
                             println!("removed {}  ({why})", wt.shown);
                             if let Err(e) = delete_branch(&repo, &branch, stale.as_deref()) {
                                 failed += 1;
-                                eprintln!("failed  {}  (worktree removed, but: {e:#})", wt.shown)
+                                eprintln!("failed  {}  (worktree removed, but: {e:#})", wt.shown);
                             }
                         },
                         Err(e) => {
                             failed += 1;
-                            eprintln!("failed  {}  ({e:#})", wt.shown)
+                            eprintln!("failed  {}  ({e:#})", wt.shown);
                         },
                     }
                 },
@@ -127,12 +130,6 @@ fn find_worktrees(root: &Path) -> Vec<PathBuf> {
     }
     found.sort();
     found
-}
-
-/// The checkout that owns the worktree: the parent of its common git dir.
-fn main_repo(wt: &Path) -> Option<PathBuf> {
-    let common = git(wt, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).ok()?;
-    Path::new(&common).parent().map(Path::to_path_buf)
 }
 
 /// The branches that exist on a remote right now.

@@ -115,11 +115,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Render Casks/ftm.rb
         run: |
-          base=https://github.com/$GITHUB_REPOSITORY/releases/download/v$VERSION
-          sha() { curl -fsSL "$base/FTM_${VERSION}_$1.dmg" | sha256sum | cut -d' ' -f1; }
           mkdir -p out
-          sed -e "s/@VERSION@/$VERSION/" -e "s/@SHA256_ARM@/$(sha aarch64)/" -e "s/@SHA256_INTEL@/$(sha x64)/" \
-            packaging/homebrew/ftm.rb >out/ftm.rb
+          scripts/render-package.sh cask packaging/homebrew/ftm.rb \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/v$VERSION" FTM "$VERSION" >out/ftm.rb
           cat out/ftm.rb
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -161,14 +159,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Render PKGBUILD
         run: |
-          base=https://github.com/$GITHUB_REPOSITORY/releases/download/v$VERSION
-          sha() { curl -fsSL "$1" | sha256sum | cut -d' ' -f1; }
           mkdir -p out
-          sed -e "s/@VERSION@/$VERSION/" \
-            -e "s/@SHA256_X86_64@/$(sha "$base/FTM_${VERSION}_amd64.deb")/" \
-            -e "s/@SHA256_AARCH64@/$(sha "$base/FTM_${VERSION}_arm64.deb")/" \
-            -e "s/@SHA256_LICENSE@/$(sha256sum LICENSE | cut -d' ' -f1)/" \
-            packaging/aur/ftm-bin/PKGBUILD >out/PKGBUILD
+          scripts/render-package.sh pkgbuild packaging/aur/ftm-bin/PKGBUILD \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/v$VERSION" FTM "$VERSION" LICENSE >out/PKGBUILD
           cat out/PKGBUILD
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

@@ -243,7 +243,7 @@ fn serve(
 /// are gone, so the shell stays unreaped until this is done and other groups are only signalled while they are still
 /// in the pane's session.
 fn terminate(pane: &str, master: &Mutex<Box<dyn MasterPty + Send>>, child: &Mutex<Box<dyn Child + Send + Sync>>) {
-    let Some(shell) = lock(child).process_id().map(|pid| pid as libc::pid_t) else {
+    let Some(shell) = lock(child).process_id().map(u32::cast_signed) else {
         return;
     };
     let fg = lock(master).process_group_leader().filter(|&g| g > 0 && g != shell);
@@ -257,14 +257,18 @@ fn terminate(pane: &str, master: &Mutex<Box<dyn MasterPty + Send>>, child: &Mute
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    // Without a process table to check (macOS), the shell's group may still hold a job that ignored the hangup.
+    // The shell's group may still hold a job that ignored the hangup.
     signal_groups(shell, fg, libc::SIGKILL);
 }
 
 fn signal_groups(shell: libc::pid_t, fg: Option<libc::pid_t>, signal: libc::c_int) {
+    // SAFETY: kill takes no pointers. `shell` is our unreaped child and leads its own process group, so the id is not
+    // reused.
     unsafe { libc::kill(-shell, signal) };
     for group in fg.into_iter().chain(session_groups(shell)) {
         if group != shell && in_session(group, shell) {
+            // SAFETY: kill takes no pointers; in_session just checked that `group` is still a group in the shell's
+            // session.
             unsafe { libc::kill(-group, signal) };
         }
     }
@@ -293,7 +297,53 @@ fn session_groups(session: libc::pid_t) -> Vec<libc::pid_t> {
     groups
 }
 
-#[cfg(not(target_os = "linux"))]
+/// The process groups of the session `session` leads that still have a live process.
+#[cfg(target_os = "macos")]
+fn session_groups(session: libc::pid_t) -> Vec<libc::pid_t> {
+    let pid_size = size_of::<libc::pid_t>();
+    // SAFETY: with no buffer, proc_listallpids only reports how many pids there are.
+    let Ok(count) = usize::try_from(unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) }) else {
+        return Vec::new();
+    };
+    // Room for processes started since.
+    let mut pids: Vec<libc::pid_t> = vec![0; count + 64];
+    let Ok(bytes) = libc::c_int::try_from(pids.len() * pid_size) else {
+        return Vec::new();
+    };
+    // SAFETY: the buffer holds `bytes` bytes of pid_t, and proc_listallpids writes at most that many.
+    let listed = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
+    pids.truncate(usize::try_from(listed).unwrap_or(0).min(pids.len()));
+    let Ok(info_bytes) = libc::c_int::try_from(size_of::<libc::proc_bsdinfo>()) else {
+        return Vec::new();
+    };
+    let mut groups: Vec<libc::pid_t> = pids
+        .into_iter()
+        // SAFETY: getsid only reads the process table.
+        .filter(|&pid| pid > 0 && unsafe { libc::getsid(pid) } == session)
+        .filter_map(|pid| {
+            // SAFETY: proc_bsdinfo is plain integers, for which all zeroes is a valid value.
+            let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+            // SAFETY: `info` is a proc_bsdinfo, the size PROC_PIDTBSDINFO writes and the size passed.
+            let got = unsafe {
+                libc::proc_pidinfo(
+                    pid,
+                    libc::PROC_PIDTBSDINFO,
+                    0,
+                    std::ptr::from_mut(&mut info).cast(),
+                    info_bytes,
+                )
+            };
+            (got == info_bytes && info.pbi_status != libc::SZOMB)
+                .then(|| libc::pid_t::try_from(info.pbi_pgid).ok())
+                .flatten()
+        })
+        .collect();
+    groups.sort_unstable();
+    groups.dedup();
+    groups
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn session_groups(_session: libc::pid_t) -> Vec<libc::pid_t> {
     Vec::new()
 }
@@ -301,7 +351,9 @@ fn session_groups(_session: libc::pid_t) -> Vec<libc::pid_t> {
 /// Whether `group` is still a process group of the session `session` leads. A group whose leader has exited but whose
 /// members remain keeps its id, so its id cannot have been reused.
 fn in_session(group: libc::pid_t, session: libc::pid_t) -> bool {
+    // SAFETY: getsid takes no pointers and only reads process state.
     match unsafe { libc::getsid(group) } {
+        // SAFETY: kill with signal 0 takes no pointers and delivers nothing; it only checks that the group exists.
         -1 => std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) && unsafe { libc::kill(-group, 0) } == 0,
         sid => sid == session,
     }
@@ -309,12 +361,16 @@ fn in_session(group: libc::pid_t, session: libc::pid_t) -> bool {
 
 /// Whether the (unreaped) child `pid` has not exited yet, without reaping it.
 fn running(pid: libc::pid_t) -> bool {
+    // SAFETY: siginfo_t is plain C data, for which all-zero bytes are a valid value.
     let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
     let flags = libc::WEXITED | libc::WNOHANG | libc::WNOWAIT;
-    if unsafe { libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, flags) } != 0 {
+    // SAFETY: `info` is a live, writable siginfo_t. WNOWAIT leaves the child unreaped, so `pid` keeps naming it.
+    if unsafe { libc::waitid(libc::P_PID, pid.cast_unsigned(), &raw mut info, flags) } != 0 {
         return false;
     }
     #[cfg(target_os = "linux")]
+    // SAFETY: waitid succeeded, so `info` holds either a child's SIGCHLD fields or, under WNOHANG with nothing to
+    // report, the zeroed value; si_pid reads a field present in both.
     let exited = unsafe { info.si_pid() };
     #[cfg(not(target_os = "linux"))]
     let exited = info.si_pid;
@@ -330,6 +386,8 @@ mod tests {
     fn session_leader() -> std::process::Child {
         let mut cmd = Command::new("sleep");
         cmd.arg("30");
+        // SAFETY: between fork and exec the closure only calls setsid, which is async-signal-safe and does not
+        // allocate.
         unsafe {
             cmd.pre_exec(|| {
                 libc::setsid();
@@ -342,8 +400,9 @@ mod tests {
     #[test]
     fn an_exited_child_stops_running_but_stays_unreaped() {
         let mut child = session_leader();
-        let pid = child.id() as libc::pid_t;
+        let pid = child.id().cast_signed();
         assert!(running(pid));
+        // SAFETY: kill takes no pointers; `pid` is our unreaped child, so the id is not reused.
         unsafe { libc::kill(pid, libc::SIGKILL) };
         let deadline = Instant::now() + Duration::from_secs(5);
         while running(pid) {
@@ -356,9 +415,11 @@ mod tests {
     #[test]
     fn groups_count_only_while_in_the_session() {
         let mut child = session_leader();
-        let pid = child.id() as libc::pid_t;
+        let pid = child.id().cast_signed();
         assert!(in_session(pid, pid));
+        // SAFETY: getsid takes no pointers; 0 means this process.
         assert!(!in_session(pid, unsafe { libc::getsid(0) }));
+        // SAFETY: kill takes no pointers; `pid` is our unreaped child, so the id is not reused.
         unsafe { libc::kill(pid, libc::SIGKILL) };
         child.wait().unwrap();
         assert!(!in_session(pid, pid), "a reaped group's id may be reused");

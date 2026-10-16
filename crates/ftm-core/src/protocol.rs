@@ -4,6 +4,7 @@
 use crate::model::{Folder, Kind, PaneId, SplitDir, Status, Workspace, WorkspaceId};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -78,6 +79,20 @@ pub enum Request {
     Attach {
         pane: PaneId,
     },
+}
+
+impl Request {
+    /// How long a client waits for ftmd to answer, so a hung ftmd never blocks it forever. Making a worktree copies
+    /// files and removing one waits for its panes to exit, so those get longer.
+    pub fn reply_timeout(&self) -> Duration {
+        match self {
+            Request::Spawn(spawn) if spawn.worktree_branch.is_some() => Duration::from_secs(600),
+            Request::Close {
+                remove_worktree: true, ..
+            } => Duration::from_secs(120),
+            _ => Duration::from_secs(30),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,6 +174,40 @@ pub enum Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_slow_requests_wait_long() {
+        let spawn = |worktree_branch: Option<&str>| {
+            Request::Spawn(SpawnRequest {
+                kind: Kind::Agent,
+                name: None,
+                parent: None,
+                cwd: "/".into(),
+                worktree_branch: worktree_branch.map(Into::into),
+                base: None,
+                copy_changes: false,
+                brief: None,
+                command: None,
+            })
+        };
+        let close = |remove_worktree| Request::Close {
+            id: WorkspaceId::nil(),
+            remove_worktree,
+        };
+        let secs = |request: Request| request.reply_timeout().as_secs();
+        assert_eq!(secs(Request::Ping), 30);
+        assert_eq!(
+            secs(Request::Input {
+                pane: PaneId::nil(),
+                data: String::new()
+            }),
+            30
+        );
+        assert_eq!(secs(spawn(None)), 30);
+        assert_eq!(secs(close(false)), 30);
+        assert_eq!(secs(spawn(Some("b"))), 600);
+        assert_eq!(secs(close(true)), 120);
+    }
 
     /// Old and new clients and daemons talk to each other across an upgrade, so fields a side does not know are
     /// ignored and fields it lacks default.

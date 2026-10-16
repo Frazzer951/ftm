@@ -16,6 +16,19 @@ fn an_unreadable_brief_names_the_file() {
     assert!(stderr.contains("/nonexistent/ftm-brief.md"), "{stderr}");
 }
 
+/// Without a fetch gc cannot see an upstream deletion, so asking for both would silently remove nothing extra.
+#[test]
+fn gc_refuses_upstream_deleted_without_a_fetch() {
+    let out = Command::new(env!("CARGO_BIN_EXE_ftm"))
+        .args(["gc", "--no-fetch", "--include-upstream-deleted"])
+        .env("FTM_SOCKET", "/nonexistent/ftmd.sock")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("cannot be used with"), "{stderr}");
+}
+
 #[test]
 fn ftmd_hanging_up_without_a_reply_is_an_error() {
     let dir = std::env::temp_dir().join(format!("ftm-cli-eof-{}", std::process::id()));

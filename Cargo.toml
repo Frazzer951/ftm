@@ -7,6 +7,8 @@ authors = ["Luke Eltiste"]
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Frazzer951/ftm"
+# The locked tauri needs 1.90 (ftm, ftmd and ftm-core alone build on 1.89).
+rust-version = "1.90"
 publish = false
 version = "0.1.8"
 
@@ -16,3 +18,20 @@ consolidate-commits = true
 publish = false
 tag-name = "v{{version}}"
 pre-release-commit-message = "chore(release): prepare for release {{version}}"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+allow_attributes_without_reason = "warn"
+borrow_as_ptr = "warn"
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_sign_loss = "warn"
+dbg_macro = "warn"
+implicit_clone = "warn"
+redundant_closure_for_method_calls = "warn"
+semicolon_if_nothing_returned = "warn"
+todo = "warn"
+undocumented_unsafe_blocks = "warn"

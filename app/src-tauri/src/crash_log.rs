@@ -56,7 +56,7 @@ fn timestamp(at: SystemTime) -> String {
     let secs = at.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
     let (days, rem) = (secs / 86_400, secs % 86_400);
     // Howard Hinnant's civil_from_days.
-    let z = days as i64 + 719_468;
+    let z = days.cast_signed() + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
@@ -101,6 +101,8 @@ mod objc_exceptions {
 
     pub fn install(log: PathBuf) {
         if LOG.set(log).is_ok() {
+            // SAFETY: `preprocess` has the signature the runtime expects and lives for the whole program. LOG.set
+            // succeeds only once, so this installs it once and PREVIOUS keeps the preprocessor it replaced.
             let _ = PREVIOUS.set(unsafe { objc_setExceptionPreprocessor(preprocess) });
         }
     }
@@ -112,6 +114,8 @@ mod objc_exceptions {
             LOGGING.set(false);
         }
         match PREVIOUS.get().copied().flatten() {
+            // SAFETY: `previous` is the preprocessor the runtime had before ours, called with the same exception it was
+            // given.
             Some(previous) => unsafe { previous(exception) },
             None => exception,
         }
@@ -119,6 +123,8 @@ mod objc_exceptions {
 
     fn log(exception: *mut AnyObject) {
         let Some(log) = LOG.get() else { return };
+        // SAFETY: the runtime passes a valid or null object pointer that stays alive for this call; as_ref maps null to
+        // None.
         let what = match unsafe { exception.as_ref() }.and_then(|e| e.downcast_ref::<NSException>()) {
             Some(e) => format!("{}: {}", e.name(), e.reason().map(|r| r.to_string()).unwrap_or_default()),
             None => "a non-NSException object".into(),
@@ -214,6 +220,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let log = dir.join("ftm-app.log");
         objc_exceptions::install(log.clone());
+        // SAFETY: exceptionWithName:reason:userInfo: takes an NSString, an optional NSString and an optional
+        // NSDictionary, and gets live objects of those types.
         let exception = unsafe {
             NSException::exceptionWithName_reason_userInfo(
                 &NSString::from_str("NSInternalInconsistencyException"),
@@ -246,6 +254,8 @@ mod tests {
             std::panic::set_hook(Box::new(recorder(log.clone())));
             objc_exceptions::install(log);
             extern "C" fn send_event() {
+                // SAFETY: exceptionWithName:reason:userInfo: takes an NSString, an optional NSString and an optional
+                // NSDictionary, and gets live objects of those types.
                 let exception = unsafe {
                     NSException::exceptionWithName_reason_userInfo(
                         &NSString::from_str("NSInternalInconsistencyException"),

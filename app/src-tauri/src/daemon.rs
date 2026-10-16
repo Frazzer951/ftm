@@ -1,5 +1,6 @@
 use ftm_core::paths;
 use ftm_core::protocol::{Event, Request, Response};
+use std::cell::Cell;
 use std::io::{BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
@@ -17,9 +18,6 @@ type Reply = oneshot::Sender<Result<Response, String>>;
 const START_TIMEOUT: Duration = Duration::from_secs(5);
 /// After an ftmd launch dies at startup, requests fail at once for this long rather than each launching another.
 const LAUNCH_BACKOFF: Duration = Duration::from_secs(10);
-/// Creating or removing a worktree runs git, which can be slow on a large repo.
-const SLOW_REPLY: Duration = Duration::from_secs(300);
-const REPLY: Duration = Duration::from_secs(30);
 
 /// Where ftmd listens and how to start it. The request worker and the event thread share one, so only one of them
 /// launches ftmd at a time.
@@ -247,13 +245,6 @@ fn idempotent(request: &Request) -> bool {
     )
 }
 
-fn reply_timeout(request: &Request) -> Duration {
-    match request {
-        Request::Spawn(_) | Request::Close { .. } => SLOW_REPLY,
-        _ => REPLY,
-    }
-}
-
 /// Reconnects (starting ftmd if needed) and retries once when the connection has dropped: always if the request could
 /// not be written, but after a lost reply only if sending it again is harmless.
 fn send(daemon: &Daemon, conn: &mut Option<Conn>, request: &Request) -> Result<Response, String> {
@@ -262,7 +253,7 @@ fn send(daemon: &Daemon, conn: &mut Option<Conn>, request: &Request) -> Result<R
             Some(open) => open,
             None => conn.insert(Conn::open(daemon)?),
         };
-        match open.roundtrip(request, Some(reply_timeout(request))) {
+        match open.roundtrip(request, Some(request.reply_timeout())) {
             Ok(line) => {
                 return match serde_json::from_str(&line).map_err(|e| e.to_string())? {
                     Response::Error { message } => Err(message),
@@ -286,10 +277,14 @@ fn send(daemon: &Daemon, conn: &mut Option<Conn>, request: &Request) -> Result<R
     unreachable!()
 }
 
+const FAILURE_REPEAT: Duration = Duration::from_secs(30);
+
 /// Forwards daemon events to the frontend. The page starts it once it is listening, and again after a reload, so
 /// each start gets a fresh replay; an older stream notices the generation change and stops. Each (re)connect first
 /// reports the daemon's version to `connected`: ftmd moves itself onto a new build after an upgrade, which drops the
-/// stream, and the app may then be older than the daemon it talks to.
+/// stream, and the app may then be older than the daemon it talks to. When ftmd cannot be reached or started,
+/// `failed` hears why, though not the same failure again within `FAILURE_REPEAT`, and not a stream dropped after it
+/// connected: that is ftmd moving to a new build, and the reconnect follows.
 pub struct Events {
     daemon: Daemon,
     generation: Arc<AtomicU64>,
@@ -306,7 +301,12 @@ impl Events {
         }
     }
 
-    pub fn restart(&self, emit: impl Fn(Event) + Send + 'static, connected: impl Fn(String) + Send + 'static) {
+    pub fn restart(
+        &self,
+        emit: impl Fn(Event) + Send + 'static,
+        connected: impl Fn(String) + Send + 'static,
+        failed: impl Fn(String) + Send + 'static,
+    ) {
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         if let Some((_, old)) = self.stream.lock().unwrap_or_else(PoisonError::into_inner).take() {
             let _ = old.shutdown(Shutdown::Both);
@@ -315,9 +315,26 @@ impl Events {
         // Runs on the main thread (from the `subscribe` command), where a panic takes the whole app down.
         let spawned = std::thread::Builder::new().name("ftmd-events".into()).spawn(move || {
             let live = || current.load(Ordering::SeqCst) == generation;
+            let mut reported: Option<(Instant, String)> = None;
             while live() {
-                if let Err(e) = subscribe(&daemon, generation, &emit, &connected, &slot, &live) {
+                let reached = Cell::new(false);
+                let connected = |version| {
+                    reached.set(true);
+                    connected(version);
+                };
+                let result = subscribe(&daemon, generation, &emit, &connected, &slot, &live);
+                if reached.get() {
+                    reported = None;
+                }
+                if let Err(e) = result {
                     eprintln!("ftmd event stream: {e}");
+                    let repeat = reported
+                        .as_ref()
+                        .is_some_and(|(at, last)| *last == e && at.elapsed() < FAILURE_REPEAT);
+                    if !reached.get() && !repeat && live() {
+                        failed(e.clone());
+                        reported = Some((Instant::now(), e));
+                    }
                 }
                 std::thread::sleep(Duration::from_millis(500));
             }
@@ -346,11 +363,13 @@ fn subscribe(
         }
         *slot = conn.write.try_clone().ok().map(|s| (generation, s));
     }
-    let pong = conn.roundtrip(&Request::Ping, Some(REPLY)).map_err(Failure::into_string)?;
+    let pong = conn
+        .roundtrip(&Request::Ping, Some(Request::Ping.reply_timeout()))
+        .map_err(Failure::into_string)?;
     if let Ok(Response::Pong { version }) = serde_json::from_str(&pong) {
         connected(version);
     }
-    conn.roundtrip(&Request::Subscribe, Some(REPLY))
+    conn.roundtrip(&Request::Subscribe, Some(Request::Ping.reply_timeout()))
         .map_err(Failure::into_string)?;
     conn.set_read_timeout(None);
     let mut line = String::new();
@@ -411,6 +430,26 @@ mod tests {
             }
         });
         received
+    }
+
+    /// An ftmd that logs why it failed and exits at startup, appending a line to `launched` each time it runs.
+    fn dying_ftmd(dir: &Path, launched: &Path) -> Daemon {
+        let binary = dir.join("ftmd");
+        let script = format!(
+            "#!/bin/sh\necho x >> '{}'\necho 'bind failed: boom' >&2\nexit 3\n",
+            launched.display()
+        );
+        // Written by a child: a fork from another test thread would inherit a writable fd held here, and exec refuses
+        // a file open for writing (ETXTBSY).
+        let mut writer = Command::new("/bin/sh")
+            .args(["-c", r#"cat > "$1" && chmod 755 "$1""#, "sh"])
+            .arg(&binary)
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        writer.stdin.take().unwrap().write_all(script.as_bytes()).unwrap();
+        assert!(writer.wait().unwrap().success());
+        Daemon::at(dir.join("ftmd.sock"), binary)
     }
 
     fn no_ftmd(dir: &Path) -> Daemon {
@@ -515,33 +554,19 @@ mod tests {
             move |version| {
                 let _ = versions.send(version);
             },
+            |e| panic!("{e}"),
         );
         let got: Vec<String> = (0..4).map(|_| rx.recv_timeout(Duration::from_secs(5)).unwrap()).collect();
         assert_eq!(got, ["v0", "stream 0", "v1", "stream 1"]);
-        events.restart(|_| {}, |_| {});
+        events.restart(|_| {}, |_| {}, |_| {});
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_launch_that_dies_fails_fast_and_is_reaped() {
         let dir = scratch("dies");
-        let binary = dir.join("ftmd");
         let launched = dir.join("launched");
-        let script = format!(
-            "#!/bin/sh\necho x >> '{}'\necho 'bind failed: boom' >&2\nexit 3\n",
-            launched.display()
-        );
-        // Written by a child: a fork from another test thread would inherit a writable fd held here, and exec refuses
-        // a file open for writing (ETXTBSY).
-        let mut writer = Command::new("/bin/sh")
-            .args(["-c", r#"cat > "$1" && chmod 755 "$1""#, "sh"])
-            .arg(&binary)
-            .stdin(Stdio::piped())
-            .spawn()
-            .unwrap();
-        writer.stdin.take().unwrap().write_all(script.as_bytes()).unwrap();
-        assert!(writer.wait().unwrap().success());
-        let daemon = Daemon::at(dir.join("ftmd.sock"), binary);
+        let daemon = dying_ftmd(&dir, &launched);
         let started = Instant::now();
         let err = daemon.connect().unwrap_err();
         assert!(started.elapsed() < START_TIMEOUT, "{err}");
@@ -553,6 +578,30 @@ mod tests {
         // Within the backoff, the next request reports the same failure without launching again.
         assert_eq!(daemon.connect().unwrap_err(), err);
         assert_eq!(std::fs::read_to_string(&launched).unwrap().lines().count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn events_report_a_launch_that_dies_once() {
+        let dir = scratch("events-dies");
+        let launched = dir.join("launched");
+        let events = Events::new(dying_ftmd(&dir, &launched));
+        let (tx, rx) = mpsc::channel();
+        events.restart(
+            |event| panic!("{event:?}"),
+            |version| panic!("{version}"),
+            move |e| {
+                let _ = tx.send(e);
+            },
+        );
+        let err = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            err.contains("exited at startup") && err.contains("bind failed: boom"),
+            "{err}"
+        );
+        // The stream keeps retrying every 500 ms, but the same failure is not reported again.
+        assert!(rx.recv_timeout(Duration::from_millis(1500)).is_err());
+        events.restart(|_| {}, |_| {}, |_| {});
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

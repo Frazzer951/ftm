@@ -67,18 +67,24 @@ impl Inherited {
     pub unsafe fn take() -> Option<Inherited> {
         let fd = |key: &str| {
             let value = std::env::var(key).ok();
+            // SAFETY: take's contract: the process is still single-threaded, so nothing reads the environment
+            // concurrently.
             unsafe { std::env::remove_var(key) };
             // Setting close-on-exec also checks the fd is open: one that is not must never be owned.
             value?
                 .parse::<RawFd>()
                 .ok()
+                // SAFETY: F_SETFD takes no pointers; on an fd that is not open it fails with EBADF and changes nothing.
                 .filter(|&fd| fd > 2 && unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } == 0)
         };
         let (listen, ready) = (fd(LISTEN_FD), fd(READY_FD));
         let (listen, ready) = (listen?, ready?);
         Some(Inherited {
             listen,
+            // SAFETY: the fcntl above showed `ready` is open: hand_over in the old ftmd kept its end of the readiness
+            // pipe open across the exec. Nothing in this process has taken ownership of it yet.
             ready: unsafe { OwnedFd::from_raw_fd(ready) },
+            // SAFETY: getppid takes no pointers and cannot fail.
             parent: unsafe { libc::getppid() },
         })
     }
@@ -86,30 +92,29 @@ impl Inherited {
     /// The handed-over fd, provided it is a listening Unix socket bound to `socket`.
     pub fn listener(&self, socket: &Path) -> Result<std::os::unix::net::UnixListener> {
         let fd = self.listen;
+        // SAFETY: libc::stat is plain C data, for which all-zero bytes are a valid value.
         let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-        if unsafe { libc::fstat(fd, &mut stat) } != 0 || stat.st_mode & libc::S_IFMT != libc::S_IFSOCK {
+        // SAFETY: `stat` is a live, writable libc::stat.
+        if unsafe { libc::fstat(fd, &raw mut stat) } != 0 || stat.st_mode & libc::S_IFMT != libc::S_IFSOCK {
             bail!("{LISTEN_FD}={fd} is not a socket");
         }
         let mut kind: libc::c_int = 0;
-        let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
-        let ok = unsafe {
-            libc::getsockopt(
-                fd,
-                libc::SOL_SOCKET,
-                libc::SO_TYPE,
-                (&mut kind as *mut libc::c_int).cast(),
-                &mut len,
-            )
-        };
+        let mut len = libc::socklen_t::try_from(size_of::<libc::c_int>()).expect("c_int fits in socklen_t");
+        // SAFETY: `kind` and `len` are live locals and `len` holds the size of `kind`, so the kernel writes at most
+        // that much.
+        let ok = unsafe { libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_TYPE, (&raw mut kind).cast(), &raw mut len) };
         if ok != 0 || kind != libc::SOCK_STREAM {
             bail!("{LISTEN_FD}={fd} is not a stream socket");
         }
+        // SAFETY: fstat and SO_TYPE just showed `fd` is an open stream socket. Inherited holds it unowned, and daemon()
+        // calls listener() once, so the listener becomes its only owner.
         let listener = unsafe { std::os::unix::net::UnixListener::from_raw_fd(fd) };
         let addr = listener.local_addr().wrap_err("reading the handed-over socket's address")?;
         if addr.as_pathname() != Some(socket) {
             bail!("{LISTEN_FD}={fd} is bound to {addr:?}, not {}", socket.display());
         }
         // macOS has no SO_ACCEPTCONN. listen() again is harmless on a listening socket and fails on a connected one.
+        // SAFETY: listen takes no pointers; `fd` is still open, owned by `listener`.
         if unsafe { libc::listen(fd, libc::SOMAXCONN) } != 0 {
             return Err(std::io::Error::last_os_error()).wrap_err_with(|| format!("{LISTEN_FD}={fd} cannot listen"));
         }
@@ -123,6 +128,7 @@ impl Inherited {
         std::io::Write::write_all(&mut ready, b"r").wrap_err("signalling the old ftmd")?;
         drop(ready);
         let deadline = Instant::now() + PARENT_EXIT_TIMEOUT;
+        // SAFETY: getppid takes no pointers and cannot fail.
         while unsafe { libc::getppid() } == self.parent {
             if Instant::now() > deadline {
                 tracing::warn!("old ftmd (pid {}) has not exited; restoring anyway", self.parent);
@@ -305,6 +311,8 @@ pub fn hand_over(exe: &Path, listener: RawFd, shared: &Shared) -> Result<Infalli
         .stdin(Stdio::null());
     // Its own session, like the holders: it must outlive whatever started this ftmd. Only the two handed-over fds
     // cross the exec; everything else ftmd opens is close-on-exec.
+    // SAFETY: between fork and exec the closure only calls setsid and fcntl, which are async-signal-safe, and builds an
+    // io::Error from errno, which does not allocate. Both fds are open in the child, which inherits this fd table.
     unsafe {
         cmd.pre_exec(move || {
             libc::setsid();
@@ -335,15 +343,19 @@ pub fn hand_over(exe: &Path, listener: RawFd, shared: &Shared) -> Result<Infalli
 fn cloexec_pipe() -> std::io::Result<(OwnedFd, OwnedFd)> {
     let mut fds = [0; 2];
     #[cfg(target_os = "linux")]
+    // SAFETY: `fds` has room for the two fds pipe2 writes.
     let made = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
     #[cfg(not(target_os = "linux"))]
+    // SAFETY: `fds` has room for the two fds pipe writes.
     let made = unsafe { libc::pipe(fds.as_mut_ptr()) };
     if made != 0 {
         return Err(std::io::Error::last_os_error());
     }
+    // SAFETY: the pipe call succeeded, so both are newly opened fds that nothing else owns.
     let (read, write) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
     #[cfg(not(target_os = "linux"))]
     for fd in [&read, &write] {
+        // SAFETY: F_SETFD takes no pointers, and the fd stays open while `fd` borrows its owner.
         unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
     }
     Ok((read, write))
@@ -361,7 +373,8 @@ fn wait_ready(read: &OwnedFd, child: &mut std::process::Child) -> Result<()> {
             events: libc::POLLIN,
             revents: 0,
         };
-        let n = unsafe { libc::poll(&mut pfd, 1, left.as_millis().min(i32::MAX as u128) as i32) };
+        // SAFETY: `pfd` is one live pollfd, matching nfds = 1.
+        let n = unsafe { libc::poll(&raw mut pfd, 1, i32::try_from(left.as_millis()).unwrap_or(i32::MAX)) };
         if n < 0 {
             let e = std::io::Error::last_os_error();
             if e.kind() == std::io::ErrorKind::Interrupted {
@@ -373,6 +386,7 @@ fn wait_ready(read: &OwnedFd, child: &mut std::process::Child) -> Result<()> {
             continue;
         }
         let mut byte = [0u8; 1];
+        // SAFETY: `byte` is a live 1-byte buffer and read writes at most 1 byte.
         let got = unsafe { libc::read(read.as_raw_fd(), byte.as_mut_ptr().cast(), 1) };
         if got == 1 {
             return Ok(());
@@ -409,6 +423,7 @@ mod tests {
     fn the_readiness_pipe_is_close_on_exec() {
         let (read, write) = cloexec_pipe().unwrap();
         for fd in [read, write] {
+            // SAFETY: F_GETFD takes no pointers, and `fd` owns an open fd.
             let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
             assert_eq!(flags & libc::FD_CLOEXEC, libc::FD_CLOEXEC);
         }

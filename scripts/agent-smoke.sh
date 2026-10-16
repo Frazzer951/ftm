@@ -55,6 +55,7 @@ field() { ws_json | python3 -c "import json,sys; w=[w for w in json.load(sys.std
 # Preflight: the panes' login shell must resolve this build's ftm, and send/capture must round-trip.
 term=$(ftm spawn terminal --path "$DIR" --name smoke-preflight)
 sleep 1
+# shellcheck disable=SC2016 # expanded by the pane's shell
 ftm send "$term" 'echo "FTM=$(command -v ftm)"' --enter
 for _ in $(seq 50); do ftm capture "$term" | grep -q "^FTM=/" && break; sleep 0.2; done
 resolved=$(ftm capture "$term" | grep "^FTM=/" | tail -1 | cut -d= -f2-)
@@ -148,6 +149,7 @@ case " $leader_seen " in *" working "*) ;; *) fail "hooks never marked the leade
 unnamed_name=$(field "$unnamed" "w[0]['name']")
 unnamed_title=$(field "$unnamed" "w[0].get('auto_title') or ''")
 [ -n "$unnamed_title" ] || fail "the unnamed agent never got a task title (auto_title)"
+# shellcheck disable=SC2015 # fail when either check is false
 [ "$unnamed_title" != "$unnamed_name" ] && [ "$unnamed_title" != "$(basename "$DIR")" ] \
   || fail "the unnamed agent's auto_title is just its name: $unnamed_title"
 [ "$(field "$leader" "w[0].get('auto_title') or ''")" = "" ] || fail "the named leader got an auto_title"

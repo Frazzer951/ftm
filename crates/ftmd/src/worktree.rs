@@ -1,6 +1,6 @@
 use eyre::{Result, WrapErr, bail};
 use ftm_core::config::{CopyIgnored, DEFAULT_COPY_IGNORED_EXCLUDE, RepoConfig};
-use ftm_core::paths;
+use ftm_core::{paths, repo};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -25,21 +25,32 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
 }
 
-/// The checkout `dir` is in, and the main checkout of its repo: the parent of the common git dir, so a worktree made
-/// from inside another worktree is named, configured and removed by the repo it belongs to.
+/// The checkout `dir` is in, and the repo it belongs to, so a worktree made from inside another worktree is named,
+/// configured and removed by that repo.
 fn checkouts(dir: &Path) -> Option<(PathBuf, PathBuf)> {
     let src = PathBuf::from(git(dir, &["rev-parse", "--show-toplevel"]).ok()?);
-    let common = PathBuf::from(git(dir, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).ok()?);
-    let repo = match common.parent() {
-        Some(parent) if common.file_name().is_some_and(|n| n == ".git") => parent.to_path_buf(),
-        _ => src.clone(),
+    Some((src, repo::main_repo(dir)?))
+}
+
+/// Brings a remote-tracking `base` up to date, so a new branch starts from the remote's tip rather than the last
+/// fetch. Offline, the last fetch is used.
+fn fetch_tracking(src: &Path, base: &str) {
+    let Ok(remotes) = git(src, &["remote"]) else { return };
+    let Some((remote, branch)) = remotes
+        .lines()
+        .filter_map(|r| Some((r, base.strip_prefix(r)?.strip_prefix('/')?)))
+        .max_by_key(|(r, _)| r.len())
+    else {
+        return;
     };
-    Some((src, repo))
+    if let Err(e) = repo::git_remote(src, &["fetch", "--quiet", remote, branch]) {
+        tracing::warn!("fetching {base}, using the last fetch: {e:#}");
+    }
 }
 
 pub fn create(cwd: &Path, branch: &str, base: Option<&str>, copy_changes: bool) -> Result<Created> {
     let (src, repo) = checkouts(cwd).ok_or_else(|| eyre::eyre!("{} is not in a git repo", cwd.display()))?;
-    let name = repo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = repo::repo_name(&repo);
     let config = RepoConfig::load(&paths::repo_config_path(&name))?;
     let excludes = match &config.copy_ignored {
         CopyIgnored::All(true) => Excludes::new(&config.copy_ignored_exclude)?,
@@ -59,8 +70,13 @@ pub fn create(cwd: &Path, branch: &str, base: Option<&str>, copy_changes: bool) 
     let path_str = path.to_string_lossy().into_owned();
     let new_branch = git(&src, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_err();
     if new_branch {
+        let base = base
+            .map(str::to_string)
+            .or(config.base.clone())
+            .or_else(|| repo::remote_default(&src, |w| tracing::warn!("{w}")));
         let mut args = vec!["worktree", "add", "-b", branch, &path_str];
-        if let Some(base) = base.or(config.base.as_deref()) {
+        if let Some(base) = &base {
+            fetch_tracking(&src, base);
             args.push(base);
         }
         git(&src, &args)?;

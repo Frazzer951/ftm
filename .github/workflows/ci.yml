@@ -50,8 +50,13 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # tauri::generate_context! reads frontendDist (app/dist) at compile time.
       - run: mkdir -p app/dist
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+      - name: Check the docs build
+        if: runner.os == 'Linux'
+        run: cargo doc --workspace --no-deps --document-private-items --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
       - name: Test the nightly channel's paths
         run: cargo test -p ftm-core
         env:
@@ -72,5 +77,33 @@ jobs:
           cache-dependency-path: app/package-lock.json
       - run: npm ci
       - run: npm run lint
+      - run: npm run typecheck
       - run: npm test
       - run: npm run build
+
+  scripts:
+    name: workflow + script lint and tests
+    runs-on: ubuntu-latest
+    env:
+      ACTIONLINT_VERSION: 1.7.12
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+      SHELLCHECK_VERSION: 0.11.0
+      SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The runner's preinstalled shellcheck is older and flags more; pin the version contributors run locally.
+      - name: Install actionlint and shellcheck
+        run: |
+          tarball=actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz
+          curl -fsSLO "https://github.com/rhysd/actionlint/releases/download/v$ACTIONLINT_VERSION/$tarball"
+          echo "$ACTIONLINT_SHA256  $tarball" | sha256sum -c -
+          tar -xzf "$tarball" -C "$RUNNER_TEMP" actionlint
+          tarball=shellcheck-v$SHELLCHECK_VERSION.linux.x86_64.tar.xz
+          curl -fsSLO "https://github.com/koalaman/shellcheck/releases/download/v$SHELLCHECK_VERSION/$tarball"
+          echo "$SHELLCHECK_SHA256  $tarball" | sha256sum -c -
+          tar -xJf "$tarball" -C "$RUNNER_TEMP" --strip-components=1 "shellcheck-v$SHELLCHECK_VERSION/shellcheck"
+          echo "$RUNNER_TEMP" >>"$GITHUB_PATH"
+      # actionlint runs shellcheck over every run: block.
+      - run: actionlint -color
+      - run: shellcheck scripts/*.sh scripts/tests/*.sh
+      - run: for test in scripts/tests/*.sh; do "$test"; done

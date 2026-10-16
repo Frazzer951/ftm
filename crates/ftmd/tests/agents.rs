@@ -168,7 +168,10 @@ fn agents_nest_report_status_and_clean_up() {
     assert_eq!(lv["FTM_SOCKET"], socket.to_str().unwrap());
     assert_eq!(Path::new(&lv["PWD"]), wt);
     assert_eq!(lv["SETUP"], "yes");
-    assert_eq!(Path::new(&lv["FTM_BIN"]), bin);
+    assert_eq!(
+        Path::new(&lv["FTM_BIN"]),
+        Path::new(env!("CARGO_BIN_EXE_ftmd")).with_file_name("ftm")
+    );
 
     // The worktree carries tracked edits, untracked files and the configured ignored files.
     assert_eq!(std::fs::read_to_string(wt.join("f")).unwrap(), "edited\n");

@@ -53,6 +53,7 @@ struct Reap(Vec<i32>);
 impl Drop for Reap {
     fn drop(&mut self) {
         for &pid in &self.0 {
+            // SAFETY: kill takes no pointers.
             unsafe { libc::kill(pid, libc::SIGKILL) };
         }
     }
@@ -63,18 +64,28 @@ fn socket_path(name: &str) -> PathBuf {
 }
 
 /// Once the shell has died of the hangup, a job that ignores SIGHUP still holds the terminal open: Kill must SIGKILL
-/// it and the holder must exit rather than wait for an end of stream that never comes.
+/// it and the holder must exit rather than wait for an end of stream that never comes. With job control on (`set
+/// -m`, as in an interactive shell) the job has a process group of its own, neither the shell's nor the foreground
+/// one, so only a scan of the session finds it.
 #[test]
 fn kill_leaves_nothing_behind_once_the_shell_is_gone() {
     let dir = temp_root("holder-kill");
     let socket = socket_path("holder-kill");
-    let pidfile = dir.join("job");
-    let script = format!("(trap '' HUP; exec sleep 300) & echo $! > {}; sleep 300", pidfile.display());
+    let (jobfile, shellfile) = (dir.join("job"), dir.join("shell"));
+    let script = format!(
+        "set -m; echo $$ > {}; (trap '' HUP; exec sleep 300) & echo $! > {}; sleep 300",
+        shellfile.display(),
+        jobfile.display()
+    );
     let (mut holder, mut conn) = start_holder(&socket, &dir, &script);
     assert_eq!(read_frame(&mut conn).0, 1);
     assert_eq!(read_frame(&mut conn).0, OUTPUT);
-    let job = read_pid(&pidfile);
-    let _reap = Reap(vec![holder.id() as i32, job]);
+    let job = read_pid(&jobfile);
+    let _reap = Reap(vec![holder.id().cast_signed(), job]);
+    let shell = read_pid(&shellfile);
+    // SAFETY: getpgid only reads the process table.
+    let (job_group, shell_group) = unsafe { (libc::getpgid(job), libc::getpgid(shell)) };
+    assert_ne!(job_group, shell_group, "the job has its own group");
 
     conn.write_all(&[KILL, 0, 0, 0, 0]).unwrap();
     wait_for("the holder to exit", Duration::from_secs(10), || {

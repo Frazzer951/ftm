@@ -129,7 +129,7 @@ printed to the terminal running the app as `[frontend] ...`.
 `~/.config/ftm/repos/<repo>.toml` sets how FTM makes worktrees of a repo:
 
 ```toml
-base = "origin/main"                 # branch new worktree branches start from
+base = "origin/main"                 # where new branches start (default: the remote's default branch)
 setup = "direnv allow"               # POSIX sh run in the worktree before the agent starts
 copy_ignored_exclude = ["data"]      # more names/globs to leave out of the gitignored-file copy
 ```

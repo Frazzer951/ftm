@@ -32,6 +32,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
     let origin = upgrade::Origin::now();
+    // SAFETY: still single-threaded: the tokio runtime, ftmd's first thread, starts below.
     let inherited = unsafe { upgrade::Inherited::take() };
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let result = runtime.block_on(daemon(inherited, origin));
@@ -108,6 +109,10 @@ async fn daemon(inherited: Option<upgrade::Inherited>, origin: Option<upgrade::O
             _ = tokio::signal::ctrl_c() => break,
             _ = terminate.recv() => break,
         }
+    }
+    let flushing = state.clone();
+    if let Err(e) = tokio::task::spawn_blocking(move || state::flush(&flushing)).await? {
+        tracing::warn!("{e:#}");
     }
     // Panes live on in their holders; the next ftmd reconnects to them.
     let _ = std::fs::remove_file(&socket);

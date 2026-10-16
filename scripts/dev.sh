@@ -40,6 +40,7 @@ ensure_app_deps "$REPO/app"
 stop_apps "$SOCKET" "" "*.app/Contents/MacOS/*"
 # A Vite left over from an earlier run would hold the dev port.
 for pid in $(lsof -ti tcp:1420 -sTCP:LISTEN 2>/dev/null); do
+  # shellcheck disable=SC2015 # neither a non-node listener nor a failed kill should stop the script
   ps -o command= -p "$pid" | grep -q node && kill "$pid" 2>/dev/null || true
 done
 

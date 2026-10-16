@@ -11,7 +11,8 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak, mpsc};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
@@ -29,6 +30,8 @@ const BUFFER_SLACK: usize = 256 << 10;
 const REDRAW_NUDGE: Duration = Duration::from_millis(150);
 /// Input is sent to a holder in frames of at most this size, far below `frame::MAX_PAYLOAD`.
 const INPUT_CHUNK: usize = 64 << 10;
+/// Changes within this long of each other are saved together: every tool use of every agent sets its status.
+const SAVE_DELAY: Duration = Duration::from_millis(250);
 
 pub struct State {
     workspaces: BTreeMap<WorkspaceId, Workspace>,
@@ -41,6 +44,7 @@ pub struct State {
     socket: PathBuf,
     holders: PathBuf,
     state_file: PathBuf,
+    saver: Arc<Saver>,
     /// Hook settings every agent gets via `--settings`, from `hooks::write`.
     claude_settings: Option<PathBuf>,
     /// The last `Event::UpdateBlocked`, replayed to every subscriber.
@@ -52,7 +56,7 @@ pub struct State {
 struct Pane {
     workspace: WorkspaceId,
     /// Frames for the holder, written by the pane's own thread so a holder that is slow to read stalls nothing else.
-    holder: mpsc::Sender<Frame>,
+    holder: mpsc::Sender<ToHolder>,
     holder_socket: PathBuf,
     buffer: Vec<u8>,
     /// Headless emulator fed the same output, so the current screen and scrollback can be read back as text.
@@ -69,6 +73,12 @@ struct Pane {
     restore: Option<(u16, u16)>,
 }
 
+enum ToHolder {
+    Frame(Frame),
+    /// A new connection to the holder, after it hung up on the last one.
+    Connected(UnixStream),
+}
+
 /// Collects the terminal titles (OSC 0/2) a pane sets, in order, until read.
 #[derive(Default)]
 struct TitleWatch(Vec<String>);
@@ -79,11 +89,94 @@ impl vt100::Callbacks for TitleWatch {
     }
 }
 
-/// Claude Code titles its terminal "<status glyph> <task summary>", with a spinner frame as the glyph while it works
+/// Claude Code titles its terminal `<status glyph> <task summary>`, with a spinner frame as the glyph while it works
 /// and plain "Claude Code" before it has a task. Keep the summary only, so the name does not flicker.
 fn task_title(raw: &str) -> Option<String> {
     let title = raw.trim_start_matches(|c: char| !c.is_alphanumeric()).trim();
     (!title.is_empty() && title != "Claude Code").then(|| title.chars().take(80).collect())
+}
+
+/// Writes the tree on its own thread, off the state lock: syncing a file can take a long while (F_FULLFSYNC on macOS),
+/// and everything else waits on that lock.
+#[derive(Default)]
+struct Saver {
+    /// Changes made so far. Bumped under the state lock, so a snapshot taken under it holds every change it counts.
+    changes: AtomicU64,
+    /// The changes the file on disk holds. Locked while writing, so an older snapshot never replaces a newer one.
+    written: Mutex<u64>,
+    requested: Mutex<bool>,
+    wake: Condvar,
+    writes: AtomicUsize,
+}
+
+struct Snapshot {
+    changes: u64,
+    path: PathBuf,
+    /// `None` when there is nothing to keep.
+    saved: Option<Saved>,
+}
+
+impl Saver {
+    fn request(&self) {
+        self.changes.fetch_add(1, Ordering::SeqCst);
+        *guard(&self.requested) = true;
+        self.wake.notify_one();
+    }
+
+    /// An empty tree leaves no file behind, so throwaway daemons (tests, smoke runs) clean up after themselves.
+    fn write(&self, snapshot: Snapshot) -> Result<()> {
+        let mut written = guard(&self.written);
+        if snapshot.changes <= *written {
+            return Ok(());
+        }
+        let path = &snapshot.path;
+        match snapshot.saved {
+            None => match std::fs::remove_file(path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+                _ => {},
+            },
+            Some(saved) => {
+                if let Some(dir) = path.parent() {
+                    paths::private_dir(dir, true)?;
+                }
+                let tmp = path.with_extension("json.tmp");
+                // Synced before the rename, so a crash leaves the old tree or the new one, never an empty file.
+                let mut file = std::fs::File::create(&tmp)?;
+                std::io::Write::write_all(&mut file, &serde_json::to_vec_pretty(&saved)?)?;
+                file.sync_all()?;
+                std::fs::rename(&tmp, path)?;
+            },
+        }
+        *written = snapshot.changes;
+        self.writes.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Saves a while after each request, until the state is gone.
+    fn run(&self, state: &Weak<Mutex<State>>) {
+        loop {
+            let mut requested = guard(&self.requested);
+            while !*requested {
+                if state.strong_count() == 0 {
+                    return;
+                }
+                requested = self
+                    .wake
+                    .wait_timeout(requested, Duration::from_secs(1))
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0;
+            }
+            drop(requested);
+            std::thread::sleep(SAVE_DELAY);
+            *guard(&self.requested) = false;
+            let Some(shared) = state.upgrade() else { return };
+            let snapshot = lock(&shared).snapshot();
+            drop(shared);
+            if let Err(e) = self.write(snapshot) {
+                tracing::warn!("saving the workspaces: {e:#}");
+            }
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -109,7 +202,8 @@ struct Startup<'a> {
 
 impl State {
     pub fn new(socket: PathBuf, claude_settings: Option<PathBuf>) -> Shared {
-        Arc::new(Mutex::new(State {
+        let saver = Arc::new(Saver::default());
+        let shared = Arc::new(Mutex::new(State {
             workspaces: BTreeMap::new(),
             folders: Vec::new(),
             folder_order: Vec::new(),
@@ -117,10 +211,17 @@ impl State {
             events: broadcast::channel(1024).0,
             holders: paths::holders_dir(&socket),
             state_file: paths::state_file(&socket),
+            saver: saver.clone(),
             socket,
             claude_settings,
             update_blocked: None,
-        }))
+        }));
+        let state = Arc::downgrade(&shared);
+        std::thread::Builder::new()
+            .name("saver".into())
+            .spawn(move || saver.run(&state))
+            .expect("starting the saver thread");
+        shared
     }
 
     fn list(&self) -> Vec<Workspace> {
@@ -130,9 +231,7 @@ impl State {
     /// Every change goes through here, so it is also where the tree is saved.
     fn emit_workspaces(&self) {
         let _ = self.events.send(Event::Workspaces { workspaces: self.list() });
-        if let Err(e) = self.save() {
-            tracing::warn!("saving {}: {e:#}", self.state_file.display());
-        }
+        self.saver.request();
     }
 
     fn folders_event(&self) -> Event {
@@ -145,9 +244,7 @@ impl State {
     fn emit_folders(&mut self) {
         self.folder_order = folder_order(std::mem::take(&mut self.folder_order), &self.folders);
         let _ = self.events.send(self.folders_event());
-        if let Err(e) = self.save() {
-            tracing::warn!("saving {}: {e:#}", self.state_file.display());
-        }
+        self.saver.request();
     }
 
     /// Moves `path` to the front of the remembered folders.
@@ -160,29 +257,22 @@ impl State {
         self.emit_folders();
     }
 
-    /// An empty tree leaves no file behind, so throwaway daemons (tests, smoke runs) clean up after themselves.
+    fn snapshot(&self) -> Snapshot {
+        let empty = self.workspaces.is_empty() && self.folders.is_empty();
+        Snapshot {
+            changes: self.saver.changes.load(Ordering::SeqCst),
+            path: self.state_file.clone(),
+            saved: (!empty).then(|| Saved {
+                workspaces: self.list(),
+                folders: self.folders.clone(),
+                folder_order: self.folder_order.clone(),
+            }),
+        }
+    }
+
+    /// Writes whatever the saver has not yet.
     fn save(&self) -> Result<()> {
-        if self.workspaces.is_empty() && self.folders.is_empty() {
-            match std::fs::remove_file(&self.state_file) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
-                _ => return Ok(()),
-            }
-        }
-        if let Some(dir) = self.state_file.parent() {
-            paths::private_dir(dir, true)?;
-        }
-        let tmp = self.state_file.with_extension("json.tmp");
-        let saved = Saved {
-            workspaces: self.list(),
-            folders: self.folders.clone(),
-            folder_order: self.folder_order.clone(),
-        };
-        // Synced before the rename, so a crash leaves the old tree or the new one, never an empty file.
-        let mut file = std::fs::File::create(&tmp)?;
-        std::io::Write::write_all(&mut file, &serde_json::to_vec_pretty(&saved)?)?;
-        file.sync_all()?;
-        std::fs::rename(&tmp, &self.state_file)?;
-        Ok(())
+        self.saver.write(self.snapshot())
     }
 
     fn workspace_mut(&mut self, id: WorkspaceId) -> Result<&mut Workspace> {
@@ -268,6 +358,8 @@ impl State {
         }
         cmd.stdin(Stdio::null()).stdout(Stdio::null());
         // Its own session, so nothing aimed at ftmd (a signal to its process group, its terminal closing) reaches it.
+        // SAFETY: between fork and exec the closure only calls setsid, which is async-signal-safe and does not
+        // allocate.
         unsafe {
             cmd.pre_exec(|| {
                 libc::setsid();
@@ -339,7 +431,9 @@ impl State {
             },
         );
         // Sent once the pane is in a layout (`emit_replay`): a client drops output for panes it does not know.
-        self.pane_output(id, &replay, false);
+        if self.pane_output(id, &replay, false) {
+            let _ = nudge(shared, self, id);
+        }
         let shared = shared.clone();
         std::thread::Builder::new()
             .name(format!("pane-{id}"))
@@ -348,11 +442,12 @@ impl State {
         Ok(())
     }
 
-    /// `live` output goes out to subscribers as it comes; a holder's replay is sent whole by the caller.
-    fn pane_output(&mut self, id: PaneId, bytes: &[u8], live: bool) {
-        let Some(pane) = self.panes.get_mut(&id) else { return };
+    /// `live` output goes out to subscribers as it comes; a holder's replay is sent whole by the caller. Returns
+    /// whether the emulator had to start the screen over, which leaves it blank until the pane repaints (`nudge`).
+    fn pane_output(&mut self, id: PaneId, bytes: &[u8], live: bool) -> bool {
+        let Some(pane) = self.panes.get_mut(&id) else { return false };
         pane.buffer.extend_from_slice(bytes);
-        process(id, &mut pane.screen, bytes);
+        let restarted = !process(id, &mut pane.screen, bytes);
         let (workspace, titles) = (pane.workspace, std::mem::take(&mut pane.screen.callbacks_mut().0));
         if pane.buffer.len() > BUFFER_CAP + BUFFER_SLACK {
             let excess = pane.buffer.len() - BUFFER_CAP;
@@ -374,6 +469,7 @@ impl State {
             ws.auto_title = Some(title);
             self.emit_workspaces();
         }
+        restarted
     }
 
     /// The pane's whole buffer, for subscribers to redraw it from scratch.
@@ -390,19 +486,32 @@ impl State {
     fn send_to_holder(&self, pane: PaneId, frame: Frame) -> Result<()> {
         self.pane(pane)?
             .holder
-            .send(frame)
+            .send(ToHolder::Frame(frame))
             .map_err(|_| eyre!("pane {pane}'s holder connection is closed"))
     }
 }
 
-fn holder_writer(id: PaneId, mut stream: UnixStream) -> Result<mpsc::Sender<Frame>> {
+/// Frames that fail to go out, because the holder hung up on ftmd, wait for the connection `reconnect` makes.
+fn holder_writer(id: PaneId, stream: UnixStream) -> Result<mpsc::Sender<ToHolder>> {
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new()
         .name(format!("pane-{id}-in"))
         .spawn(move || {
-            for frame in rx {
-                if frame::write(&mut stream, &frame).is_err() {
-                    return;
+            let mut stream = Some(stream);
+            let mut queued = std::collections::VecDeque::new();
+            for msg in rx {
+                match msg {
+                    ToHolder::Frame(frame) => queued.push_back(frame),
+                    ToHolder::Connected(new) => stream = Some(new),
+                }
+                while let Some(conn) = stream.as_mut()
+                    && let Some(frame) = queued.front()
+                {
+                    if frame::write(conn, frame).is_err() {
+                        stream = None;
+                        break;
+                    }
+                    queued.pop_front();
                 }
             }
         })
@@ -429,14 +538,15 @@ fn handshake(stream: &UnixStream) -> Result<(UnixStream, (u16, u16), Vec<u8>)> {
 }
 
 /// A panic in the emulator would otherwise end the pane's reader and leave the pane frozen; the screen starts over
-/// instead, while the raw output (what the app shows) carries on.
-fn process(id: PaneId, screen: &mut vt100::Parser<TitleWatch>, bytes: &[u8]) {
+/// instead, while the raw output (what the app shows) carries on. Returns false when it had to.
+fn process(id: PaneId, screen: &mut vt100::Parser<TitleWatch>, bytes: &[u8]) -> bool {
     let processed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| screen.process(bytes)));
     if processed.is_err() {
         let (rows, cols) = screen.screen().size();
         tracing::error!("pane {id}: the terminal emulator panicked; starting its screen over");
         *screen = vt100::Parser::new_with_callbacks(rows.max(MIN_ROWS), cols.max(MIN_COLS), SCROLLBACK, TitleWatch::default());
     }
+    processed.is_ok()
 }
 
 #[derive(Debug)]
@@ -466,6 +576,14 @@ pub fn check_saved(shared: &Shared) -> Result<()> {
     read_saved(&path).map(drop)
 }
 
+/// For shutdown: the last changes may still be waiting for the saver.
+pub fn flush(shared: &Shared) -> Result<()> {
+    let state = lock(shared);
+    state
+        .save()
+        .wrap_err_with(|| format!("saving {}", state.state_file.display()))
+}
+
 /// Saves the tree and keeps the lock, so nothing changes or saves it again while a new ftmd takes over.
 pub fn freeze(shared: &Shared) -> Result<MutexGuard<'_, State>> {
     let state = lock(shared);
@@ -485,7 +603,7 @@ fn folder_order(order: Vec<PathBuf>, folders: &[Folder]) -> Vec<PathBuf> {
         .filter(|p| known.contains(p) && seen.insert(p.clone()))
         .collect();
     let mut rest: Vec<&PathBuf> = folders.iter().map(|f| &f.path).filter(|p| !seen.contains(*p)).collect();
-    rest.sort_by_key(|p| (p.file_name().map(|n| n.to_string_lossy().to_lowercase()), p.to_path_buf()));
+    rest.sort_by_key(|p| (p.file_name().map(|n| n.to_string_lossy().to_lowercase()), (*p).clone()));
     out.extend(rest.into_iter().cloned());
     out
 }
@@ -612,7 +730,11 @@ fn script(startup: Startup, agent: Option<&str>, settings: bool) -> Option<Strin
 }
 
 fn lock(shared: &Shared) -> MutexGuard<'_, State> {
-    shared.lock().unwrap_or_else(PoisonError::into_inner)
+    guard(shared)
+}
+
+fn guard<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// The first `Output` after (re)connecting is the holder's whole buffer, which rebuilds the screen after a restart.
@@ -627,7 +749,9 @@ fn read_loop(shared: Shared, id: PaneId, mut holder: UnixStream) {
                 if !state.panes.contains_key(&id) {
                     return;
                 }
-                state.pane_output(id, &bytes, true);
+                if state.pane_output(id, &bytes, true) {
+                    let _ = nudge(&shared, &state, id);
+                }
                 continue;
             },
             Ok(Some(_)) => continue,
@@ -660,12 +784,29 @@ fn reconnect(shared: &Shared, id: PaneId) -> Result<Option<UnixStream>> {
     let (read, (rows, cols), replay) = handshake(&stream)?;
     let mut state = lock(shared);
     let Some(pane) = state.panes.get_mut(&id) else {
+        // Closed while this connection was being made, which may have replaced the one `reap` sent its Kill on.
+        let _ = frame::write(&mut &stream, &Frame::Kill);
         return Ok(None);
     };
-    pane.holder = holder_writer(id, stream)?;
+    let _ = pane.holder.send(ToHolder::Connected(stream));
+    // A resize sent while the holder had hung up may not have reached it.
+    let wanted = pane.screen.screen().size();
     pane.buffer.clear();
     pane.screen = vt100::Parser::new_with_callbacks(rows, cols, SCROLLBACK, TitleWatch::default());
-    state.pane_output(id, &replay, false);
+    let restarted = state.pane_output(id, &replay, false);
+    if let Some(pane) = state.panes.get_mut(&id)
+        && (rows, cols) != wanted
+        && !pane.exited
+    {
+        pane.screen.screen_mut().set_size(wanted.0, wanted.1);
+        let _ = pane.holder.send(ToHolder::Frame(Frame::Resize {
+            rows: wanted.0,
+            cols: wanted.1,
+        }));
+    }
+    if restarted {
+        let _ = nudge(shared, &state, id);
+    }
     state.emit_replay(id);
     Ok(Some(read))
 }
@@ -690,7 +831,7 @@ fn pane_exited(shared: &Shared, id: PaneId, why: &str) {
             const NOTE: &[u8] = b"\r\n\x1b[31m[ftm] the agent exited before it started\x1b[0m\r\n";
             pane.exited = true;
             pane.buffer.extend_from_slice(NOTE);
-            process(id, &mut pane.screen, NOTE);
+            let _ = process(id, &mut pane.screen, NOTE);
             set_status(ws, Status::Failed, 0);
             let _ = state.events.send(Event::Output {
                 pane: id,
@@ -720,10 +861,23 @@ fn close_pane(shared: &Shared, id: PaneId, why: &str) {
 
 /// Asks the holder to kill everything on the pane's terminal (it does the SIGHUP, then SIGKILL after 2s), and
 /// returns a handle that finishes once the holder is gone, i.e. no process of the pane is left.
+///
+/// The Kill also goes over a connection of its own: the pane's may be one the holder already hung up on, with
+/// `read_loop` yet to reconnect. A new connection replaces the old one and is read until the holder exits, so the
+/// replay and output it gets meanwhile never block the holder.
 fn reap(pane: Pane) -> std::thread::JoinHandle<()> {
-    let _ = pane.holder.send(Frame::Kill);
+    let _ = pane.holder.send(ToHolder::Frame(Frame::Kill));
     std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(10);
+        if let Ok(mut stream) = UnixStream::connect(&pane.holder_socket)
+            && frame::write(&mut stream, &Frame::Kill).is_ok()
+        {
+            let mut buf = vec![0u8; 64 << 10];
+            while let Some(left) = deadline.checked_duration_since(Instant::now())
+                && stream.set_read_timeout(Some(left.max(Duration::from_millis(1)))).is_ok()
+                && matches!(std::io::Read::read(&mut stream, &mut buf), Ok(n) if n > 0)
+            {}
+        }
         while pane.holder_socket.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(25));
         }
@@ -839,9 +993,15 @@ pub fn handle(shared: &Shared, request: Request, peer: Option<i32>) -> Response 
             let mut state = lock(shared);
             state
                 .workspace_mut(id)
-                .map(|ws| set_status(ws, status, background_agents))
-                .map(|()| {
-                    state.emit_workspaces();
+                .map(|ws| {
+                    let before = (ws.status, ws.unseen, ws.background_agents);
+                    set_status(ws, status, background_agents);
+                    before != (ws.status, ws.unseen, ws.background_agents)
+                })
+                .map(|changed| {
+                    if changed {
+                        state.emit_workspaces();
+                    }
                     Response::Ok
                 })
         },
@@ -1119,11 +1279,23 @@ fn resize(shared: &Shared, pane: PaneId, cols: u16, rows: u16, peer: Option<i32>
     if p.exited {
         return Ok(Response::Ok);
     }
-    if !unchanged || cols < 2 {
+    if unchanged {
+        nudge(shared, &state, pane)?;
+    } else {
         state.send_to_holder(pane, Frame::Resize { rows, cols })?;
-        return Ok(Response::Ok);
     }
-    state.send_to_holder(pane, Frame::Resize { rows, cols: cols - 1 })?;
+    Ok(Response::Ok)
+}
+
+/// Makes the pane's TUI repaint: resizes its terminal by a column, and back to the pane's size a moment later.
+fn nudge(shared: &Shared, state: &State, pane: PaneId) -> Result<()> {
+    let p = state.pane(pane)?;
+    if p.exited {
+        return Ok(());
+    }
+    let (rows, cols) = p.screen.screen().size();
+    let cols = if cols > MIN_COLS { cols - 1 } else { cols + 1 };
+    state.send_to_holder(pane, Frame::Resize { rows, cols })?;
     let shared = shared.clone();
     std::thread::spawn(move || {
         std::thread::sleep(REDRAW_NUDGE);
@@ -1135,7 +1307,7 @@ fn resize(shared: &Shared, pane: PaneId, cols: u16, rows: u16, peer: Option<i32>
             let _ = state.send_to_holder(pane, Frame::Resize { rows, cols });
         }
     });
-    Ok(Response::Ok)
+    Ok(())
 }
 
 fn input(shared: &Shared, pane: PaneId, data: &str) -> Result<Response> {
@@ -1197,8 +1369,33 @@ mod tests {
         state.emit_folders();
         assert_eq!(state.folder_order, paths(&["/c", "/b", "/0"]));
 
+        state.save().unwrap();
         let saved: Saved = serde_json::from_slice(&std::fs::read(&state.state_file).unwrap()).unwrap();
         assert_eq!(saved.folder_order, state.folder_order);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_burst_of_changes_is_saved_once() {
+        let dir = std::env::temp_dir().join(format!("ftmd-burst-{}", std::process::id()));
+        let shared = State::new(dir.join("ftmd.sock"), None);
+        lock(&shared).state_file = dir.join("state.json");
+        for i in 0..100 {
+            lock(&shared).remember_folder(format!("/{i}").into());
+        }
+        let saver = lock(&shared).saver.clone();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while *guard(&saver.written) < saver.changes.load(Ordering::SeqCst) {
+            assert!(Instant::now() < deadline, "the burst was never saved");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let saved: Saved = serde_json::from_slice(&std::fs::read(dir.join("state.json")).unwrap()).unwrap();
+        assert_eq!(saved.folders.len(), 100);
+        assert!(
+            saver.writes.load(Ordering::Relaxed) <= 2,
+            "{} writes",
+            saver.writes.load(Ordering::Relaxed)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1221,9 +1418,9 @@ mod tests {
     #[test]
     fn an_emulator_panic_starts_the_screen_over() {
         let mut screen = vt100::Parser::new_with_callbacks(1, 1, SCROLLBACK, TitleWatch::default());
-        process(PaneId::nil(), &mut screen, "一\n一\n".as_bytes());
+        assert!(!process(PaneId::nil(), &mut screen, "一\n一\n".as_bytes()));
         assert_eq!(screen.screen().size(), (MIN_ROWS, MIN_COLS));
-        process(PaneId::nil(), &mut screen, b"ok");
+        assert!(process(PaneId::nil(), &mut screen, b"ok"));
         assert!(screen.screen().contents().contains("ok"));
     }
 
