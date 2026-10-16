@@ -15,6 +15,7 @@ import { type KeyProtocol, kittyKeyboard } from "./kitty.ts";
 import { loadSounds, play, type SoundEntry, type SoundSettings } from "./sounds";
 import "./style.css";
 import { Tabs } from "./tabs.ts";
+import { compareVersions, versionNotice } from "./version.ts";
 import { type AppScroll, type AppWheel, appWheel } from "./wheel.ts";
 
 type Id = string;
@@ -1615,19 +1616,15 @@ const events = listen<FtmEvent>("ftm-event", ({ payload }) => {
   }
 });
 
-/// The daemon's version as of the last (re)connect; one older than the app may not know how to run a command.
-let daemonVersion: string | null = null;
+/// Whether the daemon, as of the last (re)connect, is at least as new as the app; an older one may not know how to
+/// run a command.
+let daemonCurrent = false;
 
 // Each (re)connect of the event stream reports the daemon's version, then replays any update_blocked.
 const daemon = listen<{ version: string; app_version: string }>("ftm-daemon", ({ payload }) => {
-  daemonVersion = payload.version === payload.app_version ? payload.version : null;
+  daemonCurrent = compareVersions(payload.version, payload.app_version) >= 0;
   notice("update", null);
-  notice(
-    "version",
-    payload.version === payload.app_version
-      ? null
-      : `FTM was updated (ftmd ${payload.version}, app ${payload.app_version}). Relaunch FTM to finish; your sessions stay open.`,
-  );
+  notice("version", versionNotice(payload.version, payload.app_version));
 });
 Promise.all([events, daemon]).then(() => invoke("subscribe"));
 
@@ -1686,7 +1683,7 @@ async function checkForRelease() {
 /// Runs the install in a pane of its own, where makepkg shows its progress and sudo can ask for the password.
 async function installRelease(release: Release, script: string) {
   // An ftmd older than this app ignores the command and would open a bare shell.
-  if (daemonVersion === null) {
+  if (!daemonCurrent) {
     notice("release", `To install ${releaseName(release)}, run this in a terminal:\n\n${script}`, "info");
     return;
   }
