@@ -7,6 +7,7 @@ use ftm_core::paths;
 use ftm_core::protocol::{Event, Request, Response};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::Duration;
@@ -47,7 +48,22 @@ impl Conn {
     }
 }
 
-/// Puts stdin in raw mode and restores it on drop, however attach ends.
+/// The terminal settings to put back, for the signal handlers.
+static ORIGINAL: OnceLock<libc::termios> = OnceLock::new();
+
+const FATAL_SIGNALS: [libc::c_int; 4] = [libc::SIGTERM, libc::SIGHUP, libc::SIGINT, libc::SIGQUIT];
+
+extern "C" fn on_fatal(sig: libc::c_int) {
+    unsafe {
+        if let Some(original) = ORIGINAL.get() {
+            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, original);
+        }
+        libc::signal(sig, libc::SIG_DFL);
+        libc::raise(sig);
+    }
+}
+
+/// Puts stdin in raw mode and restores it on drop, however attach ends, or on a signal that kills it.
 struct RawMode(libc::termios);
 
 impl RawMode {
@@ -57,9 +73,15 @@ impl RawMode {
             if libc::tcgetattr(libc::STDIN_FILENO, &mut original) != 0 {
                 bail!("stdin is not a terminal");
             }
+            let _ = ORIGINAL.set(original);
+            for sig in FATAL_SIGNALS {
+                libc::signal(sig, on_fatal as *const () as libc::sighandler_t);
+            }
             let mut raw = original;
             libc::cfmakeraw(&mut raw);
-            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw);
+            if libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw) != 0 {
+                bail!("putting the terminal in raw mode: {}", std::io::Error::last_os_error());
+            }
             Ok(RawMode(original))
         }
     }

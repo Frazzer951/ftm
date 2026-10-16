@@ -10,6 +10,7 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -274,6 +275,22 @@ fn attach_ends_when_its_input_is_gone() {
         status.is_some()
     });
     assert!(status.unwrap().success());
+}
+
+#[test]
+fn attach_restores_the_terminal_when_killed() {
+    let dir = temp_root("attach-term");
+    let daemon = start_daemon("attach-term", |_| {});
+    let mut req = Conn::open(&daemon.socket);
+    let ws = spawn_terminal(&mut req, &dir, "term");
+    for sig in [libc::SIGTERM, libc::SIGHUP] {
+        let (mut child, _master, slave) = attach_on_loose_pty(&daemon.socket, ws.id);
+        wait_for("raw mode", Duration::from_secs(10), || raw(&slave));
+        unsafe { libc::kill(child.id() as i32, sig) };
+        let status = child.wait().unwrap();
+        assert_eq!(status.signal(), Some(sig));
+        assert!(!raw(&slave), "terminal left raw after signal {sig}");
+    }
 }
 
 #[test]
