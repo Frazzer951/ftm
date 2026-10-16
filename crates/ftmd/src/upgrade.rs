@@ -68,12 +68,13 @@ impl Inherited {
         let fd = |key: &str| {
             let value = std::env::var(key).ok();
             unsafe { std::env::remove_var(key) };
-            value?.parse::<RawFd>().ok().filter(|fd| *fd > 2)
+            // Setting close-on-exec also checks the fd is open: one that is not must never be owned.
+            value?
+                .parse::<RawFd>()
+                .ok()
+                .filter(|&fd| fd > 2 && unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } == 0)
         };
         let (listen, ready) = (fd(LISTEN_FD), fd(READY_FD));
-        for fd in [listen, ready].into_iter().flatten() {
-            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
-        }
         let (listen, ready) = (listen?, ready?);
         Some(Inherited {
             listen,

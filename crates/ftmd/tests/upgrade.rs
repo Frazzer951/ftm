@@ -3,7 +3,9 @@
 mod common;
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
-use common::{Conn, alive, copy_executable, start_daemon_logged, temp_root, wait_for, wait_for_output, write_executable};
+use common::{
+    Conn, alive, copy_executable, start_daemon, start_daemon_logged, temp_root, wait_for, wait_for_output, write_executable,
+};
 use ftm_core::model::{Kind, PaneId, Workspace};
 use ftm_core::protocol::{Event, Request, Response, SpawnRequest};
 use std::os::unix::fs::PermissionsExt;
@@ -232,4 +234,15 @@ fn a_new_ftmd_that_fails_to_start_leaves_the_old_one_serving() {
     ping(&mut fresh);
 
     drop(daemon);
+}
+
+/// Hand-over fds that are not open (a stale environment) are no hand-over at all: ftmd starts as usual, and never
+/// takes ownership of an fd number something else may open later.
+#[test]
+fn a_hand_over_of_closed_fds_is_ignored() {
+    let daemon = start_daemon("stale-fds", |c| {
+        c.env("FTMD_LISTEN_FD", "900").env("FTMD_READY_FD", "901");
+    });
+    let mut conn = Conn::open(&daemon.socket);
+    assert!(!ping(&mut conn).is_empty());
 }
