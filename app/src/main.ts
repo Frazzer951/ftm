@@ -69,7 +69,9 @@ interface PaneView {
 
 const isMac = navigator.userAgent.includes("Mac");
 
-const report = (message: string) => invoke("log", { message }).catch(() => {});
+const report = (message: string) => {
+  invoke("log", { message }).catch(() => {});
+};
 const consoleError = console.error.bind(console);
 console.error = (...args: unknown[]) => {
   consoleError(...args);
@@ -97,7 +99,9 @@ const views = new Map<Id, PaneView>();
 
 // biome-ignore lint/suspicious/noExplicitAny: ftmd responses are untyped JSON whose shape depends on the op
 const request = (req: object): Promise<any> => invoke("request", { request: req });
-const send = (req: object) => invoke("send", { request: req }).catch(console.error);
+const send = (req: object) => {
+  invoke("send", { request: req }).catch(console.error);
+};
 
 function encode(text: string): string {
   let bin = "";
@@ -323,8 +327,9 @@ interface UpdateSettings {
 }
 let updateSettings: UpdateSettings = { check: null, channel: null };
 
-const playSound = (name: string, volume = soundSettings.volume) =>
+const playSound = (name: string, volume = soundSettings.volume) => {
   play(name, volume).catch((err) => console.error(`playing ${name}`, err));
+};
 
 /// A searchable list of installed families (monospace first, the rest behind "Show all fonts"), each drawn in its own
 /// font, with "Custom…" for a CSS font stack, and a preview line that shows ligatures on or off.
@@ -1159,7 +1164,7 @@ function startRename(id: Id) {
   };
   input.onkeydown = (e) => {
     e.stopPropagation();
-    if (e.key === "Enter") save();
+    if (e.key === "Enter") save().catch(console.error);
     else if (e.key === "Escape" && !done) finish();
     else input.classList.remove("invalid");
   };
@@ -1449,7 +1454,7 @@ function shortcut(e: KeyboardEvent) {
   if (!action) return;
   e.preventDefault();
   e.stopPropagation();
-  if (!e.repeat) action();
+  if (!e.repeat) Promise.resolve(action()).catch(console.error);
 }
 
 let openSpawn: (preset?: { folder?: string; worktree?: boolean }) => void = () => {};
@@ -1505,9 +1510,14 @@ function setupSpawnDialog() {
   $("add").onclick = () => openSpawn();
 
   $("pick").onclick = async () => {
-    const dir = await open({ directory: true, defaultPath: folder ?? undefined });
-    if (typeof dir === "string") await choose(dir);
-    showRecent();
+    try {
+      const dir = await open({ directory: true, defaultPath: folder ?? undefined });
+      if (typeof dir === "string") await choose(dir);
+      showRecent();
+    } catch (err) {
+      console.error(err);
+      error.textContent = String(err);
+    }
   };
 
   create.onclick = async (e) => {
@@ -1614,7 +1624,17 @@ const daemon = listen<{ version: string; app_version: string }>("ftm-daemon", ({
   notice("update", null);
   notice("version", versionNotice(payload.version, payload.app_version));
 });
-Promise.all([events, daemon]).then(() => invoke("subscribe"));
+/// Retried until it takes: without the stream, the sidebar stays empty.
+function subscribe(attempt = 0) {
+  invoke("subscribe")
+    .then(() => notice("subscribe", null))
+    .catch((err) => {
+      console.error("subscribing to ftmd", err);
+      notice("subscribe", `Could not connect to ftmd: ${err}. Retrying…`, "error");
+      setTimeout(() => subscribe(attempt + 1), Math.min(30_000, 1000 * 2 ** attempt));
+    });
+}
+Promise.all([events, daemon]).then(() => subscribe(), (err) => console.error("listening for ftmd events", err));
 
 interface Release {
   version: string;

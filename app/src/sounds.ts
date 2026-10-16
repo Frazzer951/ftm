@@ -58,7 +58,7 @@ export async function play(name: string, volume: number) {
     if (playing !== source) return;
     playing = null;
     // A running context holds the output device open and keeps waking the audio thread.
-    ac.suspend();
+    ac.suspend().catch(() => {});
   };
   playing?.stop();
   playing = source;
