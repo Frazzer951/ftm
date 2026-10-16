@@ -363,6 +363,8 @@ fn subscribe(
             break;
         }
         match serde_json::from_str::<Event>(&line) {
+            // From a newer ftmd; the page would not know it either.
+            Ok(Event::Unknown) => {},
             Ok(event) => emit(event),
             Err(e) => eprintln!("bad event from ftmd: {e}"),
         }
@@ -493,6 +495,7 @@ mod tests {
                     version: None,
                     reason: format!("stream {n}"),
                 };
+                stream.write_all(b"{\"event\":\"from_the_future\"}\n").unwrap();
                 stream.write_all(&line(&event)).unwrap();
                 if n > 0 {
                     std::thread::sleep(Duration::from_secs(60));
@@ -504,9 +507,10 @@ mod tests {
         let versions = tx.clone();
         events.restart(
             move |event| {
-                if let Event::UpdateBlocked { reason, .. } = event {
-                    let _ = tx.send(reason);
-                }
+                let _ = tx.send(match event {
+                    Event::UpdateBlocked { reason, .. } => reason,
+                    other => format!("{other:?}"),
+                });
             },
             move |version| {
                 let _ = versions.send(version);
