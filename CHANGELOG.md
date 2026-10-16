@@ -1,5 +1,124 @@
 # Changelog
 
+## [0.1.9] - 2026-10-16
+
+### Daemon
+
+- test(ftmd): write test executables from a child process to stop ETXTBSY flakes
+- test(ftmd): remove each test's temp dirs and hook settings file when it ends
+- test(ftmd): give every test daemon its own config and data dirs
+- test(ftmd): pass the agent command to script() instead of setting FTM_AGENT_CMD in a test
+- test(ftmd): keep the user's git config and login profile out of the tests
+- test(ftmd): check the mode of ftmd's state dir by name, not as the first entry
+- fix(ftmd): cap holder frame sizes and test malformed frames
+- fix(ftmd): keep serving when a pane stops reading its input
+- fix(ftmd): make Kill finish off jobs that outlive the shell
+- fix(ftmd): reconnect to a holder that gave up on a stalled ftmd
+- fix(ftmd): clamp zero-size resizes instead of panicking the emulator
+- fix(ftmd): keep accepting after a failed accept instead of exiting
+- fix(ftmd): sync saves and start empty past an unreadable state file
+- fix(ftmd): notice a binary replaced while ftmd was starting up
+- fix(ftmd): create the readiness pipe close-on-exec atomically on Linux
+- fix(ftmd): parse kinds, statuses and events from newer daemons as Unknown
+- fix(ftmd): send a new pane's first output after the layout that adds it
+- fix(ftmd): give a pane back its size when ftm attach detaches
+- fix(ftmd): don't leave agents starting when their status hooks are missing
+- test(ftmd): wait on conditions instead of fixed sleeps in the robustness tests
+- fix(ftmd): kill a holder that failed to attach through its unreaped child
+- fix(ftmd): ignore a hand-over whose fds are not open
+- test(ftmd): import the logged daemon only in the Linux-only test
+- fix(ftmd): keep pane screens at least 2x2 and survive emulator panics
+- fix(ftmd): name, configure and track nested worktrees by their main repo
+- fix(ftmd): carry changes into a worktree with plumbing diff, immune to the user's diff config
+- fix(ftmd): remove the worktree and new branch when a spawn fails after creating them
+- fix(ftmd): shorten holder socket names to fit macOS's socket path limit
+- fix(ftmd): log the holder's full pane id now that its socket name is shortened
+- test(ftmd): call openpty with mutable pointers so the attach tests build on macOS
+- feat(worktree): start new branches from the freshly fetched remote default
+- fix(ftmd): kill a closed pane's holder over a connection of its own, so the Kill survives a holder hang-up
+- fix(ftmd): queue frames for a holder that hung up until ftmd reconnects, and restore the size clients asked for
+- perf(ftmd): save the tree off the state lock and coalesce bursts, and skip unchanged statuses
+- fix(ftmd): repaint a pane whose emulator started over, and keep the redraw nudge at two columns or more
+- test(ftmd): remove the no-hooks settings dir even when the test fails
+- fix(ftmd): on macOS, kill every process group in a pane's session, not just the shell's and the foreground one
+- fix(ftmd): drop needless std::mem qualifications in the macOS session scan
+- test(ftmd): build ftm once per test binary and run a copy, so cargo relinking target/debug/ftm cannot fail a running test
+
+### App
+
+- feat(app): split the settings dialog into tabs
+- feat(app): show the current theme above the theme list
+- test(app): start the update script test from an empty TMPDIR and show where mktemp went
+- fix(app): stop relaunching a failing ftmd on every request and never run a request twice
+- fix(app): keep only the end of a launcher's stderr while the launched app runs
+- fix(app): treat a fresh repo with no commits as a git repo
+- fix(app): say the right thing when the app is newer than ftmd, and offer installs only to a current ftmd
+- fix(app): type keypad digits and follow the keyboard layout under the kitty keyboard protocol
+- fix(app): play the finished sound when the last background subagent hands back without a new turn
+- fix(app): keep the user's typing and pastes during a pane's replay, dropping only replayed query replies
+- fix(app): retry subscribing to ftmd and catch the promises that could reject unseen
+- fix(app): undo a folder reorder ftmd rejects, and keep window shortcuts out of open dialogs
+- test(app): cover the theme color math
+- fix(app): show workspaces with a kind or status from a newer ftmd, and ignore events it does not know
+- test(app): write the fake ftmd from a child process so its launch cannot hit ETXTBSY
+- fix(app): read what ftmd sent before closing on macOS, where a read timeout cannot be set on a closed socket
+- fix(app): don't forward events from a newer ftmd that the app does not know
+- feat(app): make the Clink and Ding recordings the default alert sounds
+- feat(app): paste dropped file paths into the pane under the drop
+- chore(app): require import extensions and flag floating promises in biome
+- chore(app): turn on noImplicitReturns, noFallthroughCasesInSwitch and noImplicitOverride
+- chore(app): typecheck the tests in CI with @types/node
+- chore(app): add the .ts extension to the colors and sounds imports
+- chore(app): return undefined explicitly from the key handlers
+- fix(app): show a notice when the event stream cannot reach or start ftmd
+- fix(app): unwind a macOS Meta Option to the key in the active layout
+- fix(app): take a shifted symbol's base key from the active layout
+- fix(app): keep keys shaped like query replies during a replay
+
+### Docs
+
+- docs: how to write an ftmd integration test that does not flake
+- docs: describe the holder's stall, kill and reconnect behavior and the Unknown fallbacks
+- docs: file drops onto panes
+- docs: describe the new CI checks and how to run them locally
+- docs: describe how ftmd kills panes across a holder reconnect, and when it saves
+
+### CI and releases
+
+- fix(release): fail the cask and PKGBUILD render when a download fails
+- ci: run clippy and tests with --locked
+- ci: fail on rustdoc warnings
+- ci: lint the workflows with actionlint and the scripts with shellcheck
+- ci: audit Rust and npm dependencies weekly with cargo-deny and npm audit
+- ci: build the release bundles and dry-run install.sh on packaging pull requests
+- ci: pin shellcheck 0.11.0 and silence two intentional SC2015s
+
+### Other
+
+- fix(ftm-core): ignore empty or relative XDG base dir variables
+- fix(ftm-core): list symlinked theme files
+- fix(ftm): end attach when stdin is gone instead of spinning
+- fix(ftm): restore the terminal when attach is killed by a signal
+- fix(ftm): never send ftmd a zero terminal size from attach
+- fix(ftm): report gc removal failures on stderr and exit non-zero
+- fix(ftm): count a gc worktree as removed even when deleting its branch fails
+- fix(ftm): only remove worktrees whose upstream was deleted with --include-upstream-deleted
+- fix(ftm): name the --brief file when it cannot be read
+- fix(ftm): time out on a hung ftmd and say when it hangs up without replying
+- fix(ftm): say when ftmd hangs up on attach without replying
+- chore: declare the minimum supported Rust version, 1.90
+- chore: write dependabot commits as chore(deps): ...
+- chore: enable workspace lints for unsafe, casts and style
+- chore: fix style and pointer lints (allow reasons, redundant closures, semicolons, &raw)
+- chore: make integer casts explicit or checked
+- chore: document every unsafe block with a SAFETY comment
+- refactor(core): share one request reply timeout between the CLI and the app
+- fix(attach): time out requests to a hung ftmd so the terminal leaves raw mode
+- fix(gc): find a worktree's repo the same way as ftmd, via ftm-core
+- fix(gc): reject --include-upstream-deleted with --no-fetch
+- fix(ftm): gc defaults to the remote's default branch, found the same way ftmd picks a new worktree's base
+- fix(ftm): report a failed ls-remote for the default branch again, from ftmd's log and gc's stderr
+
 ## [0.1.8] - 2026-10-15
 
 ### App
