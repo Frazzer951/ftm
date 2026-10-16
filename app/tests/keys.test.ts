@@ -141,7 +141,6 @@ test("encoding under disambiguate", () => {
   assert.equal(enc(key("C", "KeyC", { ctrlKey: true, shiftKey: true })), "\x1b[99;6u");
   assert.equal(enc(key("b", "KeyB", { altKey: true })), "\x1b[98;3u");
   assert.equal(enc(key(" ", "Space", { ctrlKey: true })), "\x1b[32;5u");
-  assert.equal(enc(key("1", "Numpad1")), "\x1b[57400u");
   assert.equal(enc(key("F13", "F13")), "\x1b[57376u");
 });
 
@@ -166,8 +165,49 @@ test("alternate keys add the shifted key", () => {
 });
 
 test("a composing Option is not a modifier, a Meta one is unwound to the physical key", () => {
-  assert.equal(encodeKey(key("∫", "KeyB", { altKey: true }), DISAMBIGUATE, false), undefined);
-  assert.equal(encodeKey(key("∫", "KeyB", { altKey: true }), DISAMBIGUATE, true), "\x1b[98;3u");
+  assert.equal(encodeKey(key("∫", "KeyB", { altKey: true }), DISAMBIGUATE, false, true), undefined);
+  assert.equal(encodeKey(key("∫", "KeyB", { altKey: true }), DISAMBIGUATE, true, true), "\x1b[98;3u");
+});
+
+test("a Meta Option unwinds punctuation and Space to the US key, with its shifted form as the alternate", () => {
+  const enc = (e: KeyEvent, flags = DISAMBIGUATE) => encodeKey(e, flags, true, true);
+  assert.equal(enc(key("≥", "Period", { altKey: true })), "\x1b[46;3u");
+  assert.equal(enc(key("\u00a0", "Space", { altKey: true })), "\x1b[32;3u");
+  assert.equal(enc(key("÷", "Slash", { altKey: true })), "\x1b[47;3u");
+  assert.equal(enc(key("˘", "Period", { altKey: true, shiftKey: true }), 0b101), "\x1b[46:62;4u");
+  assert.equal(enc(key("⁄", "Digit1", { altKey: true, shiftKey: true }), 0b101), "\x1b[49:33;4u");
+});
+
+test("Alt and Shift follow the layout, not the physical key", () => {
+  const enc = (e: KeyEvent, flags = DISAMBIGUATE) => encodeKey(e, flags, true);
+  // Dvorak: o sits on QWERTY's S key.
+  assert.equal(enc(key("o", "KeyS", { altKey: true })), "\x1b[111;3u");
+  assert.equal(enc(key("O", "KeyS", { altKey: true, shiftKey: true }), 0b101), "\x1b[111:79;4u");
+  assert.equal(enc(key("O", "KeyS", { ctrlKey: true, shiftKey: true })), "\x1b[111;6u");
+  // AZERTY: a sits on QWERTY's Q key.
+  assert.equal(enc(key("a", "KeyQ", { ctrlKey: true })), "\x1b[97;5u");
+  assert.equal(enc(key("!", "Digit1", { altKey: true, shiftKey: true }), 0b101), "\x1b[49:33;4u");
+  assert.equal(enc(key("?", "Slash", { ctrlKey: true, shiftKey: true }), 0b101), "\x1b[47:63;6u");
+});
+
+test("keypad keys that type text stay text unless a modifier other than Shift is held", () => {
+  const enc = (e: KeyEvent) => encodeKey(e, DISAMBIGUATE, true);
+  // NumLock on.
+  assert.equal(enc(key("1", "Numpad1")), undefined);
+  assert.equal(enc(key("+", "NumpadAdd")), undefined);
+  assert.equal(enc(key(".", "NumpadDecimal")), undefined);
+  assert.equal(enc(key("*", "NumpadMultiply", { shiftKey: true })), undefined);
+  assert.equal(enc(key("1", "Numpad1", { ctrlKey: true })), "\x1b[57400;5u");
+  assert.equal(enc(key("/", "NumpadDivide", { altKey: true })), "\x1b[57410;3u");
+  assert.equal(enc(key("Enter", "NumpadEnter")), undefined);
+  assert.equal(enc(key("Enter", "NumpadEnter", { shiftKey: true })), "\x1b[57414;2u");
+  // NumLock off: the keypad's own navigation keys.
+  assert.equal(enc(key("End", "Numpad1")), "\x1b[57424u");
+  assert.equal(enc(key("ArrowUp", "Numpad8")), "\x1b[57419u");
+  assert.equal(enc(key("Delete", "NumpadDecimal")), "\x1b[57426u");
+  assert.equal(enc(key("Home", "Numpad7", { ctrlKey: true })), "\x1b[57423;5u");
+  assert.equal(enc(key("Clear", "Numpad5")), "\x1b[E");
+  assert.equal(enc(key("Clear", "Numpad5", { shiftKey: true })), "\x1b[1;2E");
 });
 
 const noKitty = { flags: 0, encode: () => undefined };
@@ -253,5 +293,8 @@ test("a Meta Option goes through the protocol as Alt on macOS, a composing one t
   t.seq(">", 1);
   const b = down("∫", "KeyB", { altKey: true });
   assert.equal(paneKey(b, { mac: true, altIsMeta: true, kitty: t.kitty }), "\x1b[98;3u");
+  assert.equal(paneKey(down("≥", "Period", { altKey: true }), { mac: true, altIsMeta: true, kitty: t.kitty }), "\x1b[46;3u");
+  // Linux Alt does not compose, so the layout's key counts.
+  assert.equal(paneKey(down("o", "KeyS", { altKey: true }), { mac: false, altIsMeta: true, kitty: t.kitty }), "\x1b[111;3u");
   assert.equal(paneKey(b, { mac: true, altIsMeta: false, kitty: t.kitty }), undefined);
 });
