@@ -35,3 +35,6 @@ objc2 = { version = "0.6.5", features = ["exception"] }
 # Once per release, not once per crate.
 [package.metadata.release]
 pre-release-hook = ["../../scripts/release.sh", "{{version}}"]
+
+[lints]
+workspace = true
