@@ -366,7 +366,7 @@ fn subscribe(
     let pong = conn
         .roundtrip(&Request::Ping, Some(Request::Ping.reply_timeout()))
         .map_err(Failure::into_string)?;
-    if let Ok(Response::Pong { version }) = serde_json::from_str(&pong) {
+    if let Ok(Response::Pong { version, .. }) = serde_json::from_str(&pong) {
         connected(version);
     }
     conn.roundtrip(&Request::Subscribe, Some(Request::Ping.reply_timeout()))
@@ -526,6 +526,7 @@ mod tests {
                 stream
                     .write_all(&line(&Response::Pong {
                         version: format!("v{n}"),
+                        features: Vec::new(),
                     }))
                     .unwrap();
                 read.read_line(&mut request).unwrap();

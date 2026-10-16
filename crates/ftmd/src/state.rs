@@ -3,7 +3,7 @@ use crate::worktree;
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use eyre::{Result, WrapErr, bail, eyre};
 use ftm_core::model::{Folder, Kind, Layout, PaneId, SplitDir, Status, Tab, TabId, Workspace, WorkspaceId, Worktree};
-use ftm_core::protocol::{Event, Request, Response, SpawnRequest};
+use ftm_core::protocol::{Event, FEATURE_CLAUDE_ARGS, Request, Response, SpawnRequest};
 use ftm_core::{ENV_AGENT_CMD, ENV_NAME, ENV_PANE_ID, ENV_SOCKET, ENV_WORKSPACE_ID, paths};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -198,6 +198,8 @@ struct Startup<'a> {
     setup: Option<&'a str>,
     brief: Option<&'a str>,
     command: Option<&'a str>,
+    /// Extra arguments for Claude, each in its own `FTM_CLAUDE_ARG_<n>` (from 1).
+    claude_args: &'a [String],
 }
 
 impl State {
@@ -330,6 +332,7 @@ impl State {
                 || key == "FTM_BRIEF"
                 || key == "FTM_SETUP"
                 || key == "FTM_COMMAND"
+                || key.starts_with(ENV_CLAUDE_ARG)
                 || key.starts_with("CLAUDE_CODE_")
                 || key.starts_with("SUPACODE_")
             {
@@ -352,6 +355,9 @@ impl State {
         }
         if let Some(command) = startup.and_then(|s| s.command) {
             cmd.env("FTM_COMMAND", command);
+        }
+        for (i, arg) in startup.map_or(&[][..], |s| s.claude_args).iter().enumerate() {
+            cmd.env(format!("{ENV_CLAUDE_ARG}{}", i + 1), arg);
         }
         if let Some(settings) = &self.claude_settings {
             cmd.env("FTM_CLAUDE_SETTINGS", settings);
@@ -698,6 +704,9 @@ fn shell() -> String {
         .unwrap_or_else(|| if cfg!(target_os = "macos") { "/bin/zsh" } else { "/bin/bash" }.to_string())
 }
 
+/// Prefix of the variables carrying an agent's extra Claude arguments, numbered from 1.
+const ENV_CLAUDE_ARG: &str = "FTM_CLAUDE_ARG_";
+
 /// Runs under the user's login shell, which may be fish, so it sticks to syntax fish, zsh and bash share: optional
 /// arguments are decided here rather than with `${VAR:+...}`, and values come in through quoted variables. The repo's
 /// setup and a terminal's command are POSIX sh whatever the login shell, so each runs in its own `sh` from
@@ -716,7 +725,14 @@ fn script(startup: Startup, agent: Option<&str>, settings: bool) -> Option<Strin
         if startup.named {
             line.push_str(r#" -n "$FTM_NAME""#);
         }
+        for i in 1..=startup.claude_args.len() {
+            line.push_str(&format!(r#" "${ENV_CLAUDE_ARG}{i}""#));
+        }
         if startup.brief.is_some() {
+            // An option that takes several values (`--add-dir <dirs...>`) would otherwise swallow the brief.
+            if !startup.claude_args.is_empty() {
+                line.push_str(" --");
+            }
             line.push_str(r#" "$FTM_BRIEF""#);
         }
         Some(format!(r#"{setup}{line}; exec "$SHELL" -l"#))
@@ -980,6 +996,7 @@ pub fn handle(shared: &Shared, request: Request, peer: Option<i32>) -> Response 
     let result = match request {
         Request::Ping => Ok(Response::Pong {
             version: env!("CARGO_PKG_VERSION").to_string(),
+            features: vec![FEATURE_CLAUDE_ARGS.to_string()],
         }),
         Request::List => Ok(Response::Workspaces {
             workspaces: lock(shared).list(),
@@ -1073,6 +1090,9 @@ fn spawn(shared: &Shared, req: SpawnRequest) -> Result<Response> {
     if req.command.is_some() && req.kind == Kind::Agent {
         bail!("a command only applies to terminals");
     }
+    if !req.claude_args.is_empty() && req.kind != Kind::Agent {
+        bail!("claude arguments only apply to agents");
+    }
     if let Some(parent) = req.parent
         && !lock(shared).workspaces.contains_key(&parent)
     {
@@ -1145,6 +1165,7 @@ fn open_spawned(shared: &Shared, req: &SpawnRequest, created: Option<&worktree::
         setup: setup.as_deref(),
         brief: req.brief.as_deref(),
         command: req.command.as_deref(),
+        claude_args: &req.claude_args,
     };
     let pane = match state.open_pane(shared, id, Some(startup)) {
         Ok(pane) => pane,
@@ -1434,34 +1455,51 @@ mod tests {
 
     #[test]
     fn agent_script_passes_the_same_argv_in_every_shell() {
-        let startup = |named, brief| Startup {
+        let startup = |named, brief, claude_args| Startup {
             agent: true,
             named,
             setup: None,
             brief,
             command: None,
+            claude_args,
         };
         let agent = Some("printf '[%s]'");
-        assert!(!script(startup(false, None), agent, false).unwrap().contains(" -n "));
+        assert!(!script(startup(false, None, &[]), agent, false).unwrap().contains(" -n "));
+        let args = [
+            "--add-dir".to_string(),
+            "a b; $(c) 'd' \"e\" (f) *".to_string(),
+            String::new(),
+        ];
         for shell in ["/bin/sh", "/bin/bash", "/bin/zsh", "/bin/fish", "/usr/bin/fish"]
             .into_iter()
             .filter(|s| Path::new(s).exists())
         {
-            for (settings, brief, want) in [
+            for (settings, brief, claude_args, want) in [
                 (
                     Some("/tmp/s.json"),
                     Some("a \"b\" $(c) (d) ' e"),
+                    &[][..],
                     "[--settings][/tmp/s.json][-n][n][a \"b\" $(c) (d) ' e]",
                 ),
-                (None, None, "[-n][n]"),
+                (None, None, &[], "[-n][n]"),
+                (
+                    None,
+                    Some("go"),
+                    &args[..],
+                    "[-n][n][--add-dir][a b; $(c) 'd' \"e\" (f) *][][--][go]",
+                ),
+                (None, None, &args[..2], "[-n][n][--add-dir][a b; $(c) 'd' \"e\" (f) *]"),
             ] {
-                let line = script(startup(true, brief), agent, settings.is_some()).unwrap();
+                let line = script(startup(true, brief, claude_args), agent, settings.is_some()).unwrap();
                 let line = line.split("; exec").next().unwrap().to_string();
                 let mut cmd = std::process::Command::new(shell);
                 cmd.args(["-c", &line]).env("FTM_NAME", "n");
                 cmd.env_remove("FTM_CLAUDE_SETTINGS").env_remove("FTM_BRIEF");
                 settings.map(|s| cmd.env("FTM_CLAUDE_SETTINGS", s));
                 brief.map(|b| cmd.env("FTM_BRIEF", b));
+                for (i, arg) in claude_args.iter().enumerate() {
+                    cmd.env(format!("{ENV_CLAUDE_ARG}{}", i + 1), arg);
+                }
                 let out = cmd.output().unwrap();
                 assert_eq!(String::from_utf8_lossy(&out.stdout), want, "{shell}");
             }

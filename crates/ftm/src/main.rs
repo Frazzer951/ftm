@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use eyre::{Result, WrapErr, bail};
 use ftm_core::ENV_WORKSPACE_ID;
 use ftm_core::model::{Kind, PaneId, Status, Workspace, WorkspaceId};
-use ftm_core::protocol::{Request, Response, SpawnRequest};
+use ftm_core::protocol::{FEATURE_CLAUDE_ARGS, Request, Response, SpawnRequest};
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -21,7 +21,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Check that ftmd is running
+    /// Check that ftmd is running; prints its version and, when it reports any, its features
     Ping,
     /// List workspaces as a parent/child tree
     Ls {
@@ -54,6 +54,10 @@ enum Command {
         /// Open at the top level even when run inside a workspace (overrides --parent)
         #[arg(long)]
         detached: bool,
+        /// Extra arguments for Claude, after `--` (e.g. `-- --model <id> --permission-mode auto`, or `-- --resume
+        /// <session id>`). Each is passed as its own argument after `-n <name>` and before the brief; agents only. Refused when ftmd is too old to pass them on.
+        #[arg(last = true, value_name = "CLAUDE_ARGS")]
+        claude_args: Vec<String>,
     },
     /// Report agent status (called from Claude Code hooks)
     Status {
@@ -156,6 +160,7 @@ fn main() -> Result<()> {
             brief,
             parent,
             detached,
+            claude_args,
         } => {
             let cwd = match path {
                 Some(p) => std::fs::canonicalize(&p).wrap_err_with(|| format!("{}", p.display()))?,
@@ -163,6 +168,18 @@ fn main() -> Result<()> {
             };
             if brief.is_some() && matches!(kind, KindArg::Terminal) {
                 bail!("--brief only applies to agents");
+            }
+            if !claude_args.is_empty() {
+                if matches!(kind, KindArg::Terminal) {
+                    bail!("claude arguments only apply to agents");
+                }
+                // An older ftmd would drop them and start a plain agent, which for `--resume` means a new session.
+                let Response::Pong { version, features } = client::send(&Request::Ping)? else {
+                    bail!("unexpected response from ftmd");
+                };
+                if !features.iter().any(|f| f == FEATURE_CLAUDE_ARGS) {
+                    bail!("ftmd {version} does not support claude arguments; restart it on this build of ftm");
+                }
             }
             Request::Spawn(SpawnRequest {
                 kind: match kind {
@@ -179,6 +196,7 @@ fn main() -> Result<()> {
                     .map(|p| std::fs::read_to_string(&p).wrap_err_with(|| format!("reading {}", p.display())))
                     .transpose()?,
                 command: None,
+                claude_args,
             })
         },
         Command::Status { status, id, hook } => Request::SetStatus {
@@ -221,7 +239,8 @@ fn main() -> Result<()> {
     };
 
     match client::send(&request)? {
-        Response::Pong { version } => println!("ftmd {version}"),
+        Response::Pong { version, features } if features.is_empty() => println!("ftmd {version}"),
+        Response::Pong { version, features } => println!("ftmd {version} (features: {})", features.join(", ")),
         Response::Spawned { workspace } => println!("{}", workspace.id),
         _ => {},
     }

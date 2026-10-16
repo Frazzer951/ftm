@@ -26,6 +26,7 @@ fn spawn_terminal(conn: &mut Conn, cwd: &Path, name: &str) -> Workspace {
         copy_changes: false,
         brief: None,
         command: None,
+        claude_args: Vec::new(),
     })) else {
         panic!("expected spawned")
     };
@@ -163,6 +164,7 @@ fn ftmd_restart_does_not_rerun_a_terminal_command() {
         copy_changes: false,
         brief: None,
         command: Some(format!("echo run >> '{}'; echo ran-$((2+2))", runs.display())),
+        claude_args: Vec::new(),
     })) else {
         panic!("expected spawned")
     };
@@ -473,6 +475,7 @@ fn folders_and_pins_are_remembered() {
         copy_changes: false,
         brief: None,
         command: None,
+        claude_args: Vec::new(),
     })) else {
         panic!()
     };
