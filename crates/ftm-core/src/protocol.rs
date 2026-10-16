@@ -151,6 +151,9 @@ pub enum Event {
     /// speaks another holder protocol, or does not start). Sent on subscribe until ftmd restarts. `version` is the
     /// new build's, when it could say.
     UpdateBlocked { version: Option<String>, reason: String },
+    /// An event from a newer ftmd. Never sent.
+    #[serde(other)]
+    Unknown,
 }
 
 #[cfg(test)]
@@ -171,6 +174,20 @@ mod tests {
             panic!()
         };
         assert_eq!(req.command.as_deref(), Some("true"));
+    }
+
+    /// An app keeps running across a hot upgrade of ftmd, so it must survive events, kinds and statuses added since.
+    #[test]
+    fn events_from_a_newer_ftmd_still_parse() {
+        let event: Event = serde_json::from_str(r#"{"event":"weather","sunny":true}"#).unwrap();
+        assert!(matches!(event, Event::Unknown));
+        let ws = r#"{"id":"00000000-0000-0000-0000-000000000001","parent":null,"name":"n","kind":"browser","cwd":"/","worktree":null,"status":"pondering","tabs":[]}"#;
+        let Event::Workspaces { workspaces } =
+            serde_json::from_str(&format!(r#"{{"event":"workspaces","workspaces":[{ws}]}}"#)).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!((workspaces[0].kind, workspaces[0].status), (Kind::Unknown, Status::Unknown));
     }
 
     #[test]

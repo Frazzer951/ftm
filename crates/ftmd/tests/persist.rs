@@ -443,3 +443,88 @@ fn pane_exits_are_logged_with_their_cause() {
     let request = format!("ClosePane {{ pane: {closed} }} from pid {}", std::process::id());
     assert!(log.contains(&request), "{log}");
 }
+
+/// A state file ftmd cannot parse (cut short by a crash, say) is set aside, not a reason to never start again.
+#[test]
+fn an_unreadable_state_file_is_set_aside() {
+    let dir = temp_root("bad-state");
+    let mut daemon = start_daemon("bad-state", |_| {});
+    let mut req = Conn::open(&daemon.socket);
+    let ws = spawn_terminal(&mut req, &dir, "t");
+    req.send(&Request::Close {
+        id: ws.id,
+        remove_worktree: false,
+    });
+    assert_eq!(folders(&mut req).len(), 1);
+    drop(req);
+    daemon.stop();
+
+    let state_dir = daemon.state_home().join("ftm");
+    let state_file = std::fs::read_dir(&state_dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|e| e == "json"))
+        .expect("a saved state file");
+    std::fs::write(&state_file, "").unwrap();
+    daemon.restart();
+
+    let mut req = Conn::open(&daemon.socket);
+    assert!(req.list().is_empty());
+    assert!(folders(&mut req).is_empty());
+    let aside: Vec<_> = std::fs::read_dir(&state_dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().contains(".bad-"))
+        .collect();
+    assert_eq!(aside.len(), 1, "{aside:?}");
+}
+
+/// `ftm attach` sizes the pane to its own terminal; once it detaches, the pane goes back to the size the app last set,
+/// which the app does not send again on its own.
+#[test]
+fn detaching_gives_the_pane_back_its_size() {
+    let dir = temp_root("attach-size");
+    let daemon = start_daemon("attach-size", |_| {});
+    let mut req = Conn::open(&daemon.socket);
+    let ws = spawn_terminal(&mut req, &dir, "sized");
+    let pane = ws.tabs[0].layout.panes()[0];
+    req.send(&Request::Resize {
+        pane,
+        cols: 120,
+        rows: 40,
+    });
+
+    let pty = native_pty_system()
+        .openpty(PtySize {
+            rows: 30,
+            cols: 100,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    let mut cmd = CommandBuilder::new(ftm_bin());
+    cmd.args(["attach", &ws.id.to_string()]);
+    cmd.env("FTM_SOCKET", &daemon.socket);
+    let mut child = pty.slave.spawn_command(cmd).unwrap();
+    drop(pty.slave);
+    let mut reader = pty.master.try_clone_reader().unwrap();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        while matches!(reader.read(&mut buf), Ok(n) if n > 0) {}
+    });
+    let mut keys = pty.master.take_writer().unwrap();
+    keys.write_all(b"echo A$((1)); stty size\r").unwrap();
+    wait_for("the attached size", Duration::from_secs(10), || {
+        capture(&mut req, pane).contains("A1\n30 100")
+    });
+
+    keys.write_all(&[0x1d, b'd']).unwrap();
+    wait_for("ftm attach to exit", Duration::from_secs(10), || {
+        matches!(child.try_wait(), Ok(Some(_)))
+    });
+    req.type_in(pane, "echo B$((1)); stty size\n");
+    wait_for("the app's size back", Duration::from_secs(10), || {
+        capture(&mut req, pane).contains("B1\n40 120")
+    });
+}

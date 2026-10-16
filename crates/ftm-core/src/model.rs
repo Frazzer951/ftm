@@ -11,6 +11,9 @@ pub type PaneId = Uuid;
 pub enum Kind {
     Terminal,
     Agent,
+    /// A kind from a newer ftmd. Never sent.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,6 +26,9 @@ pub enum Status {
     Done,
     /// The agent's first pane exited before Claude reported anything.
     Failed,
+    /// A status from a newer ftmd. Never sent.
+    #[serde(other)]
+    Unknown,
 }
 
 impl Status {
@@ -187,6 +193,16 @@ mod tests {
         use Status::*;
         assert!(Working.completes(Idle) && Working.completes(Done) && NeedsInput.completes(Idle));
         assert!(!Idle.completes(Done) && !Starting.completes(Idle) && !Idle.completes(Idle) && !Working.completes(Working));
+    }
+
+    #[test]
+    fn values_from_a_newer_ftmd_still_parse() {
+        assert_eq!(serde_json::from_str::<Status>(r#""pondering""#).unwrap(), Status::Unknown);
+        assert_eq!(serde_json::from_str::<Kind>(r#""browser""#).unwrap(), Kind::Unknown);
+        assert_eq!(
+            serde_json::from_str::<Status>(r#""needs_input""#).unwrap(),
+            Status::NeedsInput
+        );
     }
 
     #[test]

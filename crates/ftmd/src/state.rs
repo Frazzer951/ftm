@@ -11,7 +11,7 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
@@ -24,6 +24,8 @@ const BUFFER_SLACK: usize = 256 << 10;
 /// Long enough that the TUI reads the narrower size before the real one comes back; two SIGWINCHs handled together
 /// look like no change at all.
 const REDRAW_NUDGE: Duration = Duration::from_millis(150);
+/// Input is sent to a holder in frames of at most this size, far below `frame::MAX_PAYLOAD`.
+const INPUT_CHUNK: usize = 64 << 10;
 
 pub struct State {
     workspaces: BTreeMap<WorkspaceId, Workspace>,
@@ -46,7 +48,8 @@ pub struct State {
 /// connection to it plus its own copy of the output.
 struct Pane {
     workspace: WorkspaceId,
-    holder: Arc<Mutex<UnixStream>>,
+    /// Frames for the holder, written by the pane's own thread so a holder that is slow to read stalls nothing else.
+    holder: mpsc::Sender<Frame>,
     holder_socket: PathBuf,
     buffer: Vec<u8>,
     /// Headless emulator fed the same output, so the current screen and scrollback can be read back as text.
@@ -55,6 +58,12 @@ struct Pane {
     startup: bool,
     /// Its holder is gone but it stays on screen, showing why its agent never started.
     exited: bool,
+    /// Processes with an `ftm attach` stream open on the pane, once per stream. Their resizes fit the pane to their
+    /// own terminal.
+    attachers: Vec<i32>,
+    /// The size to go back to once the last attach ends: the pane's size when the first began, or the latest any
+    /// other client set since. Other clients (the app) only resize when their own size changes.
+    restore: Option<(u16, u16)>,
 }
 
 /// Collects the terminal titles (OSC 0/2) a pane sets, in order, until read.
@@ -165,7 +174,10 @@ impl State {
             folders: self.folders.clone(),
             folder_order: self.folder_order.clone(),
         };
-        std::fs::write(&tmp, serde_json::to_vec_pretty(&saved)?)?;
+        // Synced before the rename, so a crash leaves the old tree or the new one, never an empty file.
+        let mut file = std::fs::File::create(&tmp)?;
+        std::io::Write::write_all(&mut file, &serde_json::to_vec_pretty(&saved)?)?;
+        file.sync_all()?;
         std::fs::rename(&tmp, &self.state_file)?;
         Ok(())
     }
@@ -260,7 +272,6 @@ impl State {
             });
         }
         let mut holder = cmd.spawn().wrap_err("starting pane holder")?;
-        let holder_pid = holder.id() as libc::pid_t;
 
         let deadline = Instant::now() + Duration::from_secs(5);
         let stream = loop {
@@ -272,11 +283,11 @@ impl State {
             }
             if Instant::now() > deadline {
                 let _ = holder.kill();
+                let _ = holder.wait();
                 bail!("pane holder did not come up on {}", holder_socket.display());
             }
             std::thread::sleep(Duration::from_millis(10));
         };
-        std::thread::spawn(move || holder.wait());
         // Before the replay goes in, so an unnamed agent's title printed before ftmd connected still names it.
         if startup.is_some_and(|s| s.agent && !s.named)
             && let Some(ws) = self.workspaces.get_mut(&workspace)
@@ -284,8 +295,9 @@ impl State {
             ws.agent_pane = Some(id);
         }
         if let Err(e) = self.attach_holder(shared, workspace, id, holder_socket.clone(), stream, startup.is_some()) {
-            // Closing its PTY hangs up the shell it started.
-            unsafe { libc::kill(holder_pid, libc::SIGKILL) };
+            // Closing its PTY hangs up the shell it started. Killed through the unreaped child, so the pid is still its.
+            let _ = holder.kill();
+            let _ = holder.wait();
             let _ = std::fs::remove_file(&holder_socket);
             if e.downcast_ref::<HolderVersion>().is_some() {
                 return Err(e.wrap_err(
@@ -294,6 +306,7 @@ impl State {
             }
             return Err(e);
         }
+        std::thread::spawn(move || holder.wait());
         Ok(id)
     }
 
@@ -306,32 +319,24 @@ impl State {
         stream: UnixStream,
         startup: bool,
     ) -> Result<()> {
-        let mut read = stream.try_clone()?;
-        read.set_read_timeout(Some(Duration::from_secs(5)))?;
-        let Some(Frame::Hello { version, rows, cols }) = frame::read(&mut read)? else {
-            bail!("pane holder did not say hello");
-        };
-        if version != frame::VERSION {
-            return Err(HolderVersion(version).into());
-        }
+        let (read, (rows, cols), replay) = handshake(&stream)?;
         // The replay goes in before anyone can see the pane, so a capture or attach right after a restart has the screen.
-        let Some(Frame::Output(replay)) = frame::read(&mut read)? else {
-            bail!("pane holder did not send its buffer");
-        };
-        read.set_read_timeout(None)?;
         self.panes.insert(
             id,
             Pane {
                 workspace,
-                holder: Arc::new(Mutex::new(stream)),
+                holder: holder_writer(id, stream)?,
                 holder_socket,
                 buffer: Vec::new(),
                 screen: vt100::Parser::new_with_callbacks(rows, cols, SCROLLBACK, TitleWatch::default()),
                 startup,
                 exited: false,
+                attachers: Vec::new(),
+                restore: None,
             },
         );
-        self.pane_output(id, &replay);
+        // Sent once the pane is in a layout (`emit_replay`): a client drops output for panes it does not know.
+        self.pane_output(id, &replay, false);
         let shared = shared.clone();
         std::thread::Builder::new()
             .name(format!("pane-{id}"))
@@ -340,7 +345,8 @@ impl State {
         Ok(())
     }
 
-    fn pane_output(&mut self, id: PaneId, bytes: &[u8]) {
+    /// `live` output goes out to subscribers as it comes; a holder's replay is sent whole by the caller.
+    fn pane_output(&mut self, id: PaneId, bytes: &[u8], live: bool) {
         let Some(pane) = self.panes.get_mut(&id) else { return };
         pane.buffer.extend_from_slice(bytes);
         pane.screen.process(bytes);
@@ -349,11 +355,13 @@ impl State {
             let excess = pane.buffer.len() - BUFFER_CAP;
             pane.buffer.drain(..excess);
         }
-        let _ = self.events.send(Event::Output {
-            pane: id,
-            data: B64.encode(bytes),
-            reset: false,
-        });
+        if live {
+            let _ = self.events.send(Event::Output {
+                pane: id,
+                data: B64.encode(bytes),
+                reset: false,
+            });
+        }
         // The last task-like title in this chunk wins; placeholders and the bare name in between do not count.
         if let Some(ws) = self.workspaces.get_mut(&workspace)
             && ws.agent_pane == Some(id)
@@ -365,11 +373,56 @@ impl State {
         }
     }
 
-    fn send_to_holder(&self, pane: PaneId, frame: &Frame) -> Result<()> {
-        let holder = self.pane(pane)?.holder.clone();
-        let mut holder = holder.lock().unwrap_or_else(PoisonError::into_inner);
-        frame::write(&mut *holder, frame).wrap_err("writing to pane holder")
+    /// The pane's whole buffer, for subscribers to redraw it from scratch.
+    fn emit_replay(&self, id: PaneId) {
+        if let Some(pane) = self.panes.get(&id) {
+            let _ = self.events.send(Event::Output {
+                pane: id,
+                data: B64.encode(&pane.buffer),
+                reset: true,
+            });
+        }
     }
+
+    fn send_to_holder(&self, pane: PaneId, frame: Frame) -> Result<()> {
+        self.pane(pane)?
+            .holder
+            .send(frame)
+            .map_err(|_| eyre!("pane {pane}'s holder connection is closed"))
+    }
+}
+
+fn holder_writer(id: PaneId, mut stream: UnixStream) -> Result<mpsc::Sender<Frame>> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name(format!("pane-{id}-in"))
+        .spawn(move || {
+            for frame in rx {
+                if frame::write(&mut stream, &frame).is_err() {
+                    return;
+                }
+            }
+        })
+        .wrap_err("starting pane writer")?;
+    Ok(tx)
+}
+
+/// A new connection to a holder starts with its `Hello` and then its whole buffer. Returns the stream to read on, the
+/// terminal's size, and the buffer.
+fn handshake(stream: &UnixStream) -> Result<(UnixStream, (u16, u16), Vec<u8>)> {
+    let mut read = stream.try_clone()?;
+    read.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let Some(Frame::Hello { version, rows, cols }) = frame::read(&mut read)? else {
+        bail!("pane holder did not say hello");
+    };
+    if version != frame::VERSION {
+        return Err(HolderVersion(version).into());
+    }
+    let Some(Frame::Output(replay)) = frame::read(&mut read)? else {
+        bail!("pane holder did not send its buffer");
+    };
+    read.set_read_timeout(None)?;
+    Ok((read, (rows.max(1), cols.max(1)), replay))
 }
 
 #[derive(Debug)]
@@ -434,7 +487,21 @@ pub fn update_blocked(shared: &Shared, version: Option<String>, reason: String) 
 /// machine rebooted) is dropped from its layout. Workspaces stay even when that leaves them without tabs.
 pub fn load(shared: &Shared) -> Result<()> {
     let mut state = lock(shared);
-    let Some(saved) = read_saved(&state.state_file)? else {
+    let saved = match read_saved(&state.state_file) {
+        Ok(saved) => saved,
+        Err(e) if e.downcast_ref::<serde_json::Error>().is_some() => {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            let aside = state.state_file.with_extension(format!("json.bad-{stamp}"));
+            std::fs::rename(&state.state_file, &aside)
+                .wrap_err_with(|| format!("moving {} aside", state.state_file.display()))?;
+            tracing::error!("{e:#}; moved it to {} and starting with no workspaces", aside.display());
+            None
+        },
+        Err(e) => return Err(e),
+    };
+    let Some(saved) = saved else {
         return Ok(());
     };
     for ws in saved.workspaces {
@@ -529,23 +596,58 @@ fn lock(shared: &Shared) -> MutexGuard<'_, State> {
 }
 
 /// The first `Output` after (re)connecting is the holder's whole buffer, which rebuilds the screen after a restart.
-/// The holder going away means the pane's processes are gone.
+/// A holder hangs up on an ftmd that stopped reading its output, so a lost connection is retried; the holder's socket
+/// being gone means the pane's processes are.
 fn read_loop(shared: Shared, id: PaneId, mut holder: UnixStream) {
+    let mut reconnected: Option<Instant> = None;
     let ended = loop {
-        match frame::read(&mut holder) {
+        let lost = match frame::read(&mut holder) {
             Ok(Some(Frame::Output(bytes))) => {
                 let mut state = lock(&shared);
                 if !state.panes.contains_key(&id) {
                     return;
                 }
-                state.pane_output(id, &bytes);
+                state.pane_output(id, &bytes, true);
+                continue;
             },
-            Ok(Some(_)) => {},
-            Ok(None) => break "its holder hung up".to_string(),
-            Err(e) => break format!("reading from its holder failed: {e}"),
+            Ok(Some(_)) => continue,
+            Ok(None) => "its holder hung up".to_string(),
+            Err(e) => format!("reading from its holder failed: {e}"),
+        };
+        // Another ftmd taking the holder over would take it straight back.
+        if reconnected.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        match reconnect(&shared, id) {
+            Ok(Some(stream)) => {
+                tracing::info!("pane {id}: reconnected to its holder ({lost})");
+                holder = stream;
+                reconnected = Some(Instant::now());
+            },
+            Ok(None) => return,
+            Err(e) => break format!("{lost}; reconnecting failed: {e:#}"),
         }
     };
     pane_exited(&shared, id, &ended);
+}
+
+/// `None` once the pane is closed.
+fn reconnect(shared: &Shared, id: PaneId) -> Result<Option<UnixStream>> {
+    let Some(socket) = lock(shared).panes.get(&id).map(|p| p.holder_socket.clone()) else {
+        return Ok(None);
+    };
+    let stream = UnixStream::connect(&socket)?;
+    let (read, (rows, cols), replay) = handshake(&stream)?;
+    let mut state = lock(shared);
+    let Some(pane) = state.panes.get_mut(&id) else {
+        return Ok(None);
+    };
+    pane.holder = holder_writer(id, stream)?;
+    pane.buffer.clear();
+    pane.screen = vt100::Parser::new_with_callbacks(rows, cols, SCROLLBACK, TitleWatch::default());
+    state.pane_output(id, &replay, false);
+    state.emit_replay(id);
+    Ok(Some(read))
 }
 
 /// An agent whose startup pane exits before Claude reports any status never started (setup the shell could not
@@ -599,10 +701,7 @@ fn close_pane(shared: &Shared, id: PaneId, why: &str) {
 /// Asks the holder to kill everything on the pane's terminal (it does the SIGHUP, then SIGKILL after 2s), and
 /// returns a handle that finishes once the holder is gone, i.e. no process of the pane is left.
 fn reap(pane: Pane) -> std::thread::JoinHandle<()> {
-    {
-        let mut holder = pane.holder.lock().unwrap_or_else(PoisonError::into_inner);
-        let _ = frame::write(&mut *holder, &Frame::Kill);
-    }
+    let _ = pane.holder.send(Frame::Kill);
     std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(10);
         while pane.holder_socket.exists() && Instant::now() < deadline {
@@ -640,6 +739,46 @@ pub fn attach(shared: &Shared, pane: PaneId) -> Result<(broadcast::Receiver<Even
     Ok((state.events.subscribe(), screen))
 }
 
+/// Registers an `ftm attach` stream from `pid`, until the returned guard drops.
+pub fn attached(shared: &Shared, pane: PaneId, pid: i32) -> Attached {
+    if let Ok(p) = lock(shared).pane_mut(pane) {
+        if p.attachers.is_empty() {
+            p.restore = Some(p.screen.screen().size());
+        }
+        p.attachers.push(pid);
+    }
+    Attached {
+        shared: shared.clone(),
+        pane,
+        pid,
+    }
+}
+
+pub struct Attached {
+    shared: Shared,
+    pane: PaneId,
+    pid: i32,
+}
+
+impl Drop for Attached {
+    fn drop(&mut self) {
+        let restore = {
+            let mut state = lock(&self.shared);
+            let Ok(p) = state.pane_mut(self.pane) else { return };
+            if let Some(i) = p.attachers.iter().position(|&pid| pid == self.pid) {
+                p.attachers.remove(i);
+            }
+            if !p.attachers.is_empty() {
+                return;
+            }
+            p.restore.take()
+        };
+        if let Some((rows, cols)) = restore {
+            let _ = resize(&self.shared, self.pane, cols, rows, None);
+        }
+    }
+}
+
 pub fn pane_alive(workspaces: &[Workspace], pane: PaneId) -> bool {
     workspaces.iter().any(|w| w.tabs.iter().any(|t| t.layout.contains(pane)))
 }
@@ -662,7 +801,8 @@ fn screen_text(parser: &mut vt100::Parser<TitleWatch>) -> String {
     text
 }
 
-pub fn handle(shared: &Shared, request: Request) -> Response {
+/// `peer` is the pid of the process that sent `request`, when known.
+pub fn handle(shared: &Shared, request: Request, peer: Option<i32>) -> Response {
     let result = match request {
         Request::Ping => Ok(Response::Pong {
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -675,7 +815,7 @@ pub fn handle(shared: &Shared, request: Request) -> Response {
             id,
             status,
             background_agents,
-        } => {
+        } if status != Status::Unknown => {
             let mut state = lock(shared);
             state
                 .workspace_mut(id)
@@ -727,7 +867,8 @@ pub fn handle(shared: &Shared, request: Request) -> Response {
         },
         Request::Input { pane, data } => input(shared, pane, &data),
         Request::Capture { pane, raw } => capture(shared, pane, raw),
-        Request::Resize { pane, cols, rows } => resize(shared, pane, cols, rows),
+        Request::Resize { pane, cols, rows } => resize(shared, pane, cols, rows, peer),
+        Request::SetStatus { .. } => Err(eyre!("unknown status")),
         Request::Subscribe | Request::Attach { .. } => Err(eyre!("handled by the connection")),
     };
     result.unwrap_or_else(|e| Response::Error {
@@ -746,6 +887,9 @@ fn set_status(ws: &mut Workspace, status: Status, background_agents: u32) {
 }
 
 fn spawn(shared: &Shared, req: SpawnRequest) -> Result<Response> {
+    if req.kind == Kind::Unknown {
+        bail!("unknown workspace kind");
+    }
     if req.command.is_some() && req.kind == Kind::Agent {
         bail!("a command only applies to terminals");
     }
@@ -816,7 +960,12 @@ fn spawn(shared: &Shared, req: SpawnRequest) -> Result<Response> {
             return Err(e);
         },
     };
+    let hooked = state.claude_settings.is_some();
     let ws = state.workspace_mut(id)?;
+    // Without its hooks the agent never reports, so there is nothing to wait for.
+    if !hooked && req.kind == Kind::Agent {
+        ws.status = Status::Idle;
+    }
     ws.tabs.push(Tab {
         id: TabId::new_v4(),
         layout: Layout::Pane { id: pane },
@@ -827,6 +976,7 @@ fn spawn(shared: &Shared, req: SpawnRequest) -> Result<Response> {
         state.remember_folder(req.cwd.clone());
     }
     state.emit_workspaces();
+    state.emit_replay(pane);
     Ok(Response::Spawned { workspace })
 }
 
@@ -890,6 +1040,7 @@ fn new_tab(shared: &Shared, workspace: WorkspaceId) -> Result<Response> {
         layout: Layout::Pane { id: pane },
     });
     state.emit_workspaces();
+    state.emit_replay(pane);
     Ok(Response::Pane { pane })
 }
 
@@ -904,6 +1055,7 @@ fn split(shared: &Shared, target: PaneId, dir: SplitDir) -> Result<Response> {
         bail!("pane {target} is not in a tab");
     }
     state.emit_workspaces();
+    state.emit_replay(pane);
     Ok(Response::Pane { pane })
 }
 
@@ -921,19 +1073,24 @@ fn capture(shared: &Shared, pane: PaneId, raw: bool) -> Result<Response> {
 /// A resize to the size the pane already has comes from a terminal that just attached (the app relaunched, `ftm
 /// attach`), which drew the replay at some other size. The kernel sends no SIGWINCH for an unchanged size, and Node
 /// ignores one that does not change it, so the pane is nudged one column narrower and back to make its TUI repaint.
-fn resize(shared: &Shared, pane: PaneId, cols: u16, rows: u16) -> Result<Response> {
+fn resize(shared: &Shared, pane: PaneId, cols: u16, rows: u16, peer: Option<i32>) -> Result<Response> {
+    // A collapsed view can report no size at all; the emulator needs at least one cell.
+    let (rows, cols) = (rows.max(1), cols.max(1));
     let mut state = lock(shared);
     let p = state.pane_mut(pane)?;
+    if !p.attachers.is_empty() && !peer.is_some_and(|pid| p.attachers.contains(&pid)) {
+        p.restore = Some((rows, cols));
+    }
     let unchanged = p.screen.screen().size() == (rows, cols);
     p.screen.screen_mut().set_size(rows, cols);
     if p.exited {
         return Ok(Response::Ok);
     }
     if !unchanged || cols < 2 {
-        state.send_to_holder(pane, &Frame::Resize { rows, cols })?;
+        state.send_to_holder(pane, Frame::Resize { rows, cols })?;
         return Ok(Response::Ok);
     }
-    state.send_to_holder(pane, &Frame::Resize { rows, cols: cols - 1 })?;
+    state.send_to_holder(pane, Frame::Resize { rows, cols: cols - 1 })?;
     let shared = shared.clone();
     std::thread::spawn(move || {
         std::thread::sleep(REDRAW_NUDGE);
@@ -942,25 +1099,21 @@ fn resize(shared: &Shared, pane: PaneId, cols: u16, rows: u16) -> Result<Respons
             && !p.exited
         {
             let (rows, cols) = p.screen.screen().size();
-            let _ = state.send_to_holder(pane, &Frame::Resize { rows, cols });
+            let _ = state.send_to_holder(pane, Frame::Resize { rows, cols });
         }
     });
     Ok(Response::Ok)
 }
 
-/// Written outside the state lock: a pane that is not reading its input must not stall every other request.
 fn input(shared: &Shared, pane: PaneId, data: &str) -> Result<Response> {
     let bytes = B64.decode(data).wrap_err("input is not base64")?;
-    let holder = {
-        let state = lock(shared);
-        let p = state.pane(pane)?;
-        if p.exited {
-            return Ok(Response::Ok);
-        }
-        p.holder.clone()
-    };
-    let mut holder = holder.lock().unwrap_or_else(PoisonError::into_inner);
-    frame::write(&mut *holder, &Frame::Input(bytes)).wrap_err("writing to pane holder")?;
+    let state = lock(shared);
+    if state.pane(pane)?.exited {
+        return Ok(Response::Ok);
+    }
+    for chunk in bytes.chunks(INPUT_CHUNK) {
+        state.send_to_holder(pane, Frame::Input(chunk.to_vec()))?;
+    }
     Ok(Response::Ok)
 }
 

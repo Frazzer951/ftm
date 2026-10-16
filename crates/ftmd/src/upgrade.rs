@@ -68,12 +68,13 @@ impl Inherited {
         let fd = |key: &str| {
             let value = std::env::var(key).ok();
             unsafe { std::env::remove_var(key) };
-            value?.parse::<RawFd>().ok().filter(|fd| *fd > 2)
+            // Setting close-on-exec also checks the fd is open: one that is not must never be owned.
+            value?
+                .parse::<RawFd>()
+                .ok()
+                .filter(|&fd| fd > 2 && unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } == 0)
         };
         let (listen, ready) = (fd(LISTEN_FD), fd(READY_FD));
-        for fd in [listen, ready].into_iter().flatten() {
-            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
-        }
         let (listen, ready) = (listen?, ready?);
         Some(Inherited {
             listen,
@@ -151,24 +152,55 @@ fn fingerprint(path: &Path) -> Option<Fingerprint> {
     })
 }
 
+/// The file ftmd was started from, and what it was then. Taken first thing, so a replacement installed while ftmd
+/// starts up still counts as one.
+pub struct Origin {
+    exe: PathBuf,
+    /// `None` when the file had already been replaced.
+    fingerprint: Option<Fingerprint>,
+}
+
+impl Origin {
+    pub fn now() -> Option<Origin> {
+        std::env::current_exe().ok().map(Origin::of)
+    }
+
+    /// Linux names a binary that was renamed over since it started `<path> (deleted)`; the replacement is at `<path>`.
+    fn of(exe: PathBuf) -> Origin {
+        use std::os::unix::ffi::OsStrExt;
+        match exe.as_os_str().as_bytes().strip_suffix(b" (deleted)") {
+            Some(path) => Origin {
+                exe: PathBuf::from(std::ffi::OsStr::from_bytes(path)),
+                fingerprint: None,
+            },
+            None => {
+                let fingerprint = fingerprint(&exe);
+                Origin { exe, fingerprint }
+            },
+        }
+    }
+}
+
 /// A replacement binary that answered the handshake with our frame version.
 pub struct Candidate {
     pub exe: PathBuf,
     pub version: String,
 }
 
-/// Polls the path ftmd was started from (resolved now: the file is swapped underneath it later) and sends each
-/// compatible replacement to the accept loop. An incompatible one is reported and not tried again until it changes.
-pub fn watch(shared: Shared) -> Option<mpsc::Receiver<Candidate>> {
-    let exe = std::env::current_exe().ok()?;
-    let mut baseline = fingerprint(&exe)?;
+/// Polls the path ftmd was started from and sends each compatible replacement to the accept loop. An incompatible
+/// one is reported and not tried again until it changes.
+pub fn watch(shared: Shared, origin: Origin) -> mpsc::Receiver<Candidate> {
+    let Origin {
+        exe,
+        fingerprint: mut baseline,
+    } = origin;
     let (tx, rx) = mpsc::channel(1);
     tokio::spawn(async move {
         let mut seen: Option<(Fingerprint, Instant)> = None;
         loop {
             tokio::time::sleep(POLL).await;
             let now = fingerprint(&exe);
-            let Some(now) = now.filter(|f| *f != baseline) else {
+            let Some(now) = now.filter(|f| Some(*f) != baseline) else {
                 seen = None;
                 continue;
             };
@@ -181,7 +213,7 @@ pub fn watch(shared: Shared) -> Option<mpsc::Receiver<Candidate>> {
                 },
             }
             seen = None;
-            baseline = now;
+            baseline = Some(now);
             tracing::info!("{} was replaced; checking the new build", exe.display());
             let probed = {
                 let exe = exe.clone();
@@ -227,7 +259,7 @@ pub fn watch(shared: Shared) -> Option<mpsc::Receiver<Candidate>> {
             }
         }
     });
-    Some(rx)
+    rx
 }
 
 fn probe(exe: &Path) -> Result<Handshake> {
@@ -264,14 +296,7 @@ fn probe(exe: &Path) -> Result<Handshake> {
 /// with the lock released and the old ftmd still whole.
 pub fn hand_over(exe: &Path, listener: RawFd, shared: &Shared) -> Result<Infallible> {
     let frozen = state::freeze(shared)?;
-    let mut fds = [0; 2];
-    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-        return Err(std::io::Error::last_os_error()).wrap_err("creating the readiness pipe");
-    }
-    let (read, write) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
-    for fd in [&read, &write] {
-        unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
-    }
+    let (read, write) = cloexec_pipe().wrap_err("creating the readiness pipe")?;
     let write_fd = write.as_raw_fd();
     let mut cmd = Command::new(exe);
     cmd.args(std::env::args_os().skip(1))
@@ -304,6 +329,24 @@ pub fn hand_over(exe: &Path, listener: RawFd, shared: &Shared) -> Result<Infalli
     let _ = child.wait();
     drop(frozen);
     Err(failure)
+}
+
+/// Close-on-exec from the start where the platform allows, so a pane holder started meanwhile never inherits it.
+fn cloexec_pipe() -> std::io::Result<(OwnedFd, OwnedFd)> {
+    let mut fds = [0; 2];
+    #[cfg(target_os = "linux")]
+    let made = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    #[cfg(not(target_os = "linux"))]
+    let made = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    if made != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let (read, write) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+    #[cfg(not(target_os = "linux"))]
+    for fd in [&read, &write] {
+        unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
+    }
+    Ok((read, write))
 }
 
 fn wait_ready(read: &OwnedFd, child: &mut std::process::Child) -> Result<()> {
@@ -341,5 +384,33 @@ fn wait_ready(read: &OwnedFd, child: &mut std::process::Child) -> Result<()> {
             std::thread::sleep(Duration::from_millis(20));
         }
         bail!("the new ftmd closed the readiness pipe without signalling");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_binary_replaced_before_startup_counts_as_changed() {
+        let exe = std::env::current_exe().unwrap();
+        let origin = Origin::of(exe.clone());
+        assert_eq!(origin.exe, exe);
+        assert!(origin.fingerprint.is_some());
+
+        let mut deleted = exe.clone().into_os_string();
+        deleted.push(" (deleted)");
+        let origin = Origin::of(deleted.into());
+        assert_eq!(origin.exe, exe);
+        assert!(origin.fingerprint.is_none());
+    }
+
+    #[test]
+    fn the_readiness_pipe_is_close_on_exec() {
+        let (read, write) = cloexec_pipe().unwrap();
+        for fd in [read, write] {
+            let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
+            assert_eq!(flags & libc::FD_CLOEXEC, libc::FD_CLOEXEC);
+        }
     }
 }
