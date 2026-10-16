@@ -31,15 +31,16 @@ fn main() -> Result<()> {
         upgrade::print_handshake();
         return Ok(());
     }
+    let origin = upgrade::Origin::now();
     let inherited = unsafe { upgrade::Inherited::take() };
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-    let result = runtime.block_on(daemon(inherited));
+    let result = runtime.block_on(daemon(inherited, origin));
     // A request stuck on a pane must not keep ftmd from exiting.
     runtime.shutdown_timeout(std::time::Duration::from_secs(1));
     result
 }
 
-async fn daemon(inherited: Option<upgrade::Inherited>) -> Result<()> {
+async fn daemon(inherited: Option<upgrade::Inherited>, origin: Option<upgrade::Origin>) -> Result<()> {
     tracing_subscriber::fmt::init();
 
     let socket = std::path::absolute(paths::socket_path())?;
@@ -77,7 +78,7 @@ async fn daemon(inherited: Option<upgrade::Inherited>) -> Result<()> {
     }
     let loading = state.clone();
     tokio::task::spawn_blocking(move || state::load(&loading)).await??;
-    let mut upgrades = upgrade::watch(state.clone());
+    let mut upgrades = origin.map(|origin| upgrade::watch(state.clone(), origin));
     let mut terminate = signal(SignalKind::terminate())?;
     loop {
         tokio::select! {
