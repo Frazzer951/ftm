@@ -1,4 +1,5 @@
 * { box-sizing: border-box; }
+:is(.field, .row, .tabpanel)[hidden] { display: none; }
 html, body { margin: 0; height: 100%; }
 body {
   display: flex;
@@ -116,14 +117,22 @@ dialog input[type="number"] { width: 100%; background: var(--bg); color: inherit
 #recent .recent { text-align: left; background: none; border: 1px solid transparent; padding: 3px 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
 #recent .recent:hover { background: var(--selected); }
 #recent .recent.chosen { border-color: var(--accent); background: var(--hover); }
-dialog#settings { width: 460px; }
+dialog#settings { width: 520px; height: min(620px, 92vh); overflow: hidden; }
+#settings-form { height: 100%; }
+#settings-tabs { display: flex; gap: 2px; flex: none; border-bottom: 1px solid var(--border-strong); }
+#settings-tabs [role="tab"] { background: none; border: none; border-bottom: 2px solid transparent; border-radius: 0; margin-bottom: -1px; padding: 5px 10px; color: var(--muted); }
+#settings-tabs [role="tab"]:hover { background: none; color: var(--text); }
+#settings-tabs [role="tab"][aria-selected="true"] { color: var(--text-strong); border-bottom-color: var(--accent); }
+#settings-tabs [role="tab"]:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.tabpanel { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding-top: 4px; }
+#settings-panel-font > .field:first-child, #settings-panel-theme > .field, .font-picker { flex: 1; min-height: 0; }
 .field { display: flex; flex-direction: column; gap: 4px; }
 .field > span { font-size: 12px; color: var(--muted); }
 .font-picker { display: flex; flex-direction: column; gap: 6px; }
 .font-picker .row { justify-content: space-between; }
 #font-search { flex: 1; background: var(--bg); color: inherit; border: 1px solid var(--border-strong); border-radius: 4px; padding: 4px 6px; }
 label.inline { display: flex; gap: 4px; align-items: center; white-space: nowrap; font-size: 12px; }
-#font-list { height: 200px; overflow-y: auto; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--bg); display: flex; flex-direction: column; }
+#font-list { flex: 1; min-height: 120px; overflow-y: auto; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--bg); display: flex; flex-direction: column; }
 #font-list button { text-align: left; background: none; border: none; border-radius: 0; padding: 5px 8px; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: none; }
 #font-list button:hover { background: var(--hover); }
 #font-list button.chosen { background: var(--selected); }
@@ -136,18 +145,20 @@ dialog .stepper input { width: 70px; text-align: center; }
 input[type="range"] { flex: 1; }
 #line-height-value { width: 36px; text-align: right; font-variant-numeric: tabular-nums; }
 #font-preview { padding: 8px 10px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--bg); white-space: nowrap; overflow: hidden; }
-dialog#settings { width: 520px; max-height: 92vh; overflow-y: auto; }
 .field .count { color: var(--muted); font-weight: 400; }
 #theme-search { flex: 1; background: var(--bg); color: inherit; border: 1px solid var(--border-strong); border-radius: 4px; padding: 4px 6px; }
-#theme-slots button { flex: 1; text-align: left; }
+#theme-slots button { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; text-align: left; }
+#theme-current-name, #theme-slots button > span { flex: 1; min-width: 0; display: flex; }
+.theme-chip { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 3px 8px; border: 1px solid var(--border-strong); border-radius: 3px; }
+.theme-chip > span:first-child { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.theme-chip .swatches, #theme-list .swatches { display: flex; gap: 2px; flex: none; }
+.theme-chip .swatches i, #theme-list .swatches i { width: 10px; height: 14px; border-radius: 2px; }
 #theme-slots button.active { border-color: var(--accent); background: var(--selected); }
-#theme-list { height: 220px; overflow-y: auto; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--bg); display: flex; flex-direction: column; gap: 1px; }
+#theme-list { flex: 1; min-height: 120px; overflow-y: auto; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--bg); display: flex; flex-direction: column; gap: 1px; }
 #theme-list .group { padding: 6px 8px 2px; font-size: 10px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); }
 #theme-list button { display: flex; align-items: center; gap: 8px; text-align: left; border: 2px solid transparent; border-radius: 3px; padding: 5px 8px; flex: none; }
 #theme-list button.chosen { border-color: var(--accent); }
 #theme-list .theme-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#theme-list .swatches { display: flex; gap: 2px; flex: none; }
-#theme-list .swatches i { width: 10px; height: 14px; border-radius: 2px; }
 .sound-row { display: grid; grid-template-columns: 110px 1fr auto; gap: 6px; align-items: center; }
 .select-row { display: grid; grid-template-columns: 110px 1fr; gap: 6px; align-items: center; }
 .sound-row select, .select-row select { min-width: 0; background: var(--bg); color: inherit; border: 1px solid var(--border-strong); border-radius: 4px; padding: 3px 4px; }
