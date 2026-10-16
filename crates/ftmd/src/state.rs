@@ -52,7 +52,7 @@ pub struct State {
 struct Pane {
     workspace: WorkspaceId,
     /// Frames for the holder, written by the pane's own thread so a holder that is slow to read stalls nothing else.
-    holder: mpsc::Sender<Frame>,
+    holder: mpsc::Sender<ToHolder>,
     holder_socket: PathBuf,
     buffer: Vec<u8>,
     /// Headless emulator fed the same output, so the current screen and scrollback can be read back as text.
@@ -67,6 +67,12 @@ struct Pane {
     /// The size to go back to once the last attach ends: the pane's size when the first began, or the latest any
     /// other client set since. Other clients (the app) only resize when their own size changes.
     restore: Option<(u16, u16)>,
+}
+
+enum ToHolder {
+    Frame(Frame),
+    /// A new connection to the holder, after it hung up on the last one.
+    Connected(UnixStream),
 }
 
 /// Collects the terminal titles (OSC 0/2) a pane sets, in order, until read.
@@ -392,19 +398,32 @@ impl State {
     fn send_to_holder(&self, pane: PaneId, frame: Frame) -> Result<()> {
         self.pane(pane)?
             .holder
-            .send(frame)
+            .send(ToHolder::Frame(frame))
             .map_err(|_| eyre!("pane {pane}'s holder connection is closed"))
     }
 }
 
-fn holder_writer(id: PaneId, mut stream: UnixStream) -> Result<mpsc::Sender<Frame>> {
+/// Frames that fail to go out, because the holder hung up on ftmd, wait for the connection `reconnect` makes.
+fn holder_writer(id: PaneId, stream: UnixStream) -> Result<mpsc::Sender<ToHolder>> {
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new()
         .name(format!("pane-{id}-in"))
         .spawn(move || {
-            for frame in rx {
-                if frame::write(&mut stream, &frame).is_err() {
-                    return;
+            let mut stream = Some(stream);
+            let mut queued = std::collections::VecDeque::new();
+            for msg in rx {
+                match msg {
+                    ToHolder::Frame(frame) => queued.push_back(frame),
+                    ToHolder::Connected(new) => stream = Some(new),
+                }
+                while let Some(conn) = stream.as_mut()
+                    && let Some(frame) = queued.front()
+                {
+                    if frame::write(conn, frame).is_err() {
+                        stream = None;
+                        break;
+                    }
+                    queued.pop_front();
                 }
             }
         })
@@ -666,10 +685,22 @@ fn reconnect(shared: &Shared, id: PaneId) -> Result<Option<UnixStream>> {
         let _ = frame::write(&mut &stream, &Frame::Kill);
         return Ok(None);
     };
-    pane.holder = holder_writer(id, stream)?;
+    let _ = pane.holder.send(ToHolder::Connected(stream));
+    // A resize sent while the holder had hung up may not have reached it.
+    let wanted = pane.screen.screen().size();
     pane.buffer.clear();
     pane.screen = vt100::Parser::new_with_callbacks(rows, cols, SCROLLBACK, TitleWatch::default());
     state.pane_output(id, &replay, false);
+    if let Some(pane) = state.panes.get_mut(&id)
+        && (rows, cols) != wanted
+        && !pane.exited
+    {
+        pane.screen.screen_mut().set_size(wanted.0, wanted.1);
+        let _ = pane.holder.send(ToHolder::Frame(Frame::Resize {
+            rows: wanted.0,
+            cols: wanted.1,
+        }));
+    }
     state.emit_replay(id);
     Ok(Some(read))
 }
@@ -729,7 +760,7 @@ fn close_pane(shared: &Shared, id: PaneId, why: &str) {
 /// `read_loop` yet to reconnect. A new connection replaces the old one and is read until the holder exits, so the
 /// replay and output it gets meanwhile never block the holder.
 fn reap(pane: Pane) -> std::thread::JoinHandle<()> {
-    let _ = pane.holder.send(Frame::Kill);
+    let _ = pane.holder.send(ToHolder::Frame(Frame::Kill));
     std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(10);
         if let Ok(mut stream) = UnixStream::connect(&pane.holder_socket)

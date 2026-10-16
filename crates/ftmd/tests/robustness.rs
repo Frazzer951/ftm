@@ -324,3 +324,41 @@ fn closing_a_pane_whose_holder_hung_up_kills_it() {
         holder_sockets(&daemon) == 0
     });
 }
+
+/// A resize sent while the holder has hung up on ftmd still reaches the terminal once ftmd reconnects.
+#[test]
+fn a_resize_while_the_holder_hung_up_still_lands() {
+    let dir = temp_root("resize-hung-up");
+    let daemon = start_daemon("resize-hung-up", |_| {});
+    let mut conn = Conn::open(&daemon.socket);
+    let _cleanup = KillSession(dir.join("pid"));
+    let (_, pane) = spawn_command(
+        &mut conn,
+        &dir,
+        Some("echo $$ > pid; sleep 1; yes | head -c 3000000; touch flooded; read x; stty size > size"),
+    );
+
+    let resized = stall_until_hung_up(
+        &daemon,
+        &dir,
+        Request::Resize {
+            pane,
+            cols: 100,
+            rows: 30,
+        },
+    );
+    assert!(matches!(resized.join().unwrap(), Some(Response::Ok)));
+    assert!(matches!(
+        conn.try_send(&Request::Input {
+            pane,
+            data: B64.encode("\n"),
+        }),
+        Some(Response::Ok)
+    ));
+    let mut size = String::new();
+    wait_for("the shell to report its size", Duration::from_secs(15), || {
+        size = std::fs::read_to_string(dir.join("size")).unwrap_or_default();
+        size.ends_with('\n')
+    });
+    assert_eq!(size.trim(), "30 100");
+}
