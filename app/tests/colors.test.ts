@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { chromeColors, contrast, luminance, mix, readable, rgb } from "../src/colors.ts";
+import { chromeColors, contrast, luminance, mix, readable, rgb, WORKSPACE_COLORS, WORKSPACE_PALETTE } from "../src/colors.ts";
 
 const near = (actual: number, expected: number, eps = 0.01) =>
   assert.ok(Math.abs(actual - expected) < eps, `${actual} is not close to ${expected}`);
@@ -61,5 +61,16 @@ test("status dots read against the sidebar even on a dim palette", () => {
     ["--muted", 3],
   ] as const) {
     assert.ok(contrast(vars[name], vars["--sidebar"]) >= min, `${name} ${vars[name]} on ${vars["--sidebar"]}`);
+  }
+});
+
+test("workspace colors are the names ftmd accepts, each clearly apart from the others", () => {
+  assert.deepEqual(WORKSPACE_COLORS, ["red", "orange", "yellow", "green", "cyan", "blue", "purple", "pink", "gray"]);
+  const distance = (a: string, b: string) => Math.hypot(...rgb(a).map((v, i) => v - rgb(b)[i]));
+  for (const [i, a] of WORKSPACE_COLORS.entries()) {
+    for (const b of WORKSPACE_COLORS.slice(i + 1)) {
+      const d = distance(WORKSPACE_PALETTE[a], WORKSPACE_PALETTE[b]);
+      assert.ok(d >= 60, `${a} ${WORKSPACE_PALETTE[a]} and ${b} ${WORKSPACE_PALETTE[b]} are only ${d.toFixed(0)} apart`);
+    }
   }
 });

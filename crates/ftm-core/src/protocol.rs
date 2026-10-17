@@ -33,6 +33,12 @@ pub enum Request {
         id: WorkspaceId,
         pinned: bool,
     },
+    /// Sets the workspace's sidebar color, a name from `WORKSPACE_COLORS` or `#rrggbb`; `None` clears it.
+    SetColor {
+        id: WorkspaceId,
+        #[serde(default)]
+        color: Option<String>,
+    },
     /// Clears the workspace's `unseen` flag: someone has looked at it.
     MarkSeen {
         id: WorkspaceId,
@@ -46,6 +52,11 @@ pub enum Request {
     /// Sets the sidebar order of the remembered folders. Paths it leaves out keep their place after the listed ones.
     ReorderFolders {
         paths: Vec<PathBuf>,
+    },
+    /// Sets the sidebar order of the workspaces, which `List` and `Event::Workspaces` then follow. Ids it leaves out
+    /// keep their order after the listed ones.
+    ReorderWorkspaces {
+        ids: Vec<WorkspaceId>,
     },
     NewTab {
         workspace: WorkspaceId,
@@ -117,6 +128,10 @@ pub struct SpawnRequest {
 
 /// `SpawnRequest.claude_args` is honoured.
 pub const FEATURE_CLAUDE_ARGS: &str = "claude_args";
+/// `Request::SetColor` and `Workspace.color`.
+pub const FEATURE_WORKSPACE_COLORS: &str = "workspace_colors";
+/// `Request::ReorderWorkspaces`, and `List`/`Event::Workspaces` in that order.
+pub const FEATURE_WORKSPACE_ORDER: &str = "workspace_order";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
@@ -138,7 +153,7 @@ pub enum Response {
         order: Vec<PathBuf>,
     },
     Spawned {
-        workspace: Workspace,
+        workspace: Box<Workspace>,
     },
     Pane {
         pane: PaneId,

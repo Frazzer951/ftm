@@ -213,7 +213,10 @@ fn agents_nest_report_status_and_clean_up() {
     assert!(ftm(&bin, &socket, &["ls"]).contains("Task of unnamed-dir (unnamed-dir)"));
     assert_eq!(
         ftm(&bin, &socket, &["ping"]),
-        format!("ftmd {} (features: claude_args)", env!("CARGO_PKG_VERSION"))
+        format!(
+            "ftmd {} (features: claude_args, workspace_colors, workspace_order)",
+            env!("CARGO_PKG_VERSION")
+        )
     );
     ftm(&bin, &socket, &["close", "--id", &unnamed.to_string()]);
 
@@ -517,6 +520,45 @@ fn pin_only_top_level_workspaces() {
     ftm(&bin, socket, &["close", "--id", &parent]);
     ftm(&bin, socket, &["pin", &child]);
     assert!(pinned(&child));
+}
+
+#[test]
+fn color_workspaces() {
+    let dir = temp_root("color");
+    let daemon = start_daemon("color", |_| {});
+    let bin = ftm_bin();
+    let socket = &daemon.socket;
+    let path = dir.to_str().unwrap();
+    let parent = ftm(&bin, socket, &["spawn", "terminal", "--path", path, "--name", "parent"]);
+    let child = ftm(
+        &bin,
+        socket,
+        &["spawn", "terminal", "--path", path, "--name", "child", "--parent", &parent],
+    );
+    let color = |id: &str| ls(&bin, socket).into_iter().find(|w| w.id.to_string() == id).unwrap().color;
+
+    ftm(&bin, socket, &["color", "Blue", "--id", &parent]);
+    assert_eq!(color(&parent).as_deref(), Some("blue"));
+    assert!(
+        ftm(&bin, socket, &["ls"])
+            .lines()
+            .any(|l| l.starts_with("parent ") && l.contains("(color blue)"))
+    );
+    // Unlike pinning, a nested workspace can have its own color.
+    ftm(&bin, socket, &["color", "#FF8800", "--id", &child]);
+    assert_eq!(color(&child).as_deref(), Some("#ff8800"));
+
+    let refused = Command::new(&bin)
+        .args(["color", "teal", "--id", &parent])
+        .env("FTM_SOCKET", socket)
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("unknown color"));
+    assert_eq!(color(&parent).as_deref(), Some("blue"));
+
+    ftm(&bin, socket, &["color", "--clear", "--id", &parent]);
+    assert_eq!(color(&parent), None);
 }
 
 /// New worktrees get the source checkout's gitignored files, minus big rebuildable directories at any depth and the

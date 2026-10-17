@@ -30,7 +30,7 @@ fn spawn_terminal(conn: &mut Conn, cwd: &Path, name: &str) -> Workspace {
     })) else {
         panic!("expected spawned")
     };
-    workspace
+    *workspace
 }
 
 fn capture(conn: &mut Conn, pane: PaneId) -> String {
@@ -503,6 +503,38 @@ fn folders_and_pins_are_remembered() {
     assert!(req.list().iter().find(|w| w.id == first.id).unwrap().pinned);
     req.send(&Request::RemoveFolder { path: a.clone() });
     assert_eq!(folders(&mut req), vec![b]);
+}
+
+#[test]
+fn workspace_order_and_colors_are_remembered() {
+    let dir = temp_root("order");
+    let mut daemon = start_daemon("order", |_| {});
+    let mut req = Conn::open(&daemon.socket);
+    let ids: Vec<WorkspaceId> = ["one", "two", "three"]
+        .into_iter()
+        .map(|name| spawn_terminal(&mut req, &dir, name).id)
+        .collect();
+    let order = |req: &mut Conn| req.list().into_iter().map(|w| w.id).collect::<Vec<_>>();
+    // New workspaces go to the end.
+    assert_eq!(order(&mut req), ids);
+
+    // Ids left out (and unknown ones) don't upset the order: the listed ones go first, the rest keep theirs.
+    req.send(&Request::ReorderWorkspaces {
+        ids: vec![ids[2], WorkspaceId::new_v4(), ids[0], ids[2]],
+    });
+    assert_eq!(order(&mut req), vec![ids[2], ids[0], ids[1]]);
+    req.send(&Request::SetColor {
+        id: ids[1],
+        color: Some("green".into()),
+    });
+    drop(req);
+
+    daemon.restart();
+    let mut req = Conn::open(&daemon.socket);
+    assert_eq!(order(&mut req), vec![ids[2], ids[0], ids[1]]);
+    assert_eq!(req.list()[2].color.as_deref(), Some("green"));
+    let four = spawn_terminal(&mut req, &dir, "four").id;
+    assert_eq!(order(&mut req), vec![ids[2], ids[0], ids[1], four]);
 }
 
 #[test]
