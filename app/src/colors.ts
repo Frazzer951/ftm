@@ -32,6 +32,22 @@ export function readable(color: string, bg: string, toward: string, min = 2.5): 
   return toward;
 }
 
+/// The named colors a workspace's sidebar row can take, as ftmd accepts them, in sort order. Fixed rather than taken
+/// from the theme: a theme's blue, magenta and their mixes can come out nearly the same, and each name should look like
+/// itself on every theme.
+export const WORKSPACE_PALETTE: Record<string, string> = {
+  red: "#ff4245",
+  orange: "#ff8c00",
+  yellow: "#ffd600",
+  green: "#30d158",
+  cyan: "#40c8e0",
+  blue: "#0091ff",
+  purple: "#bf5af2",
+  pink: "#ff6482",
+  gray: "#98989d",
+};
+export const WORKSPACE_COLORS = Object.keys(WORKSPACE_PALETTE);
+
 /// The app chrome's CSS variables for a theme: sidebar a little darker than the terminal, muted text blended from the
 /// foreground, accent from blue (palette 4), status dots from green/red/grey/blue, plus yellow for a finished turn not yet
 /// looked at, each nudged until readable.

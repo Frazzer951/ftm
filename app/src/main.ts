@@ -10,12 +10,14 @@ import { LigaturesAddon } from "@xterm/addon-ligatures";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { chromeColors } from "./colors.ts";
+import { chromeColors, WORKSPACE_COLORS, WORKSPACE_PALETTE } from "./colors.ts";
 import { dropText } from "./drop.ts";
 import { StatusSounds, statusDot, stillFinished } from "./finish.ts";
 import { clipboardKey, type OptionAsMeta, optionIsMeta, paneKey } from "./keys.ts";
 import { KeyLayout, type KeyProtocol, kittyKeyboard } from "./kitty.ts";
+import { defaultSort, moveItem, reorderWithin, type SortMode, sortRows } from "./order.ts";
 import { replyFilter } from "./replies.ts";
+import { clampSidebarWidth, SIDEBAR_DEFAULT } from "./sidebar.ts";
 import { loadSounds, play, type SoundEntry, type SoundSettings } from "./sounds.ts";
 import "./style.css";
 import { Tabs } from "./tabs.ts";
@@ -37,6 +39,8 @@ interface Workspace {
   title: string | null;
   auto_title: string | null;
   pinned: boolean;
+  /// A name from `WORKSPACE_COLORS` or `#rrggbb`; missing from an ftmd that predates colors.
+  color?: string | null;
   /// "unknown" for a kind or status from a newer ftmd than this app knows.
   kind: "terminal" | "agent" | "unknown";
   cwd: string;
@@ -825,28 +829,146 @@ function toggleSection(key: string) {
   renderSidebar();
 }
 
+const SORT_KEY = "ftm.sectionSort";
+/// Each section's sort, by section key; a section that is not listed has its `defaultSort`.
+const sectionSort: Record<string, SortMode> = (() => {
+  try {
+    return JSON.parse(localStorage.getItem(SORT_KEY) ?? "{}");
+  } catch {
+    return {};
+  }
+})();
+const sortOf = (key: string): SortMode => sectionSort[key] ?? defaultSort(key);
+
+function setSectionSort(key: string, mode: SortMode) {
+  if (mode === defaultSort(key)) delete sectionSort[key];
+  else sectionSort[key] = mode;
+  try {
+    localStorage.setItem(SORT_KEY, JSON.stringify(sectionSort));
+  } catch {
+    // Only the sort is lost.
+  }
+  renderSidebar();
+}
+
+const SORT_LABELS: Record<SortMode, [string, string]> = {
+  manual: ["⇅", "Manual (drag to rearrange)"],
+  name: ["A–Z", "Name"],
+  color: ["●", "Color"],
+};
+
+/// Section header's sort button: hidden until hovered while the section has its default sort.
+function sortButton(key: string, modes: SortMode[]): HTMLButtonElement {
+  const mode = sortOf(key);
+  const button = document.createElement("button");
+  button.className = "section-sort" + (mode === defaultSort(key) ? "" : " active");
+  button.textContent = SORT_LABELS[mode][0];
+  button.title = `Sort: ${SORT_LABELS[mode][1]}`;
+  button.onclick = () => {
+    const r = button.getBoundingClientRect();
+    showMenu(
+      r.left,
+      r.bottom,
+      modes.map((m) => [`${SORT_LABELS[m][1]}${m === mode ? " ✓" : ""}`, () => setSectionSort(key, m)]),
+    );
+  };
+  return button;
+}
+
+const sortWorkspaces = (list: Workspace[], mode: SortMode) =>
+  sortRows(list, mode, displayName, (w) => w.color, WORKSPACE_COLORS);
+
+const SIDEBAR_WIDTH_KEY = "ftm.sidebarWidth";
+
+function setSidebarWidth(width: number) {
+  document.documentElement.style.setProperty("--sidebar-width", `${width}px`);
+}
+
+function saveSidebarWidth(width: number) {
+  try {
+    if (width === SIDEBAR_DEFAULT) localStorage.removeItem(SIDEBAR_WIDTH_KEY);
+    else localStorage.setItem(SIDEBAR_WIDTH_KEY, String(width));
+  } catch {
+    // Only the width is lost; the next start uses the default.
+  }
+}
+
+/// Drag the sidebar's right edge to resize it, double-click it to go back to the default. The panes refit through
+/// their ResizeObserver.
+function setupSidebarResize() {
+  try {
+    const saved = localStorage.getItem(SIDEBAR_WIDTH_KEY);
+    if (saved) setSidebarWidth(clampSidebarWidth(Number(saved), window.innerWidth));
+  } catch {
+    // Keep the default.
+  }
+  const handle = $("sidebar-resize");
+  let drag: { x: number; width: number; last: number } | null = null;
+  handle.onpointerdown = (e) => {
+    if (e.button !== 0) return;
+    const width = $("sidebar").getBoundingClientRect().width;
+    drag = { x: e.clientX, width, last: width };
+    handle.setPointerCapture(e.pointerId);
+    document.body.classList.add("resizing-sidebar");
+    e.preventDefault();
+  };
+  handle.onpointermove = (e) => {
+    if (!drag) return;
+    drag.last = clampSidebarWidth(drag.width + e.clientX - drag.x, window.innerWidth);
+    setSidebarWidth(drag.last);
+  };
+  const end = () => {
+    if (!drag) return;
+    saveSidebarWidth(drag.last);
+    drag = null;
+    document.body.classList.remove("resizing-sidebar");
+  };
+  handle.onpointerup = end;
+  handle.onpointercancel = end;
+  handle.ondblclick = () => {
+    setSidebarWidth(SIDEBAR_DEFAULT);
+    saveSidebarWidth(SIDEBAR_DEFAULT);
+  };
+}
+
 /// Top to bottom: Pinned, Active Terminals, Active Agents, Folders. Children stay under their parent, wherever the
-/// parent is.
+/// parent is, sorted the way the parent's section is.
 function renderSidebar() {
   if (editing && workspaces.some((w) => w.id === editing)) return;
   editing = null;
-  if (folderDrag?.moved) return;
+  if (rowDrag?.moved) return;
   const ids = new Set(workspaces.map((w) => w.id));
   const top = workspaces.filter((w) => !w.parent || !ids.has(w.parent));
-  const sections: [string, string, HTMLElement[]][] = [
-    ["pinned", "Pinned", top.filter((w) => w.pinned).map(workspaceTree)],
-    ["terminals", "Active Terminals", top.filter((w) => !w.pinned && w.kind !== "agent").map(workspaceTree)],
-    ["agents", "Active Agents", top.filter((w) => !w.pinned && w.kind === "agent").map(workspaceTree)],
+  const trees = (key: string, list: Workspace[]) =>
+    sortWorkspaces(list, sortOf(key)).map((w) => workspaceTree(w, sortOf(key)));
+  const folderList = sidebarFolders();
+  const sections: [string, string, HTMLElement[], SortMode[]][] = [
+    ["pinned", "Pinned", trees("pinned", top.filter((w) => w.pinned)), ["manual", "name", "color"]],
+    [
+      "terminals",
+      "Active Terminals",
+      trees("terminals", top.filter((w) => !w.pinned && w.kind !== "agent")),
+      ["manual", "name", "color"],
+    ],
+    [
+      "agents",
+      "Active Agents",
+      trees("agents", top.filter((w) => !w.pinned && w.kind === "agent")),
+      ["manual", "name", "color"],
+    ],
     [
       "folders",
       "Folders",
-      sidebarFolders().map(folderRow),
+      sortRows(folderList, sortOf("folders") === "name" ? "name" : "manual", (f) => basename(f.path), () => null, []).map(
+        (f) => folderRow(f, sortOf("folders") !== "name"),
+      ),
+      ["manual", "name"],
     ],
   ];
   $("sections").replaceChildren(
     ...sections
       .filter(([key, , rows]) => rows.length > 0 || key === "folders")
-      .map(([key, title, rows]) => {
+      .map(([key, title, rows, modes]) => {
         const section = document.createElement("section");
         const head = document.createElement("button");
         head.className = "section-head";
@@ -856,7 +978,10 @@ function renderSidebar() {
         count.textContent = rows.length ? `${rows.length}` : "";
         head.append(count);
         head.onclick = () => toggleSection(key);
-        section.append(head);
+        const bar = document.createElement("div");
+        bar.className = "section-bar";
+        bar.append(head, sortButton(key, modes));
+        section.append(bar);
         if (!collapsed.has(key)) {
           const ul = document.createElement("ul");
           ul.append(...rows);
@@ -867,22 +992,30 @@ function renderSidebar() {
   );
 }
 
-function workspaceTree(ws: Workspace): HTMLLIElement {
+function workspaceTree(ws: Workspace, sort: SortMode): HTMLLIElement {
   const li = document.createElement("li");
-  li.append(workspaceRow(ws));
-  const children = workspaces.filter((w) => w.parent === ws.id);
+  li.append(workspaceRow(ws, sort === "manual"));
+  const children = sortWorkspaces(
+    workspaces.filter((w) => w.parent === ws.id),
+    sort,
+  );
   if (children.length) {
     const ul = document.createElement("ul");
-    ul.append(...children.map(workspaceTree));
+    ul.append(...children.map((w) => workspaceTree(w, sort)));
     li.append(ul);
   }
   return li;
 }
 
-function workspaceRow(ws: Workspace): HTMLElement {
+/// `draggable` while its section is in manual order.
+function workspaceRow(ws: Workspace, draggable: boolean): HTMLElement {
   const row = document.createElement("div");
   row.className = "ws" + (ws.id === selected ? " selected" : "");
   row.dataset.id = ws.id;
+  if (ws.color) {
+    row.classList.add("colored");
+    row.style.setProperty("--ws-color", workspaceColor(ws.color));
+  }
   row.title = [displayName(ws) === ws.name ? ws.name : `${displayName(ws)} (${ws.name})`, ws.kind, ws.cwd].join("\n");
   const dot = document.createElement("span");
   Object.assign(dot, statusDot(ws));
@@ -917,7 +1050,16 @@ function workspaceRow(ws: Workspace): HTMLElement {
     closeWorkspace(ws.id);
   };
   row.append(close);
+  if (draggable) {
+    startRowDrag(
+      row,
+      ws.id,
+      () => siblingRows(row),
+      (target) => dropWorkspace(row, ws.id, target),
+    );
+  }
   row.onclick = () => {
+    if (swallowRowClick) return;
     selected = ws.id;
     render();
   };
@@ -927,10 +1069,34 @@ function workspaceRow(ws: Workspace): HTMLElement {
     if (!ws.parent || !workspaces.some((w) => w.id === ws.parent)) {
       items.push([ws.pinned ? "Unpin" : "Pin", () => request({ op: "pin", id: ws.id, pinned: !ws.pinned }).catch(console.error)]);
     }
+    items.push(["Color…", () => showColorMenu(e.clientX, e.clientY, ws)]);
     items.push(...openInItems(ws.cwd), ["Close", () => closeWorkspace(ws.id)]);
     showMenu(e.clientX, e.clientY, items);
   };
   return row;
+}
+
+/// The CSS color for a workspace's `color`: a palette name's fixed color, or the hex as given.
+const workspaceColor = (color: string) => WORKSPACE_PALETTE[color] ?? color;
+
+function setColor(ws: Workspace, color: string | null) {
+  request({ op: "set_color", id: ws.id, color }).catch((err) => {
+    console.error(err);
+    notice("color", `Could not color ${displayName(ws)}: ${err}`, "error");
+  });
+}
+
+/// The palette, plus None; `ftm color '#rrggbb'` sets any other color.
+function showColorMenu(x: number, y: number, ws: Workspace) {
+  showMenu(x, y, [
+    ...WORKSPACE_COLORS.map((c): MenuItem => [
+      c[0].toUpperCase() + c.slice(1) + (ws.color === c ? " ✓" : ""),
+      () => setColor(ws, c),
+      workspaceColor(c),
+    ]),
+    ...(ws.color?.startsWith("#") ? [[`${ws.color} ✓`, () => {}, ws.color] as MenuItem] : []),
+    [ws.color ? "None" : "None ✓", () => setColor(ws, null)],
+  ]);
 }
 
 interface OpenTarget {
@@ -971,19 +1137,15 @@ function sidebarFolders(): Folder[] {
   return [...ranked, ...folders.filter((f) => !listed.has(f.path)).sort(byName)];
 }
 
-/// A folder row being dragged to a new place in the Folders section. Pointer events rather than HTML5 drag and drop,
-/// which Tauri's native file-drop handler intercepts.
-let folderDrag: { path: string; x: number; y: number; moved: boolean; target: number } | null = null;
-/// Set between the end of a drag and the click that follows it, so dropping a folder does not also open its menu.
-let swallowFolderClick = false;
+/// A sidebar row being dragged to a new place among its siblings: a folder in the Folders section, or a workspace
+/// among the rows under the same parent in its section. Pointer events rather than HTML5 drag and drop, which Tauri's
+/// native file-drop handler intercepts.
+let rowDrag: { key: string; x: number; y: number; moved: boolean; target: number } | null = null;
+/// Set between the end of a drag and the click that follows it, so dropping a row does not also click it.
+let swallowRowClick = false;
 
-function folderRows(): HTMLElement[] {
-  return [...document.querySelectorAll<HTMLElement>("#sections .ws.folder")];
-}
-
-/// Index among the folder rows the dragged one would be dropped before, and the indicator shown there.
-function markFolderDrop(y: number): number {
-  const rows = folderRows();
+/// Index among `rows` the dragged one would be dropped before, and the indicator shown there.
+function markDrop(rows: HTMLElement[], y: number): number {
   let target = rows.findIndex((r) => {
     const box = r.getBoundingClientRect();
     return y < box.top + box.height / 2;
@@ -996,41 +1158,33 @@ function markFolderDrop(y: number): number {
   return target;
 }
 
-function startFolderDrag(row: HTMLElement, path: string) {
+/// Lets `row` be dragged among `siblings()` (which include it); a drop calls `drop` with the index among them to put
+/// it before.
+function startRowDrag(row: HTMLElement, key: string, siblings: () => HTMLElement[], drop: (target: number) => void) {
   row.onpointerdown = (e) => {
-    if (e.button !== 0 || (e.target as HTMLElement).closest("button")) return;
-    folderDrag = { path, x: e.clientX, y: e.clientY, moved: false, target: -1 };
-    row.setPointerCapture(e.pointerId);
+    if (e.button !== 0 || (e.target as HTMLElement).closest("button, input")) return;
+    rowDrag = { key, x: e.clientX, y: e.clientY, moved: false, target: -1 };
   };
   row.onpointermove = (e) => {
-    if (!folderDrag || folderDrag.path !== path) return;
-    if (!folderDrag.moved && Math.hypot(e.clientX - folderDrag.x, e.clientY - folderDrag.y) < 4) return;
-    folderDrag.moved = true;
-    row.classList.add("dragging");
-    folderDrag.target = markFolderDrop(e.clientY);
-  };
-  const end = (drop: boolean) => {
-    const drag = folderDrag;
-    if (!drag || drag.path !== path) return;
-    folderDrag = null;
-    if (!drag.moved) return;
-    const order = sidebarFolders().map((f) => f.path);
-    const from = order.indexOf(path);
-    if (drop && from >= 0) {
-      order.splice(from, 1);
-      order.splice(drag.target > from ? drag.target - 1 : drag.target, 0, path);
-      const before = folderOrder;
-      folderOrder = order;
-      request({ op: "reorder_folders", paths: order }).catch((err) => {
-        console.error(err);
-        if (folderOrder !== order) return;
-        folderOrder = before;
-        renderSidebar();
-      });
+    if (!rowDrag || rowDrag.key !== key) return;
+    if (!rowDrag.moved) {
+      if (Math.hypot(e.clientX - rowDrag.x, e.clientY - rowDrag.y) < 4) return;
+      // Captured only once it is a drag, so clicks and double-clicks (rename) still reach what was under the pointer.
+      rowDrag.moved = true;
+      row.setPointerCapture(e.pointerId);
+      row.classList.add("dragging");
     }
-    swallowFolderClick = true;
+    rowDrag.target = markDrop(siblings(), e.clientY);
+  };
+  const end = (dropped: boolean) => {
+    const drag = rowDrag;
+    if (!drag || drag.key !== key) return;
+    rowDrag = null;
+    if (!drag.moved) return;
+    if (dropped) drop(drag.target);
+    swallowRowClick = true;
     setTimeout(() => {
-      swallowFolderClick = false;
+      swallowRowClick = false;
       renderSidebar();
     });
   };
@@ -1038,11 +1192,61 @@ function startFolderDrag(row: HTMLElement, path: string) {
   row.onpointercancel = () => end(false);
 }
 
-function folderRow(folder: Folder): HTMLLIElement {
+/// The workspace rows directly under the same list as `row`: its siblings in the sidebar.
+function siblingRows(row: HTMLElement): HTMLElement[] {
+  const ul = row.closest("ul");
+  return ul ? [...ul.querySelectorAll<HTMLElement>(":scope > li > .ws")] : [row];
+}
+
+function dropWorkspace(row: HTMLElement, id: Id, target: number) {
+  const group = moveItem(
+    siblingRows(row).map((r) => r.dataset.id ?? ""),
+    id,
+    target,
+  );
+  const order = reorderWithin(
+    workspaces.map((w) => w.id),
+    group,
+  );
+  const byId = new Map(workspaces.map((w) => [w.id, w]));
+  const before = workspaces;
+  const reordered = order.flatMap((i) => byId.get(i) ?? []);
+  workspaces = reordered;
+  request({ op: "reorder_workspaces", ids: order }).catch((err) => {
+    console.error(err);
+    notice("reorder", `Could not save the new order: ${err}`, "error");
+    // Undone unless a newer tree from ftmd has replaced it meanwhile.
+    if (workspaces !== reordered) return;
+    workspaces = before;
+    renderSidebar();
+  });
+}
+
+/// `draggable` while the Folders section is in manual order.
+function folderRow(folder: Folder, draggable: boolean): HTMLLIElement {
   const li = document.createElement("li");
   const row = document.createElement("div");
   row.className = "ws folder";
-  startFolderDrag(row, folder.path);
+  if (draggable) startRowDrag(
+    row,
+    folder.path,
+    () => [...document.querySelectorAll<HTMLElement>("#sections .ws.folder")],
+    (target) => {
+      const before = folderOrder;
+      const order = moveItem(
+        sidebarFolders().map((f) => f.path),
+        folder.path,
+        target,
+      );
+      folderOrder = order;
+      request({ op: "reorder_folders", paths: order }).catch((err) => {
+        console.error(err);
+        if (folderOrder !== order) return;
+        folderOrder = before;
+        renderSidebar();
+      });
+    },
+  );
   row.title = folder.path;
   const icon = document.createElement("span");
   icon.className = "folder-icon";
@@ -1075,7 +1279,7 @@ function folderRow(folder: Folder): HTMLLIElement {
     menu(r.left, r.bottom);
   };
   row.onclick = (e) => {
-    if (swallowFolderClick) return;
+    if (swallowRowClick) return;
     menu(e.clientX, e.clientY);
   };
   row.oncontextmenu = (e) => {
@@ -1188,13 +1392,22 @@ function startRename(id: Id) {
   input.select();
 }
 
-function showMenu(x: number, y: number, items: [string, () => void][]) {
+/// A menu entry: its label, what it does, and optionally a color swatch shown before the label.
+type MenuItem = [string, () => void, string?];
+
+function showMenu(x: number, y: number, items: MenuItem[]) {
   closeMenu();
   const menu = document.createElement("div");
   menu.id = "menu";
-  for (const [label, action] of items) {
+  for (const [label, action, swatch] of items) {
     const item = document.createElement("button");
     item.textContent = label;
+    if (swatch) {
+      const chip = document.createElement("span");
+      chip.className = "swatch";
+      chip.style.background = swatch;
+      item.prepend(chip);
+    }
     item.onclick = () => {
       closeMenu();
       action();
@@ -1611,6 +1824,7 @@ getCurrentWebview()
     v.term.focus();
   })
   .catch(console.error);
+setupSidebarResize();
 setupSpawnDialog();
 setupSettingsDialog();
 invoke<{ terminal: TerminalSettings; theme: ThemeSettings; sounds: SoundSettings; updates: Partial<UpdateSettings> }>(

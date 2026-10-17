@@ -135,6 +135,17 @@ pub struct Tab {
     pub layout: Layout,
 }
 
+/// The named colors a workspace's sidebar row can take, in the order the sidebar sorts them by.
+pub const WORKSPACE_COLORS: &[&str] = &["red", "orange", "yellow", "green", "cyan", "blue", "purple", "pink", "gray"];
+
+/// `color` in the form `Workspace::color` keeps: a name from `WORKSPACE_COLORS` or `#rrggbb`, lowercased; `None` for
+/// anything else.
+pub fn workspace_color(color: &str) -> Option<String> {
+    let color = color.trim().to_lowercase();
+    let hex = color.len() == 7 && color.starts_with('#') && color[1..].chars().all(|c| c.is_ascii_hexdigit());
+    (hex || WORKSPACE_COLORS.contains(&color.as_str())).then_some(color)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workspace {
     pub id: WorkspaceId,
@@ -154,6 +165,9 @@ pub struct Workspace {
     /// Kept in the sidebar's Pinned section.
     #[serde(default)]
     pub pinned: bool,
+    /// The sidebar row's color: one of `WORKSPACE_COLORS`, which the app takes from the theme, or `#rrggbb`.
+    #[serde(default)]
+    pub color: Option<String>,
     pub kind: Kind,
     pub cwd: PathBuf,
     pub worktree: Option<Worktree>,
@@ -203,6 +217,15 @@ mod tests {
             serde_json::from_str::<Status>(r#""needs_input""#).unwrap(),
             Status::NeedsInput
         );
+    }
+
+    #[test]
+    fn workspace_colors_are_palette_names_or_hex() {
+        assert_eq!(workspace_color(" Blue ").as_deref(), Some("blue"));
+        assert_eq!(workspace_color("#A0b1C2").as_deref(), Some("#a0b1c2"));
+        assert_eq!(workspace_color("teal"), None);
+        assert_eq!(workspace_color("#abc"), None);
+        assert_eq!(workspace_color("#abcdeg"), None);
     }
 
     #[test]
