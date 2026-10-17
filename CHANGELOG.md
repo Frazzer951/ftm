@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.1.12] - 2026-10-17
+
+### App
+
+- fix(app): give workspace colors fixed values instead of the theme's
+- feat(app): sort each sidebar section by manual order, name or color
+- feat(app): drag the sidebar's edge to resize it
+
+### Other
+
+- feat: give workspaces a sidebar color with ftm color or the row's menu
+- feat: drag workspaces to reorder them in the sidebar
+- fix: address review findings on the sidebar order, sort and drag
+
 ## [0.1.11] - 2026-10-16
 
 ### App
