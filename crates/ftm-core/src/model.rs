@@ -165,7 +165,7 @@ pub struct Workspace {
     /// Kept in the sidebar's Pinned section.
     #[serde(default)]
     pub pinned: bool,
-    /// The sidebar row's color: one of `WORKSPACE_COLORS`, which the app takes from the theme, or `#rrggbb`.
+    /// The sidebar row's color: one of `WORKSPACE_COLORS`, which the app maps to fixed values, or `#rrggbb`.
     #[serde(default)]
     pub color: Option<String>,
     pub kind: Kind,

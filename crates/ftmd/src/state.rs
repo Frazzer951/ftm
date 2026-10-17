@@ -238,8 +238,9 @@ impl State {
 
     /// In sidebar order.
     fn list(&self) -> Vec<Workspace> {
+        let order: std::collections::HashSet<&WorkspaceId> = self.workspace_order.iter().collect();
         let listed = self.workspace_order.iter().filter_map(|id| self.workspaces.get(id));
-        let rest = self.workspaces.values().filter(|w| !self.workspace_order.contains(&w.id));
+        let rest = self.workspaces.values().filter(|w| !order.contains(&w.id));
         listed.chain(rest).cloned().collect()
     }
 
@@ -619,16 +620,10 @@ pub fn freeze(shared: &Shared) -> Result<MutexGuard<'_, State>> {
 /// `order` cut down to the paths in `folders`, each once, then the folders it lacks (new ones, or all of them from a
 /// state file that predates the order) by name, the order the sidebar used before it could be rearranged.
 fn folder_order(order: Vec<PathBuf>, folders: &[Folder]) -> Vec<PathBuf> {
-    let known: std::collections::HashSet<&PathBuf> = folders.iter().map(|f| &f.path).collect();
-    let mut seen = std::collections::HashSet::new();
-    let mut out: Vec<PathBuf> = order
-        .into_iter()
-        .filter(|p| known.contains(p) && seen.insert(p.clone()))
-        .collect();
-    let mut rest: Vec<&PathBuf> = folders.iter().map(|f| &f.path).filter(|p| !seen.contains(*p)).collect();
-    rest.sort_by_key(|p| (p.file_name().map(|n| n.to_string_lossy().to_lowercase()), (*p).clone()));
-    out.extend(rest.into_iter().cloned());
-    out
+    let all = folders.iter().map(|f| f.path.clone()).collect();
+    known_then_rest(order, all, |p| {
+        (p.file_name().map(|n| n.to_string_lossy().to_lowercase()), p.clone())
+    })
 }
 
 /// `order` cut down to the ids in `workspaces`, each once (the first time it appears), then the workspaces it lacks by
@@ -637,14 +632,27 @@ fn workspace_order(
     order: impl IntoIterator<Item = WorkspaceId>,
     workspaces: &BTreeMap<WorkspaceId, Workspace>,
 ) -> Vec<WorkspaceId> {
+    known_then_rest(order, workspaces.keys().copied().collect(), |id| {
+        (workspaces[id].display_name().to_lowercase(), *id)
+    })
+}
+
+/// The items of `order` that are in `all`, each once (the first time it appears), then the rest of `all` sorted by
+/// `rest_key`.
+fn known_then_rest<K: Clone + Eq + std::hash::Hash, S: Ord>(
+    order: impl IntoIterator<Item = K>,
+    all: Vec<K>,
+    rest_key: impl FnMut(&K) -> S,
+) -> Vec<K> {
+    let known: std::collections::HashSet<&K> = all.iter().collect();
     let mut seen = std::collections::HashSet::new();
-    let mut out: Vec<WorkspaceId> = order
+    let mut out: Vec<K> = order
         .into_iter()
-        .filter(|id| workspaces.contains_key(id) && seen.insert(*id))
+        .filter(|k| known.contains(k) && seen.insert(k.clone()))
         .collect();
-    let mut rest: Vec<&Workspace> = workspaces.values().filter(|w| !seen.contains(&w.id)).collect();
-    rest.sort_by_key(|w| (w.display_name().to_lowercase(), w.id));
-    out.extend(rest.into_iter().map(|w| w.id));
+    let mut rest: Vec<K> = all.iter().filter(|k| !seen.contains(*k)).cloned().collect();
+    rest.sort_by_key(rest_key);
+    out.extend(rest);
     out
 }
 
@@ -1218,6 +1226,7 @@ fn open_spawned(shared: &Shared, req: &SpawnRequest, created: Option<&worktree::
         Ok(pane) => pane,
         Err(e) => {
             state.workspaces.remove(&id);
+            state.workspace_order.retain(|w| *w != id);
             return Err(e);
         },
     };
@@ -1248,6 +1257,7 @@ fn close(shared: &Shared, id: WorkspaceId, remove_worktree: bool) -> Result<Resp
     let (ws, panes) = {
         let mut state = lock(shared);
         let ws = state.workspaces.remove(&id).ok_or_else(|| eyre!("no workspace {id}"))?;
+        state.workspace_order.retain(|w| *w != id);
         for child in state.workspaces.values_mut().filter(|w| w.parent == Some(id)) {
             child.parent = ws.parent;
         }
@@ -1526,6 +1536,47 @@ mod tests {
             workspace_order([ids[0], WorkspaceId::new_v4(), ids[0], ids[2]], &all),
             vec![ids[0], ids[2], ids[1]],
         );
+    }
+
+    #[test]
+    fn closing_or_failing_to_open_a_workspace_drops_it_from_the_order() {
+        let dir = std::env::temp_dir().join(format!("ftmd-ws-order-{}", std::process::id()));
+        let shared = State::new(dir.join("ftmd.sock"), None);
+        let ws: Workspace = serde_json::from_value(serde_json::json!({
+            "id": WorkspaceId::new_v4(), "parent": null, "name": "a", "kind": "terminal",
+            "cwd": "/", "worktree": null, "status": "idle", "tabs": [],
+        }))
+        .unwrap();
+        let id = ws.id;
+        {
+            let mut state = lock(&shared);
+            state.state_file = dir.join("state.json");
+            state.workspaces.insert(id, ws);
+            state.workspace_order.push(id);
+        }
+        close(&shared, id, false).unwrap();
+        assert!(lock(&shared).workspace_order.is_empty());
+
+        // Holders cannot live under a file, so the first pane never opens.
+        lock(&shared).holders = PathBuf::from("/dev/null/holders");
+        let req = SpawnRequest {
+            kind: Kind::Terminal,
+            name: None,
+            parent: None,
+            cwd: "/".into(),
+            worktree_branch: None,
+            base: None,
+            copy_changes: false,
+            brief: None,
+            command: None,
+            claude_args: Vec::new(),
+        };
+        assert!(open_spawned(&shared, &req, None).is_err());
+        let state = lock(&shared);
+        assert!(state.workspaces.is_empty());
+        assert!(state.workspace_order.is_empty());
+        drop(state);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
