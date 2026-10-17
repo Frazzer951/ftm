@@ -11,11 +11,16 @@ export function moveItem<T>(items: T[], item: T, target: number): T[] {
 }
 
 /// `all` with the members of `group` put in `group`'s order, in the places they already held; everything else stays.
+/// Members of `group` missing from `all` are ignored.
 export function reorderWithin<T>(all: T[], group: T[]): T[] {
-  const members = new Set(group);
+  const present = new Set(all);
+  const kept = group.filter((x) => present.has(x));
+  const members = new Set(kept);
   let next = 0;
-  return all.map((x) => (members.has(x) ? group[next++] : x));
+  return all.map((x) => (members.has(x) ? kept[next++] : x));
 }
+
+export const sameOrder = <T>(a: T[], b: T[]): boolean => a.length === b.length && a.every((x, i) => x === b[i]);
 
 /// How a sidebar section orders its rows: as dragged, by shown name, or by color.
 export type SortMode = "manual" | "name" | "color";
@@ -23,6 +28,22 @@ export type SortMode = "manual" | "name" | "color";
 /// A section's sort until the viewer picks one: Name for the workspace sections, Manual for Folders, whose dragged order
 /// came first.
 export const defaultSort = (section: string): SortMode => (section === "folders" ? "manual" : "name");
+
+const SORT_MODES: readonly string[] = ["manual", "name", "color"] satisfies SortMode[];
+
+/// The saved sorts in `raw` (JSON), keeping only known modes; anything else leaves a section on its default.
+export function parseSectionSort(raw: string | null): Record<string, SortMode> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw ?? "{}");
+  } catch {
+    return {};
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+  return Object.fromEntries(
+    Object.entries(parsed).filter((e): e is [string, SortMode] => SORT_MODES.includes(e[1])),
+  );
+}
 
 /// Palette colors in `palette` order, then other (hex) colors, then rows without one. Ties keep manual order.
 function colorRank(color: string | null | undefined, palette: readonly string[]): [number, string] {
