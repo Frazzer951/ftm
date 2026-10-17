@@ -15,7 +15,15 @@ import { dropText } from "./drop.ts";
 import { StatusSounds, statusDot, stillFinished } from "./finish.ts";
 import { clipboardKey, type OptionAsMeta, optionIsMeta, paneKey } from "./keys.ts";
 import { KeyLayout, type KeyProtocol, kittyKeyboard } from "./kitty.ts";
-import { defaultSort, moveItem, reorderWithin, type SortMode, sortRows } from "./order.ts";
+import {
+  defaultSort,
+  moveItem,
+  parseSectionSort,
+  reorderWithin,
+  type SortMode,
+  sameOrder,
+  sortRows,
+} from "./order.ts";
 import { replyFilter } from "./replies.ts";
 import { clampSidebarWidth, SIDEBAR_DEFAULT } from "./sidebar.ts";
 import { loadSounds, play, type SoundEntry, type SoundSettings } from "./sounds.ts";
@@ -833,7 +841,7 @@ const SORT_KEY = "ftm.sectionSort";
 /// Each section's sort, by section key; a section that is not listed has its `defaultSort`.
 const sectionSort: Record<string, SortMode> = (() => {
   try {
-    return JSON.parse(localStorage.getItem(SORT_KEY) ?? "{}");
+    return parseSectionSort(localStorage.getItem(SORT_KEY));
   } catch {
     return {};
   }
@@ -1163,11 +1171,24 @@ function markDrop(rows: HTMLElement[], y: number): number {
 function startRowDrag(row: HTMLElement, key: string, siblings: () => HTMLElement[], drop: (target: number) => void) {
   row.onpointerdown = (e) => {
     if (e.button !== 0 || (e.target as HTMLElement).closest("button, input")) return;
-    rowDrag = { key, x: e.clientX, y: e.clientY, moved: false, target: -1 };
+    const drag = { key, x: e.clientX, y: e.clientY, moved: false, target: -1 };
+    rowDrag = drag;
+    // Until the drag starts nothing is captured, so a release elsewhere never reaches the row.
+    const abandon = () => {
+      window.removeEventListener("pointerup", abandon);
+      window.removeEventListener("pointercancel", abandon);
+      if (rowDrag === drag && !drag.moved) rowDrag = null;
+    };
+    window.addEventListener("pointerup", abandon);
+    window.addEventListener("pointercancel", abandon);
   };
   row.onpointermove = (e) => {
     if (!rowDrag || rowDrag.key !== key) return;
     if (!rowDrag.moved) {
+      if (e.buttons === 0) {
+        rowDrag = null;
+        return;
+      }
       if (Math.hypot(e.clientX - rowDrag.x, e.clientY - rowDrag.y) < 4) return;
       // Captured only once it is a drag, so clicks and double-clicks (rename) still reach what was under the pointer.
       rowDrag.moved = true;
@@ -1199,15 +1220,15 @@ function siblingRows(row: HTMLElement): HTMLElement[] {
 }
 
 function dropWorkspace(row: HTMLElement, id: Id, target: number) {
+  // The rows were not re-rendered during the drag, so they can list workspaces that have closed since.
   const group = moveItem(
     siblingRows(row).map((r) => r.dataset.id ?? ""),
     id,
     target,
   );
-  const order = reorderWithin(
-    workspaces.map((w) => w.id),
-    group,
-  );
+  const current = workspaces.map((w) => w.id);
+  const order = reorderWithin(current, group);
+  if (sameOrder(order, current)) return;
   const byId = new Map(workspaces.map((w) => [w.id, w]));
   const before = workspaces;
   const reordered = order.flatMap((i) => byId.get(i) ?? []);
@@ -1233,11 +1254,9 @@ function folderRow(folder: Folder, draggable: boolean): HTMLLIElement {
     () => [...document.querySelectorAll<HTMLElement>("#sections .ws.folder")],
     (target) => {
       const before = folderOrder;
-      const order = moveItem(
-        sidebarFolders().map((f) => f.path),
-        folder.path,
-        target,
-      );
+      const current = sidebarFolders().map((f) => f.path);
+      const order = moveItem(current, folder.path, target);
+      if (sameOrder(order, current)) return;
       folderOrder = order;
       request({ op: "reorder_folders", paths: order }).catch((err) => {
         console.error(err);
