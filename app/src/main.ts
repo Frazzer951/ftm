@@ -7,6 +7,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { FitAddon } from "@xterm/addon-fit";
 import { LigaturesAddon } from "@xterm/addon-ligatures";
+import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
@@ -15,6 +16,7 @@ import { dropText } from "./drop.ts";
 import { StatusSounds, statusDot, stillFinished } from "./finish.ts";
 import { clipboardKey, type OptionAsMeta, optionIsMeta, paneKey } from "./keys.ts";
 import { KeyLayout, type KeyProtocol, kittyKeyboard } from "./kitty.ts";
+import { openableUrl, opensLink } from "./links.ts";
 import {
   defaultSort,
   moveItem,
@@ -94,6 +96,13 @@ console.error = (...args: unknown[]) => {
 };
 window.addEventListener("error", (e) => report(`${e.message} at ${e.filename}:${e.lineno}`));
 window.addEventListener("unhandledrejection", (e) => report(`unhandled rejection: ${e.reason?.stack ?? e.reason}`));
+function openLink(e: MouseEvent, text: string) {
+  const url = openableUrl(text);
+  if (!url || !opensLink(e, isMac)) return;
+  e.preventDefault();
+  invoke("open_url", { url }).catch(console.error);
+}
+
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
 let workspaces: Workspace[] = [];
@@ -149,9 +158,19 @@ function view(pane: Id): PaneView {
     scrollback: 10000,
     theme: xtermTheme,
     allowProposedApi: true,
+    // OSC 8 hyperlinks; mailto: and the rest still go through openableUrl's allowlist.
+    linkHandler: {
+      activate: openLink,
+      hover: (_e, text) => {
+        if (term.element) term.element.title = text;
+      },
+      leave: () => term.element?.removeAttribute("title"),
+      allowNonHttpProtocols: true,
+    },
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
+  term.loadAddon(new WebLinksAddon(openLink));
   term.open(el);
   // WebKitGTK without its DMA-BUF renderer (forced on in main.rs) leaves a WebGL canvas unpainted until something
   // else repaints the page, so output shows up one keystroke late; the DOM renderer has no such lag.
