@@ -1094,7 +1094,8 @@ function setColor(ws: Workspace, color: string | null) {
   });
 }
 
-/// The palette, the current `#rrggbb` color if any, Custom… for the system color picker, and None.
+/// The palette, the current `#rrggbb` color if any, Random (ftmd picks a `#rrggbb`), Custom… for the system color
+/// picker, and None.
 function showColorMenu(x: number, y: number, ws: Workspace) {
   showMenu(x, y, [
     ...WORKSPACE_COLORS.map((c): MenuItem => [
@@ -1103,6 +1104,7 @@ function showColorMenu(x: number, y: number, ws: Workspace) {
       workspaceColor(c),
     ]),
     ...(ws.color?.startsWith("#") ? [[`${ws.color} ✓`, () => {}, ws.color] as MenuItem] : []),
+    ["Random", () => setColor(ws, "random")],
     ["Custom…", () => pickColor(x, y, ws)],
     [ws.color ? "None" : "None ✓", () => setColor(ws, null)],
   ]);

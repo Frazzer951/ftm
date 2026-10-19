@@ -570,6 +570,30 @@ fn color_workspaces() {
     assert_eq!(color(&spawned).as_deref(), Some("purple"));
     let hex = ftm(&bin, socket, &["spawn", "terminal", "--path", path, "--color", "#00AA11"]);
     assert_eq!(color(&hex).as_deref(), Some("#00aa11"));
+
+    let is_hex = |c: Option<String>| c.is_some_and(|c| c.len() == 7 && c.starts_with('#'));
+    ftm(&bin, socket, &["color", "Random", "--id", &parent]);
+    assert!(is_hex(color(&parent)));
+    let random = ftm(&bin, socket, &["spawn", "terminal", "--path", path, "--color", "random"]);
+    assert!(is_hex(color(&random)));
+
+    // Children of a colored parent start near its color, each different; an explicit color wins, and recoloring the
+    // parent later leaves them be.
+    ftm(&bin, socket, &["color", "blue", "--id", &parent]);
+    let kid = |extra: &[&str]| {
+        let args = [&["spawn", "terminal", "--path", path, "--parent", &parent][..], extra].concat();
+        ftm(&bin, socket, &args)
+    };
+    let (a, b) = (kid(&[]), kid(&[]));
+    let (ca, cb) = (color(&a), color(&b));
+    assert!(is_hex(ca.clone()) && is_hex(cb.clone()));
+    assert!(ca != cb && ca.as_deref() != Some("#0091ff"), "{ca:?} {cb:?}");
+    assert_eq!(color(&kid(&["--color", "red"])).as_deref(), Some("red"));
+    ftm(&bin, socket, &["color", "green", "--id", &parent]);
+    assert_eq!(color(&a), ca);
+    assert_eq!(color(&child).as_deref(), Some("#ff8800"));
+    ftm(&bin, socket, &["color", "--clear", "--id", &parent]);
+    assert_eq!(color(&kid(&[])), None);
 }
 
 /// New worktrees get the source checkout's gitignored files, minus big rebuildable directories at any depth and the

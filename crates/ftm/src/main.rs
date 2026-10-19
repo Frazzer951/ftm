@@ -6,7 +6,7 @@ use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use clap::{Parser, Subcommand, ValueEnum};
 use eyre::{Result, WrapErr, bail};
 use ftm_core::ENV_WORKSPACE_ID;
-use ftm_core::model::{Kind, PaneId, Status, WORKSPACE_COLORS, Workspace, WorkspaceId, workspace_color};
+use ftm_core::model::{Kind, PaneId, RANDOM_COLOR, Status, WORKSPACE_COLORS, Workspace, WorkspaceId, workspace_color};
 use ftm_core::protocol::{FEATURE_CLAUDE_ARGS, FEATURE_SPAWN_COLOR, Request, Response, SpawnRequest};
 use std::io::Write;
 use std::path::PathBuf;
@@ -55,7 +55,7 @@ enum Command {
         #[arg(long)]
         detached: bool,
         /// Sidebar color to start with, as `ftm color` takes it: red, orange, yellow, green, cyan, blue, purple, pink,
-        /// gray or #rrggbb
+        /// gray, random or #rrggbb. Without it, a workspace under a colored parent gets a color near the parent's
         #[arg(long)]
         color: Option<String>,
         /// Extra arguments for Claude, after `--` (e.g. `-- --model <id> --permission-mode auto`, or `-- --resume
@@ -100,8 +100,8 @@ enum Command {
         #[arg(env = ENV_WORKSPACE_ID)]
         id: WorkspaceId,
     },
-    /// Color the workspace's sidebar row: red, orange, yellow, green, cyan, blue, purple, pink, gray or #rrggbb;
-    /// --clear removes it
+    /// Color the workspace's sidebar row: red, orange, yellow, green, cyan, blue, purple, pink, gray, #rrggbb, or
+    /// random for a random #rrggbb; --clear removes it
     Color {
         #[arg(required_unless_present = "clear")]
         color: Option<String>,
@@ -193,8 +193,15 @@ fn main() -> Result<()> {
             }
             let color = color
                 .map(|c| {
-                    workspace_color(&c)
-                        .ok_or_else(|| eyre::eyre!("unknown color {c:?}: use {} or #rrggbb", WORKSPACE_COLORS.join(", ")))
+                    if c.trim().eq_ignore_ascii_case(RANDOM_COLOR) {
+                        return Ok(RANDOM_COLOR.to_string());
+                    }
+                    workspace_color(&c).ok_or_else(|| {
+                        eyre::eyre!(
+                            "unknown color {c:?}: use {}, {RANDOM_COLOR} or #rrggbb",
+                            WORKSPACE_COLORS.join(", ")
+                        )
+                    })
                 })
                 .transpose()?;
             if color.is_some() {

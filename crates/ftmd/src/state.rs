@@ -3,14 +3,14 @@ use crate::worktree;
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use eyre::{Result, WrapErr, bail, eyre};
 use ftm_core::model::{
-    Folder, Kind, Layout, PaneId, SplitDir, Status, Tab, TabId, WORKSPACE_COLORS, Workspace, WorkspaceId, Worktree,
-    workspace_color,
+    Folder, Kind, Layout, PaneId, RANDOM_COLOR, SplitDir, Status, Tab, TabId, WORKSPACE_COLORS, Workspace, WorkspaceId,
+    Worktree, color_hex, workspace_color,
 };
 use ftm_core::protocol::{
     Event, FEATURE_CLAUDE_ARGS, FEATURE_SPAWN_COLOR, FEATURE_WORKSPACE_COLORS, FEATURE_WORKSPACE_ORDER, Request, Response,
     SpawnRequest,
 };
-use ftm_core::{ENV_AGENT_CMD, ENV_NAME, ENV_PANE_ID, ENV_SOCKET, ENV_WORKSPACE_ID, paths};
+use ftm_core::{ENV_AGENT_CMD, ENV_NAME, ENV_PANE_ID, ENV_SOCKET, ENV_WORKSPACE_ID, color, paths};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::os::unix::net::UnixStream;
@@ -1199,6 +1199,7 @@ fn open_spawned(shared: &Shared, req: &SpawnRequest, created: Option<&worktree::
     {
         bail!("no workspace {parent}");
     }
+    let color = req.color.clone().or_else(|| inherited_color(&state, req.parent?));
     state.workspace_order.push(id);
     state.workspaces.insert(
         id,
@@ -1210,7 +1211,7 @@ fn open_spawned(shared: &Shared, req: &SpawnRequest, created: Option<&worktree::
             auto_title: None,
             agent_pane: None,
             pinned: false,
-            color: req.color.clone(),
+            color,
             kind: req.kind,
             cwd,
             worktree,
@@ -1312,14 +1313,37 @@ fn pin(shared: &Shared, id: WorkspaceId, pinned: bool) -> Result<Response> {
     Ok(Response::Ok)
 }
 
-/// `color` in the form `Workspace::color` keeps; an empty one is `None`.
+/// `color` in the form `Workspace::color` keeps, `random` picked as a `#rrggbb`; an empty one is `None`.
 fn parse_color(color: Option<&str>) -> Result<Option<String>> {
     match color.map(str::trim).filter(|c| !c.is_empty()) {
         None => Ok(None),
+        Some(c) if c.eq_ignore_ascii_case(RANDOM_COLOR) => {
+            Ok(Some(color::random_color(WorkspaceId::new_v4().as_u64_pair().0)))
+        },
         Some(c) => Ok(Some(workspace_color(c).ok_or_else(|| {
-            eyre!("unknown color {c:?}: use {} or #rrggbb", WORKSPACE_COLORS.join(", "))
+            eyre!(
+                "unknown color {c:?}: use {}, {RANDOM_COLOR} or #rrggbb",
+                WORKSPACE_COLORS.join(", ")
+            )
         })?)),
     }
+}
+
+/// A child spawned without a color under a colored parent gets the parent's color nudged, one no other child of
+/// that parent has.
+fn inherited_color(state: &State, parent: WorkspaceId) -> Option<String> {
+    let base = color_hex(state.workspaces.get(&parent)?.color.as_deref()?).to_string();
+    let siblings: Vec<&str> = state
+        .workspaces
+        .values()
+        .filter(|w| w.parent == Some(parent))
+        .filter_map(|w| w.color.as_deref())
+        .collect();
+    let first = siblings.len();
+    (first..first + 24)
+        .filter_map(|n| color::child_color(&base, n))
+        .find(|c| !siblings.contains(&c.as_str()))
+        .or_else(|| color::child_color(&base, first))
 }
 
 /// An empty `color` clears it, like `None`.

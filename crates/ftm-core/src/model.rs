@@ -138,12 +138,37 @@ pub struct Tab {
 /// The named colors a workspace's sidebar row can take, in the order the sidebar sorts them by.
 pub const WORKSPACE_COLORS: &[&str] = &["red", "orange", "yellow", "green", "cyan", "blue", "purple", "pink", "gray"];
 
+/// The fixed color each of `WORKSPACE_COLORS` stands for; the app's `WORKSPACE_PALETTE` in `app/src/colors.ts`
+/// draws the same.
+pub const WORKSPACE_PALETTE: &[(&str, &str)] = &[
+    ("red", "#ff4245"),
+    ("orange", "#ff8c00"),
+    ("yellow", "#ffd600"),
+    ("green", "#30d158"),
+    ("cyan", "#40c8e0"),
+    ("blue", "#0091ff"),
+    ("purple", "#bf5af2"),
+    ("pink", "#ff6482"),
+    ("gray", "#98989d"),
+];
+
+/// Accepted wherever a color is; ftmd stores a random `#rrggbb` in its place.
+pub const RANDOM_COLOR: &str = "random";
+
 /// `color` in the form `Workspace::color` keeps: a name from `WORKSPACE_COLORS` or `#rrggbb`, lowercased; `None` for
 /// anything else.
 pub fn workspace_color(color: &str) -> Option<String> {
     let color = color.trim().to_lowercase();
     let hex = color.len() == 7 && color.starts_with('#') && color[1..].chars().all(|c| c.is_ascii_hexdigit());
     (hex || WORKSPACE_COLORS.contains(&color.as_str())).then_some(color)
+}
+
+/// The `#rrggbb` a stored `Workspace::color` draws as.
+pub fn color_hex(color: &str) -> &str {
+    WORKSPACE_PALETTE
+        .iter()
+        .find(|(name, _)| *name == color)
+        .map_or(color, |(_, hex)| hex)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -226,6 +251,27 @@ mod tests {
         assert_eq!(workspace_color("teal"), None);
         assert_eq!(workspace_color("#abc"), None);
         assert_eq!(workspace_color("#abcdeg"), None);
+        assert_eq!(color_hex("blue"), "#0091ff");
+        assert_eq!(color_hex("#a0b1c2"), "#a0b1c2");
+    }
+
+    #[test]
+    fn palette_matches_the_app() {
+        assert_eq!(
+            WORKSPACE_PALETTE.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+            WORKSPACE_COLORS
+        );
+        let ts = include_str!("../../../app/src/colors.ts");
+        let table = ts.split("WORKSPACE_PALETTE: Record<string, string> = {").nth(1).unwrap();
+        let app: Vec<(&str, &str)> = table
+            .split('}')
+            .next()
+            .unwrap()
+            .lines()
+            .filter_map(|l| l.trim().trim_end_matches(',').split_once(": "))
+            .map(|(name, hex)| (name, hex.trim_matches('"')))
+            .collect();
+        assert_eq!(app, WORKSPACE_PALETTE);
     }
 
     #[test]
