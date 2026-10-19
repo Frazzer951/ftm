@@ -122,6 +122,7 @@ dialog fieldset { border: 1px solid var(--border-strong); border-radius: 4px; di
 #menu { position: fixed; z-index: 10; display: flex; flex-direction: column; min-width: 120px; padding: 4px; background: var(--surface); border: 1px solid var(--border-strong); border-radius: 6px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4); }
 #menu button { text-align: left; background: none; border: none; padding: 4px 8px; }
 #menu button:hover { background: var(--selected); }
+#color-picker { position: fixed; width: 1px; height: 1px; padding: 0; border: 0; opacity: 0; pointer-events: none; }
 #menu .swatch { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 7px; }
 #sidebar header .actions { display: flex; gap: 4px; }
 dialog input[type="number"] { width: 100%; background: var(--bg); color: inherit; border: 1px solid var(--border-strong); border-radius: 4px; padding: 4px; }

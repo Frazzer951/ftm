@@ -10,7 +10,7 @@ import { LigaturesAddon } from "@xterm/addon-ligatures";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { chromeColors, WORKSPACE_COLORS, WORKSPACE_PALETTE } from "./colors.ts";
+import { chromeColors, pickerColor, WORKSPACE_COLORS, WORKSPACE_PALETTE } from "./colors.ts";
 import { dropText } from "./drop.ts";
 import { StatusSounds, statusDot, stillFinished } from "./finish.ts";
 import { clipboardKey, type OptionAsMeta, optionIsMeta, paneKey } from "./keys.ts";
@@ -1094,7 +1094,7 @@ function setColor(ws: Workspace, color: string | null) {
   });
 }
 
-/// The palette, plus None; `ftm color '#rrggbb'` sets any other color.
+/// The palette, the current `#rrggbb` color if any, Custom… for the system color picker, and None.
 function showColorMenu(x: number, y: number, ws: Workspace) {
   showMenu(x, y, [
     ...WORKSPACE_COLORS.map((c): MenuItem => [
@@ -1103,8 +1103,33 @@ function showColorMenu(x: number, y: number, ws: Workspace) {
       workspaceColor(c),
     ]),
     ...(ws.color?.startsWith("#") ? [[`${ws.color} ✓`, () => {}, ws.color] as MenuItem] : []),
+    ["Custom…", () => pickColor(x, y, ws)],
     [ws.color ? "None" : "None ✓", () => setColor(ws, null)],
   ]);
+}
+
+let colorPicker: HTMLInputElement | undefined;
+let pickingFor: Workspace | undefined;
+
+/// Opens the system color picker at the menu's spot. Only `change` sets the color, so dragging around the picker
+/// sends ftmd one request rather than one per step.
+function pickColor(x: number, y: number, ws: Workspace) {
+  if (!colorPicker) {
+    const input = document.createElement("input");
+    input.type = "color";
+    input.id = "color-picker";
+    input.tabIndex = -1;
+    input.onchange = () => {
+      if (pickingFor) setColor(pickingFor, input.value);
+    };
+    document.body.append(input);
+    colorPicker = input;
+  }
+  pickingFor = ws;
+  colorPicker.value = pickerColor(ws.color);
+  colorPicker.style.left = `${x}px`;
+  colorPicker.style.top = `${y}px`;
+  colorPicker.click();
 }
 
 interface OpenTarget {

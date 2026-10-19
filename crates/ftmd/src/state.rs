@@ -7,7 +7,8 @@ use ftm_core::model::{
     workspace_color,
 };
 use ftm_core::protocol::{
-    Event, FEATURE_CLAUDE_ARGS, FEATURE_WORKSPACE_COLORS, FEATURE_WORKSPACE_ORDER, Request, Response, SpawnRequest,
+    Event, FEATURE_CLAUDE_ARGS, FEATURE_SPAWN_COLOR, FEATURE_WORKSPACE_COLORS, FEATURE_WORKSPACE_ORDER, Request, Response,
+    SpawnRequest,
 };
 use ftm_core::{ENV_AGENT_CMD, ENV_NAME, ENV_PANE_ID, ENV_SOCKET, ENV_WORKSPACE_ID, paths};
 use serde::{Deserialize, Serialize};
@@ -1039,9 +1040,14 @@ pub fn handle(shared: &Shared, request: Request, peer: Option<i32>) -> Response 
     let result = match request {
         Request::Ping => Ok(Response::Pong {
             version: env!("CARGO_PKG_VERSION").to_string(),
-            features: [FEATURE_CLAUDE_ARGS, FEATURE_WORKSPACE_COLORS, FEATURE_WORKSPACE_ORDER]
-                .map(String::from)
-                .to_vec(),
+            features: [
+                FEATURE_CLAUDE_ARGS,
+                FEATURE_WORKSPACE_COLORS,
+                FEATURE_WORKSPACE_ORDER,
+                FEATURE_SPAWN_COLOR,
+            ]
+            .map(String::from)
+            .to_vec(),
         }),
         Request::List => Ok(Response::Workspaces {
             workspaces: lock(shared).list(),
@@ -1136,7 +1142,7 @@ fn set_status(ws: &mut Workspace, status: Status, background_agents: u32) {
     ws.background_agents = background_agents;
 }
 
-fn spawn(shared: &Shared, req: SpawnRequest) -> Result<Response> {
+fn spawn(shared: &Shared, mut req: SpawnRequest) -> Result<Response> {
     if req.kind == Kind::Unknown {
         bail!("unknown workspace kind");
     }
@@ -1146,6 +1152,7 @@ fn spawn(shared: &Shared, req: SpawnRequest) -> Result<Response> {
     if !req.claude_args.is_empty() && req.kind != Kind::Agent {
         bail!("claude arguments only apply to agents");
     }
+    req.color = parse_color(req.color.as_deref())?;
     if let Some(parent) = req.parent
         && !lock(shared).workspaces.contains_key(&parent)
     {
@@ -1203,7 +1210,7 @@ fn open_spawned(shared: &Shared, req: &SpawnRequest, created: Option<&worktree::
             auto_title: None,
             agent_pane: None,
             pinned: false,
-            color: None,
+            color: req.color.clone(),
             kind: req.kind,
             cwd,
             worktree,
@@ -1305,14 +1312,19 @@ fn pin(shared: &Shared, id: WorkspaceId, pinned: bool) -> Result<Response> {
     Ok(Response::Ok)
 }
 
+/// `color` in the form `Workspace::color` keeps; an empty one is `None`.
+fn parse_color(color: Option<&str>) -> Result<Option<String>> {
+    match color.map(str::trim).filter(|c| !c.is_empty()) {
+        None => Ok(None),
+        Some(c) => Ok(Some(workspace_color(c).ok_or_else(|| {
+            eyre!("unknown color {c:?}: use {} or #rrggbb", WORKSPACE_COLORS.join(", "))
+        })?)),
+    }
+}
+
 /// An empty `color` clears it, like `None`.
 fn set_color(shared: &Shared, id: WorkspaceId, color: Option<&str>) -> Result<Response> {
-    let color = match color.map(str::trim).filter(|c| !c.is_empty()) {
-        None => None,
-        Some(c) => Some(
-            workspace_color(c).ok_or_else(|| eyre!("unknown color {c:?}: use {} or #rrggbb", WORKSPACE_COLORS.join(", ")))?,
-        ),
-    };
+    let color = parse_color(color)?;
     let mut state = lock(shared);
     state.workspace_mut(id)?.color = color;
     state.emit_workspaces();
@@ -1570,6 +1582,7 @@ mod tests {
             brief: None,
             command: None,
             claude_args: Vec::new(),
+            color: None,
         };
         assert!(open_spawned(&shared, &req, None).is_err());
         let state = lock(&shared);

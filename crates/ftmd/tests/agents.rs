@@ -214,7 +214,7 @@ fn agents_nest_report_status_and_clean_up() {
     assert_eq!(
         ftm(&bin, &socket, &["ping"]),
         format!(
-            "ftmd {} (features: claude_args, workspace_colors, workspace_order)",
+            "ftmd {} (features: claude_args, workspace_colors, workspace_order, spawn_color)",
             env!("CARGO_PKG_VERSION")
         )
     );
@@ -559,6 +559,17 @@ fn color_workspaces() {
 
     ftm(&bin, socket, &["color", "--clear", "--id", &parent]);
     assert_eq!(color(&parent), None);
+
+    let spawned = ftm(
+        &bin,
+        socket,
+        &[
+            "spawn", "terminal", "--path", path, "--name", "colored", "--color", " Purple ",
+        ],
+    );
+    assert_eq!(color(&spawned).as_deref(), Some("purple"));
+    let hex = ftm(&bin, socket, &["spawn", "terminal", "--path", path, "--color", "#00AA11"]);
+    assert_eq!(color(&hex).as_deref(), Some("#00aa11"));
 }
 
 /// New worktrees get the source checkout's gitignored files, minus big rebuildable directories at any depth and the
@@ -672,7 +683,7 @@ fn claude_args_are_refused_by_an_older_ftmd() {
     let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
     let server = std::thread::spawn(move || {
         let mut requests = String::new();
-        for _ in 0..2 {
+        for _ in 0..3 {
             let (stream, _) = listener.accept().unwrap();
             std::io::BufRead::read_line(&mut std::io::BufReader::new(&stream), &mut requests).unwrap();
             (&stream).write_all(b"{\"result\":\"pong\",\"version\":\"0.1.8\"}\n").unwrap();
@@ -694,6 +705,15 @@ fn claude_args_are_refused_by_an_older_ftmd() {
         .unwrap();
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("ftmd 0.1.8 does not support claude arguments"));
+    // Nor does it get a color it would drop.
+    let out = Command::new(ftm_bin())
+        .args(["spawn", "terminal", "--path", root.to_str().unwrap(), "--color", "blue"])
+        .env("FTM_SOCKET", &socket)
+        .env_remove("FTM_WORKSPACE_ID")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("ftmd 0.1.8 does not support --color"));
     assert!(
         server.join().unwrap().lines().all(|r| r.contains(r#""op":"ping""#)),
         "only pings reach the old ftmd"

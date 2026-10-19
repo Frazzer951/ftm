@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { chromeColors, contrast, luminance, mix, readable, rgb, WORKSPACE_COLORS, WORKSPACE_PALETTE } from "../src/colors.ts";
+import {
+  chromeColors,
+  contrast,
+  luminance,
+  mix,
+  pickerColor,
+  readable,
+  rgb,
+  WORKSPACE_COLORS,
+  WORKSPACE_PALETTE,
+} from "../src/colors.ts";
 
 const near = (actual: number, expected: number, eps = 0.01) =>
   assert.ok(Math.abs(actual - expected) < eps, `${actual} is not close to ${expected}`);
@@ -73,4 +83,12 @@ test("workspace colors are the names ftmd accepts, each clearly apart from the o
       assert.ok(d >= 60, `${a} ${WORKSPACE_PALETTE[a]} and ${b} ${WORKSPACE_PALETTE[b]} are only ${d.toFixed(0)} apart`);
     }
   }
+});
+
+test("the color picker starts from the workspace's color", () => {
+  assert.equal(pickerColor("green"), WORKSPACE_PALETTE.green);
+  assert.equal(pickerColor("#A0b1C2"), "#a0b1c2");
+  assert.equal(pickerColor(null), WORKSPACE_PALETTE.blue);
+  assert.equal(pickerColor(undefined), WORKSPACE_PALETTE.blue);
+  assert.equal(pickerColor("teal"), WORKSPACE_PALETTE.blue);
 });

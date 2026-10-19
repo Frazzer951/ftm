@@ -22,6 +22,7 @@ fn spawn_command(conn: &mut Conn, cwd: &Path, command: Option<&str>) -> (Workspa
         brief: None,
         command: command.map(str::to_string),
         claude_args: Vec::new(),
+        color: None,
     })) else {
         panic!("expected spawned")
     };
@@ -192,6 +193,20 @@ fn unknown_kinds_and_statuses_are_refused() {
         brief: None,
         command: None,
         claude_args: Vec::new(),
+        color: None,
+    }))));
+    assert!(refused(conn.try_send(&Request::Spawn(SpawnRequest {
+        kind: Kind::Terminal,
+        name: None,
+        parent: None,
+        cwd: dir.to_path_buf(),
+        worktree_branch: None,
+        base: None,
+        copy_changes: false,
+        brief: None,
+        command: None,
+        claude_args: Vec::new(),
+        color: Some("teal".into()),
     }))));
     let list = conn.list();
     assert_eq!(list.len(), 1);
@@ -250,6 +265,7 @@ fn agents_without_status_hooks_are_not_left_starting() {
         brief: None,
         command: None,
         claude_args: Vec::new(),
+        color: None,
     })) else {
         panic!("expected spawned")
     };

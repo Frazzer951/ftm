@@ -6,8 +6,8 @@ use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use clap::{Parser, Subcommand, ValueEnum};
 use eyre::{Result, WrapErr, bail};
 use ftm_core::ENV_WORKSPACE_ID;
-use ftm_core::model::{Kind, PaneId, Status, Workspace, WorkspaceId};
-use ftm_core::protocol::{FEATURE_CLAUDE_ARGS, Request, Response, SpawnRequest};
+use ftm_core::model::{Kind, PaneId, Status, WORKSPACE_COLORS, Workspace, WorkspaceId, workspace_color};
+use ftm_core::protocol::{FEATURE_CLAUDE_ARGS, FEATURE_SPAWN_COLOR, Request, Response, SpawnRequest};
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -54,6 +54,10 @@ enum Command {
         /// Open at the top level even when run inside a workspace (overrides --parent)
         #[arg(long)]
         detached: bool,
+        /// Sidebar color to start with, as `ftm color` takes it: red, orange, yellow, green, cyan, blue, purple, pink,
+        /// gray or #rrggbb
+        #[arg(long)]
+        color: Option<String>,
         /// Extra arguments for Claude, after `--` (e.g. `-- --model <id> --permission-mode auto`, or `-- --resume
         /// <session id>`). Each is passed as its own argument after `-n <name>` and before the brief; agents only. Refused when ftmd is too old to pass them on.
         #[arg(last = true, value_name = "CLAUDE_ARGS")]
@@ -170,6 +174,7 @@ fn main() -> Result<()> {
             brief,
             parent,
             detached,
+            color,
             claude_args,
         } => {
             let cwd = match path {
@@ -184,12 +189,16 @@ fn main() -> Result<()> {
                     bail!("claude arguments only apply to agents");
                 }
                 // An older ftmd would drop them and start a plain agent, which for `--resume` means a new session.
-                let Response::Pong { version, features } = client::send(&Request::Ping)? else {
-                    bail!("unexpected response from ftmd");
-                };
-                if !features.iter().any(|f| f == FEATURE_CLAUDE_ARGS) {
-                    bail!("ftmd {version} does not support claude arguments; restart it on this build of ftm");
-                }
+                require_feature(FEATURE_CLAUDE_ARGS, "claude arguments")?;
+            }
+            let color = color
+                .map(|c| {
+                    workspace_color(&c)
+                        .ok_or_else(|| eyre::eyre!("unknown color {c:?}: use {} or #rrggbb", WORKSPACE_COLORS.join(", ")))
+                })
+                .transpose()?;
+            if color.is_some() {
+                require_feature(FEATURE_SPAWN_COLOR, "--color")?;
             }
             Request::Spawn(SpawnRequest {
                 kind: match kind {
@@ -207,6 +216,7 @@ fn main() -> Result<()> {
                     .transpose()?,
                 command: None,
                 claude_args,
+                color,
             })
         },
         Command::Status { status, id, hook } => Request::SetStatus {
@@ -296,6 +306,17 @@ fn running_subagents(hook_input: &str) -> u32 {
             .count()
     });
     u32::try_from(running).unwrap_or(u32::MAX)
+}
+
+/// Refuses when ftmd lacks `feature`, which an older one would otherwise silently drop.
+fn require_feature(feature: &str, what: &str) -> Result<()> {
+    let Response::Pong { version, features } = client::send(&Request::Ping)? else {
+        bail!("unexpected response from ftmd");
+    };
+    if !features.iter().any(|f| f == feature) {
+        bail!("ftmd {version} does not support {what}; restart it on this build of ftm");
+    }
+    Ok(())
 }
 
 fn resolve_pane(target: PaneId) -> Result<PaneId> {

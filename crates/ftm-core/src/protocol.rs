@@ -124,10 +124,15 @@ pub struct SpawnRequest {
     /// brief. An ftmd from before the field ignores them and starts the agent without.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub claude_args: Vec<String>,
+    /// The sidebar color to start with, as `Request::SetColor` takes it. An ftmd from before the field ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 /// `SpawnRequest.claude_args` is honoured.
 pub const FEATURE_CLAUDE_ARGS: &str = "claude_args";
+/// `SpawnRequest.color` is honoured.
+pub const FEATURE_SPAWN_COLOR: &str = "spawn_color";
 /// `Request::SetColor` and `Workspace.color`.
 pub const FEATURE_WORKSPACE_COLORS: &str = "workspace_colors";
 /// `Request::ReorderWorkspaces`, and `List`/`Event::Workspaces` in that order.
@@ -215,6 +220,7 @@ mod tests {
                 brief: None,
                 command: None,
                 claude_args: Vec::new(),
+                color: None,
             })
         };
         let close = |remove_worktree| Request::Close {
@@ -246,17 +252,20 @@ mod tests {
         };
         assert_eq!(req.command, None);
         assert!(req.claude_args.is_empty());
-        // Without extra arguments the request is what an older ftmd expects.
-        assert!(!serde_json::to_string(&Request::Spawn(req)).unwrap().contains("claude_args"));
+        assert_eq!(req.color, None);
+        // Without extra arguments or a color the request is what an older ftmd expects.
+        let json = serde_json::to_string(&Request::Spawn(req)).unwrap();
+        assert!(!json.contains("claude_args") && !json.contains("color"), "{json}");
         let newer = old.replace(
             r#""brief":null"#,
-            r#""brief":null,"command":"true","claude_args":["--model","m"],"future":1"#,
+            r##""brief":null,"command":"true","claude_args":["--model","m"],"color":"#a0b1c2","future":1"##,
         );
         let Request::Spawn(req) = serde_json::from_str(&newer).unwrap() else {
             panic!()
         };
         assert_eq!(req.command.as_deref(), Some("true"));
         assert_eq!(req.claude_args, ["--model", "m"]);
+        assert_eq!(req.color.as_deref(), Some("#a0b1c2"));
     }
 
     /// An app keeps running across a hot upgrade of ftmd, so it must survive events, kinds and statuses added since.

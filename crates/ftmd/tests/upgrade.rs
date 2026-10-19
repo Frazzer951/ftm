@@ -56,6 +56,7 @@ fn spawn_terminal(conn: &mut Conn, cwd: &Path) -> PaneId {
         brief: None,
         command: None,
         claude_args: Vec::new(),
+        color: None,
     })) else {
         panic!("expected spawned")
     };
