@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.1.13] - 2026-10-19
+
+### Daemon
+
+- fix(ftmd): force hyperlinks only for agents' Claude Code, not panes
+- fix(ftmd): random colors draw from a v4 UUID's random bytes only
+
+### App
+
+- feat(app): open URLs in panes with Cmd/Ctrl+click
+- feat(app): color new workspaces from the spawn dialog, a folder's color or a setting
+
+### Docs
+
+- docs: describe pane links
+
+### Other
+
+- feat: custom workspace colors from a picker, and ftm spawn --color
+- feat: random workspace colors, and children start near their parent's color
+
 ## [0.1.12] - 2026-10-17
 
 ### App
