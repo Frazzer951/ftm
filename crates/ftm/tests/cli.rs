@@ -16,6 +16,19 @@ fn an_unreadable_brief_names_the_file() {
     assert!(stderr.contains("/nonexistent/ftm-brief.md"), "{stderr}");
 }
 
+#[test]
+fn spawn_refuses_an_unknown_color() {
+    let out = Command::new(env!("CARGO_BIN_EXE_ftm"))
+        .args(["spawn", "terminal", "--color", "teal"])
+        .env("FTM_SOCKET", "/nonexistent/ftmd.sock")
+        .env_remove("FTM_WORKSPACE_ID")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("unknown color \"teal\""), "{stderr}");
+}
+
 /// Without a fetch gc cannot see an upstream deletion, so asking for both would silently remove nothing extra.
 #[test]
 fn gc_refuses_upstream_deleted_without_a_fetch() {

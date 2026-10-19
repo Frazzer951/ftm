@@ -3,18 +3,19 @@ use crate::worktree;
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use eyre::{Result, WrapErr, bail, eyre};
 use ftm_core::model::{
-    Folder, Kind, Layout, PaneId, SplitDir, Status, Tab, TabId, WORKSPACE_COLORS, Workspace, WorkspaceId, Worktree,
-    workspace_color,
+    Folder, Kind, Layout, NO_COLOR, PaneId, RANDOM_COLOR, SplitDir, Status, Tab, TabId, WORKSPACE_COLORS, Workspace,
+    WorkspaceId, Worktree, color_hex, folder_color, workspace_color,
 };
 use ftm_core::protocol::{
-    Event, FEATURE_CLAUDE_ARGS, FEATURE_WORKSPACE_COLORS, FEATURE_WORKSPACE_ORDER, Request, Response, SpawnRequest,
+    Event, FEATURE_CLAUDE_ARGS, FEATURE_FOLDER_COLORS, FEATURE_SPAWN_COLOR, FEATURE_WORKSPACE_COLORS, FEATURE_WORKSPACE_ORDER,
+    Request, Response, SpawnRequest,
 };
-use ftm_core::{ENV_AGENT_CMD, ENV_NAME, ENV_PANE_ID, ENV_SOCKET, ENV_WORKSPACE_ID, paths};
+use ftm_core::{ENV_AGENT_CMD, ENV_NAME, ENV_PANE_ID, ENV_SOCKET, ENV_WORKSPACE_ID, color, paths};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak, mpsc};
@@ -268,8 +269,16 @@ impl State {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
+        let color = self.folders.iter().find(|f| f.path == path).and_then(|f| f.color.clone());
         self.folders.retain(|f| f.path != path);
-        self.folders.insert(0, Folder { path, last_used: now });
+        self.folders.insert(
+            0,
+            Folder {
+                path,
+                last_used: now,
+                color,
+            },
+        );
         self.emit_folders();
     }
 
@@ -584,7 +593,7 @@ impl std::fmt::Display for HolderVersion {
 
 impl std::error::Error for HolderVersion {}
 
-fn read_saved(path: &std::path::Path) -> Result<Option<Saved>> {
+fn read_saved(path: &Path) -> Result<Option<Saved>> {
     match std::fs::read(path) {
         Ok(bytes) => Ok(Some(
             serde_json::from_slice(&bytes).wrap_err_with(|| format!("parsing {}", path.display()))?,
@@ -1039,9 +1048,15 @@ pub fn handle(shared: &Shared, request: Request, peer: Option<i32>) -> Response 
     let result = match request {
         Request::Ping => Ok(Response::Pong {
             version: env!("CARGO_PKG_VERSION").to_string(),
-            features: [FEATURE_CLAUDE_ARGS, FEATURE_WORKSPACE_COLORS, FEATURE_WORKSPACE_ORDER]
-                .map(String::from)
-                .to_vec(),
+            features: [
+                FEATURE_CLAUDE_ARGS,
+                FEATURE_WORKSPACE_COLORS,
+                FEATURE_WORKSPACE_ORDER,
+                FEATURE_SPAWN_COLOR,
+                FEATURE_FOLDER_COLORS,
+            ]
+            .map(String::from)
+            .to_vec(),
         }),
         Request::List => Ok(Response::Workspaces {
             workspaces: lock(shared).list(),
@@ -1096,6 +1111,7 @@ pub fn handle(shared: &Shared, request: Request, peer: Option<i32>) -> Response 
             state.emit_folders();
             Ok(Response::Ok)
         },
+        Request::SetFolderColor { path, color } => set_folder_color(shared, &path, color.as_deref()),
         Request::ReorderFolders { paths } => {
             let mut state = lock(shared);
             state.folder_order = paths;
@@ -1136,7 +1152,7 @@ fn set_status(ws: &mut Workspace, status: Status, background_agents: u32) {
     ws.background_agents = background_agents;
 }
 
-fn spawn(shared: &Shared, req: SpawnRequest) -> Result<Response> {
+fn spawn(shared: &Shared, mut req: SpawnRequest) -> Result<Response> {
     if req.kind == Kind::Unknown {
         bail!("unknown workspace kind");
     }
@@ -1146,6 +1162,7 @@ fn spawn(shared: &Shared, req: SpawnRequest) -> Result<Response> {
     if !req.claude_args.is_empty() && req.kind != Kind::Agent {
         bail!("claude arguments only apply to agents");
     }
+    req.color = parse_color(req.color.as_deref())?;
     if let Some(parent) = req.parent
         && !lock(shared).workspaces.contains_key(&parent)
     {
@@ -1192,6 +1209,7 @@ fn open_spawned(shared: &Shared, req: &SpawnRequest, created: Option<&worktree::
     {
         bail!("no workspace {parent}");
     }
+    let color = req.color.clone().or_else(|| inherited_color(&state, req.parent?));
     state.workspace_order.push(id);
     state.workspaces.insert(
         id,
@@ -1203,7 +1221,7 @@ fn open_spawned(shared: &Shared, req: &SpawnRequest, created: Option<&worktree::
             auto_title: None,
             agent_pane: None,
             pinned: false,
-            color: None,
+            color,
             kind: req.kind,
             cwd,
             worktree,
@@ -1305,14 +1323,68 @@ fn pin(shared: &Shared, id: WorkspaceId, pinned: bool) -> Result<Response> {
     Ok(Response::Ok)
 }
 
-/// An empty `color` clears it, like `None`.
-fn set_color(shared: &Shared, id: WorkspaceId, color: Option<&str>) -> Result<Response> {
+/// `color` in the form `Workspace::color` keeps, `random` picked as a `#rrggbb`; an empty one is `None`.
+fn parse_color(color: Option<&str>) -> Result<Option<String>> {
+    match color.map(str::trim).filter(|c| !c.is_empty()) {
+        None => Ok(None),
+        Some(c) if c.eq_ignore_ascii_case(RANDOM_COLOR) => Ok(Some(color::random_color(random_bits()))),
+        Some(c) => Ok(Some(workspace_color(c).ok_or_else(|| {
+            eyre!(
+                "unknown color {c:?}: use {}, {RANDOM_COLOR} or #rrggbb",
+                WORKSPACE_COLORS.join(", ")
+            )
+        })?)),
+    }
+}
+
+/// An empty `color` goes back to the app's setting, like `None`.
+fn set_folder_color(shared: &Shared, path: &Path, color: Option<&str>) -> Result<Response> {
     let color = match color.map(str::trim).filter(|c| !c.is_empty()) {
         None => None,
-        Some(c) => Some(
-            workspace_color(c).ok_or_else(|| eyre!("unknown color {c:?}: use {} or #rrggbb", WORKSPACE_COLORS.join(", ")))?,
-        ),
+        Some(c) => Some(folder_color(c).ok_or_else(|| {
+            eyre!(
+                "unknown color {c:?}: use {}, {RANDOM_COLOR}, {NO_COLOR} or #rrggbb",
+                WORKSPACE_COLORS.join(", ")
+            )
+        })?),
     };
+    let mut state = lock(shared);
+    let folder = state
+        .folders
+        .iter_mut()
+        .find(|f| f.path == path)
+        .ok_or_else(|| eyre!("no remembered folder {}", path.display()))?;
+    folder.color = color;
+    state.emit_folders();
+    Ok(Response::Ok)
+}
+
+/// 64 random bits from a v4 UUID, skipping bytes 6 and 8, which carry its fixed version and variant bits.
+fn random_bits() -> u64 {
+    let b = WorkspaceId::new_v4().into_bytes();
+    u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[10], b[11]])
+}
+
+/// A child spawned without a color under a colored parent gets the parent's color nudged, one no other child of
+/// that parent has.
+fn inherited_color(state: &State, parent: WorkspaceId) -> Option<String> {
+    let base = color_hex(state.workspaces.get(&parent)?.color.as_deref()?).to_string();
+    let siblings: Vec<&str> = state
+        .workspaces
+        .values()
+        .filter(|w| w.parent == Some(parent))
+        .filter_map(|w| w.color.as_deref())
+        .collect();
+    let first = siblings.len();
+    (first..first + 24)
+        .filter_map(|n| color::child_color(&base, n))
+        .find(|c| !siblings.contains(&c.as_str()))
+        .or_else(|| color::child_color(&base, first))
+}
+
+/// An empty `color` clears it, like `None`.
+fn set_color(shared: &Shared, id: WorkspaceId, color: Option<&str>) -> Result<Response> {
+    let color = parse_color(color)?;
     let mut state = lock(shared);
     state.workspace_mut(id)?.color = color;
     state.emit_workspaces();
@@ -1419,12 +1491,24 @@ fn input(shared: &Shared, pane: PaneId, data: &str) -> Result<Response> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
+
+    #[test]
+    fn random_colors_cover_the_wheel() {
+        let mut buckets = [0; 6];
+        for _ in 0..600 {
+            let c = parse_color(Some("random")).unwrap().unwrap();
+            let (h, ..) = color::hsl(&c).unwrap();
+            let bucket = (0..6u8).find(|&i| h < f64::from(i + 1) * 60.0).unwrap_or(5);
+            buckets[usize::from(bucket)] += 1;
+        }
+        assert!(buckets.iter().all(|&n| n > 30), "{buckets:?}");
+    }
 
     fn folder(path: &str) -> Folder {
         Folder {
             path: path.into(),
             last_used: 0,
+            color: None,
         }
     }
 
@@ -1570,6 +1654,7 @@ mod tests {
             brief: None,
             command: None,
             claude_args: Vec::new(),
+            color: None,
         };
         assert!(open_spawned(&shared, &req, None).is_err());
         let state = lock(&shared);

@@ -26,6 +26,7 @@ fn pty_streams_and_accepts_input() {
         brief: None,
         command: None,
         claude_args: Vec::new(),
+        color: None,
     })) else {
         panic!("expected spawned")
     };
@@ -120,6 +121,7 @@ fn close_kills_foreground_job_and_removes_worktree() {
         brief: None,
         command: None,
         claude_args: Vec::new(),
+        color: None,
     })) else {
         panic!("expected spawned")
     };
@@ -168,6 +170,7 @@ fn resize_to_the_same_size_makes_the_pane_repaint() {
         brief: None,
         command: None,
         claude_args: Vec::new(),
+        color: None,
     })) else {
         panic!("expected spawned")
     };
@@ -217,6 +220,7 @@ fn send_enter_presses_enter_in_its_own_read() {
         brief: None,
         command: None,
         claude_args: Vec::new(),
+        color: None,
     })) else {
         panic!("expected spawned")
     };
@@ -286,6 +290,7 @@ fn terminal_command_runs_then_leaves_a_shell() {
         brief: None,
         command: Some("d=$(echo cmd); echo \"ran-$d-$((1+1))\"".into()),
         claude_args: Vec::new(),
+        color: None,
     })) else {
         panic!("expected spawned")
     };

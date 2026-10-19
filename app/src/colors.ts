@@ -48,6 +48,27 @@ export const WORKSPACE_PALETTE: Record<string, string> = {
 };
 export const WORKSPACE_COLORS = Object.keys(WORKSPACE_PALETTE);
 
+/// What a spawn from a folder sends as its color: the folder's own choice, else the app's setting; `none` or an
+/// empty setting sends none, and `random` goes to ftmd as is so each spawn gets its own.
+export function folderSpawnColor(folderColor: string | null | undefined, setting: string): string | null {
+  const color = folderColor || setting;
+  return !color || color === "none" ? null : color;
+}
+
+/// The CSS background of a chip standing for a color choice: `random` as a color wheel.
+export const chipBackground = (color: string) =>
+  color === "random"
+    ? "conic-gradient(#ff4245, #ffd600, #30d158, #40c8e0, #0091ff, #bf5af2, #ff4245)"
+    : (WORKSPACE_PALETTE[color] ?? color);
+
+/// The `#rrggbb` a color picker starts from for a workspace's `color`: a palette name's fixed color, the hex itself,
+/// or blue when it has none.
+export function pickerColor(color: string | null | undefined): string {
+  if (!color) return WORKSPACE_PALETTE.blue;
+  if (WORKSPACE_PALETTE[color]) return WORKSPACE_PALETTE[color];
+  return /^#[0-9a-f]{6}$/i.test(color) ? color.toLowerCase() : WORKSPACE_PALETTE.blue;
+}
+
 /// The app chrome's CSS variables for a theme: sidebar a little darker than the terminal, muted text blended from the
 /// foreground, accent from blue (palette 4), status dots from green/red/grey/blue, plus yellow for a finished turn not yet
 /// looked at, each nudged until readable.

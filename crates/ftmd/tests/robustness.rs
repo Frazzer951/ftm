@@ -22,6 +22,7 @@ fn spawn_command(conn: &mut Conn, cwd: &Path, command: Option<&str>) -> (Workspa
         brief: None,
         command: command.map(str::to_string),
         claude_args: Vec::new(),
+        color: None,
     })) else {
         panic!("expected spawned")
     };
@@ -192,6 +193,20 @@ fn unknown_kinds_and_statuses_are_refused() {
         brief: None,
         command: None,
         claude_args: Vec::new(),
+        color: None,
+    }))));
+    assert!(refused(conn.try_send(&Request::Spawn(SpawnRequest {
+        kind: Kind::Terminal,
+        name: None,
+        parent: None,
+        cwd: dir.to_path_buf(),
+        worktree_branch: None,
+        base: None,
+        copy_changes: false,
+        brief: None,
+        command: None,
+        claude_args: Vec::new(),
+        color: Some("teal".into()),
     }))));
     let list = conn.list();
     assert_eq!(list.len(), 1);
@@ -250,6 +265,7 @@ fn agents_without_status_hooks_are_not_left_starting() {
         brief: None,
         command: None,
         claude_args: Vec::new(),
+        color: None,
     })) else {
         panic!("expected spawned")
     };
@@ -363,4 +379,49 @@ fn a_resize_while_the_holder_hung_up_still_lands() {
         size.ends_with('\n')
     });
     assert_eq!(size.trim(), "30 100");
+}
+
+#[test]
+fn folders_keep_a_color_for_new_workspaces() {
+    let dir = temp_root("foldercolor");
+    let daemon = start_daemon("foldercolor", |_| {});
+    let mut conn = Conn::open(&daemon.socket);
+    spawn_command(&mut conn, &dir, None);
+    let path = dir.to_path_buf();
+    let mut color = || {
+        let Response::Folders { folders, .. } = conn.send(&Request::Folders) else {
+            panic!("expected folders")
+        };
+        folders.into_iter().find(|f| f.path == path).unwrap().color
+    };
+    let set = |conn: &mut Conn, path: &Path, color: Option<&str>| {
+        conn.try_send(&Request::SetFolderColor {
+            path: path.to_path_buf(),
+            color: color.map(str::to_string),
+        })
+    };
+    assert_eq!(color(), None);
+    assert!(matches!(
+        set(&mut Conn::open(&daemon.socket), &dir, Some(" Random ")),
+        Some(Response::Ok)
+    ));
+    assert_eq!(color().as_deref(), Some("random"));
+    let refused = |r: Option<Response>| matches!(r, Some(Response::Error { .. }));
+    assert!(refused(set(&mut Conn::open(&daemon.socket), &dir, Some("teal"))));
+    assert!(refused(set(
+        &mut Conn::open(&daemon.socket),
+        Path::new("/nowhere"),
+        Some("red")
+    )));
+    assert_eq!(color().as_deref(), Some("random"));
+    // A later spawn there moves the folder up without forgetting its color.
+    spawn_command(&mut Conn::open(&daemon.socket), &dir, None);
+    assert_eq!(color().as_deref(), Some("random"));
+    assert!(matches!(
+        set(&mut Conn::open(&daemon.socket), &dir, Some("NONE")),
+        Some(Response::Ok)
+    ));
+    assert_eq!(color().as_deref(), Some("none"));
+    assert!(matches!(set(&mut Conn::open(&daemon.socket), &dir, None), Some(Response::Ok)));
+    assert_eq!(color(), None);
 }

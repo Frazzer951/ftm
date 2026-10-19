@@ -214,7 +214,7 @@ fn agents_nest_report_status_and_clean_up() {
     assert_eq!(
         ftm(&bin, &socket, &["ping"]),
         format!(
-            "ftmd {} (features: claude_args, workspace_colors, workspace_order)",
+            "ftmd {} (features: claude_args, workspace_colors, workspace_order, spawn_color, folder_colors)",
             env!("CARGO_PKG_VERSION")
         )
     );
@@ -559,6 +559,41 @@ fn color_workspaces() {
 
     ftm(&bin, socket, &["color", "--clear", "--id", &parent]);
     assert_eq!(color(&parent), None);
+
+    let spawned = ftm(
+        &bin,
+        socket,
+        &[
+            "spawn", "terminal", "--path", path, "--name", "colored", "--color", " Purple ",
+        ],
+    );
+    assert_eq!(color(&spawned).as_deref(), Some("purple"));
+    let hex = ftm(&bin, socket, &["spawn", "terminal", "--path", path, "--color", "#00AA11"]);
+    assert_eq!(color(&hex).as_deref(), Some("#00aa11"));
+
+    let is_hex = |c: Option<String>| c.is_some_and(|c| c.len() == 7 && c.starts_with('#'));
+    ftm(&bin, socket, &["color", "Random", "--id", &parent]);
+    assert!(is_hex(color(&parent)));
+    let random = ftm(&bin, socket, &["spawn", "terminal", "--path", path, "--color", "random"]);
+    assert!(is_hex(color(&random)));
+
+    // Children of a colored parent start near its color, each different; an explicit color wins, and recoloring the
+    // parent later leaves them be.
+    ftm(&bin, socket, &["color", "blue", "--id", &parent]);
+    let kid = |extra: &[&str]| {
+        let args = [&["spawn", "terminal", "--path", path, "--parent", &parent][..], extra].concat();
+        ftm(&bin, socket, &args)
+    };
+    let (a, b) = (kid(&[]), kid(&[]));
+    let (ca, cb) = (color(&a), color(&b));
+    assert!(is_hex(ca.clone()) && is_hex(cb.clone()));
+    assert!(ca != cb && ca.as_deref() != Some("#0091ff"), "{ca:?} {cb:?}");
+    assert_eq!(color(&kid(&["--color", "red"])).as_deref(), Some("red"));
+    ftm(&bin, socket, &["color", "green", "--id", &parent]);
+    assert_eq!(color(&a), ca);
+    assert_eq!(color(&child).as_deref(), Some("#ff8800"));
+    ftm(&bin, socket, &["color", "--clear", "--id", &parent]);
+    assert_eq!(color(&kid(&[])), None);
 }
 
 /// New worktrees get the source checkout's gitignored files, minus big rebuildable directories at any depth and the
@@ -672,7 +707,7 @@ fn claude_args_are_refused_by_an_older_ftmd() {
     let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
     let server = std::thread::spawn(move || {
         let mut requests = String::new();
-        for _ in 0..2 {
+        for _ in 0..3 {
             let (stream, _) = listener.accept().unwrap();
             std::io::BufRead::read_line(&mut std::io::BufReader::new(&stream), &mut requests).unwrap();
             (&stream).write_all(b"{\"result\":\"pong\",\"version\":\"0.1.8\"}\n").unwrap();
@@ -694,6 +729,15 @@ fn claude_args_are_refused_by_an_older_ftmd() {
         .unwrap();
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("ftmd 0.1.8 does not support claude arguments"));
+    // Nor does it get a color it would drop.
+    let out = Command::new(ftm_bin())
+        .args(["spawn", "terminal", "--path", root.to_str().unwrap(), "--color", "blue"])
+        .env("FTM_SOCKET", &socket)
+        .env_remove("FTM_WORKSPACE_ID")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("ftmd 0.1.8 does not support --color"));
     assert!(
         server.join().unwrap().lines().all(|r| r.contains(r#""op":"ping""#)),
         "only pings reach the old ftmd"

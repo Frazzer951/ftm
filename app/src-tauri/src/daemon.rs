@@ -241,6 +241,7 @@ fn idempotent(request: &Request) -> bool {
             | Request::Pin { .. }
             | Request::MarkSeen { .. }
             | Request::RemoveFolder { .. }
+            | Request::SetFolderColor { .. }
             | Request::ReorderFolders { .. }
     )
 }
