@@ -50,10 +50,12 @@ pub fn hex(h: f64, s: f64, l: f64) -> String {
         _ => (c, 0.0, x),
     };
     let m = l - c / 2.0;
-    let byte = |v: f64| {
-        let v = ((v + m) * 255.0).round();
-        (0..=u8::MAX).find(|&b| f64::from(b) >= v).unwrap_or(u8::MAX)
-    };
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamped to 0..=255 first"
+    )]
+    let byte = |v: f64| ((v + m) * 255.0).round().clamp(0.0, 255.0) as u8;
     format!("#{:02x}{:02x}{:02x}", byte(r), byte(g), byte(b))
 }
 

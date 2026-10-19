@@ -1327,9 +1327,7 @@ fn pin(shared: &Shared, id: WorkspaceId, pinned: bool) -> Result<Response> {
 fn parse_color(color: Option<&str>) -> Result<Option<String>> {
     match color.map(str::trim).filter(|c| !c.is_empty()) {
         None => Ok(None),
-        Some(c) if c.eq_ignore_ascii_case(RANDOM_COLOR) => {
-            Ok(Some(color::random_color(WorkspaceId::new_v4().as_u64_pair().0)))
-        },
+        Some(c) if c.eq_ignore_ascii_case(RANDOM_COLOR) => Ok(Some(color::random_color(random_bits()))),
         Some(c) => Ok(Some(workspace_color(c).ok_or_else(|| {
             eyre!(
                 "unknown color {c:?}: use {}, {RANDOM_COLOR} or #rrggbb",
@@ -1359,6 +1357,12 @@ fn set_folder_color(shared: &Shared, path: &Path, color: Option<&str>) -> Result
     folder.color = color;
     state.emit_folders();
     Ok(Response::Ok)
+}
+
+/// 64 random bits from a v4 UUID, skipping bytes 6 and 8, which carry its fixed version and variant bits.
+fn random_bits() -> u64 {
+    let b = WorkspaceId::new_v4().into_bytes();
+    u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[10], b[11]])
 }
 
 /// A child spawned without a color under a colored parent gets the parent's color nudged, one no other child of
@@ -1487,6 +1491,18 @@ fn input(shared: &Shared, pane: PaneId, data: &str) -> Result<Response> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn random_colors_cover_the_wheel() {
+        let mut buckets = [0; 6];
+        for _ in 0..600 {
+            let c = parse_color(Some("random")).unwrap().unwrap();
+            let (h, ..) = color::hsl(&c).unwrap();
+            let bucket = (0..6u8).find(|&i| h < f64::from(i + 1) * 60.0).unwrap_or(5);
+            buckets[usize::from(bucket)] += 1;
+        }
+        assert!(buckets.iter().all(|&n| n > 30), "{buckets:?}");
+    }
 
     fn folder(path: &str) -> Folder {
         Folder {
