@@ -360,6 +360,8 @@ impl State {
         cmd.env("SHELL", &shell)
             .env("TERM", "xterm-256color")
             .env("COLORTERM", "truecolor")
+            // supports-hyperlinks (Claude Code, npm tools) only emits OSC 8 links for terminals it recognizes.
+            .env("FORCE_HYPERLINK", "1")
             .env(ENV_SOCKET, &self.socket)
             .env(ENV_WORKSPACE_ID, workspace.to_string())
             .env(ENV_PANE_ID, id.to_string())

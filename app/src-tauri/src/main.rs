@@ -3,6 +3,7 @@
 mod crash_log;
 mod daemon;
 mod fonts;
+mod links;
 mod open_in;
 mod sounds;
 mod themes;
@@ -177,6 +178,11 @@ async fn open_in(target: String, path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || open_in::open(&target, &path))
         .await
         .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    links::open(&url)
 }
 
 #[tauri::command]
@@ -362,6 +368,7 @@ fn main() {
             sound_data,
             open_targets,
             open_in,
+            open_url,
             log,
             ensure_on_screen,
             check_update
