@@ -26,6 +26,13 @@ const HOOKS: &[(&str, Option<&str>, &str)] = &[
     ("SessionEnd", None, "done"),
 ];
 
+/// supports-hyperlinks, which Claude Code uses, only emits OSC 8 links for terminals it recognizes unless
+/// `FORCE_HYPERLINK` is set, and then emits them even into pipes and files. So the agent gets it through `env`
+/// (which overrides any inherited value), and every SessionStart (startup, resume, clear, compact) unsets it again
+/// for the Bash tool's commands through `$CLAUDE_ENV_FILE`, keeping escape codes out of their output.
+const HYPERLINK_ENV: &str =
+    r#"{ [ -z "$CLAUDE_ENV_FILE" ] || echo 'unset FORCE_HYPERLINK' >> "$CLAUDE_ENV_FILE"; } 2>/dev/null || true"#;
+
 pub fn settings(ftm: &Path) -> Value {
     let ftm = shell_quote(&ftm.to_string_lossy());
     let mut hooks = serde_json::Map::new();
@@ -47,7 +54,11 @@ pub fn settings(ftm: &Path) -> Value {
             .expect("array")
             .push(group);
     }
-    json!({ "hooks": hooks })
+    hooks.insert(
+        "SessionStart".into(),
+        json!([{ "hooks": [{ "type": "command", "command": HYPERLINK_ENV, "timeout": 5 }] }]),
+    );
+    json!({ "env": { "FORCE_HYPERLINK": "1" }, "hooks": hooks })
 }
 
 /// The `ftm` next to this ftmd, else whatever `ftm` is on the panes' PATH.
@@ -89,5 +100,34 @@ mod tests {
         );
         assert_eq!(s["hooks"]["PreToolUse"][0]["matcher"], "AskUserQuestion");
         assert!(s["hooks"]["Stop"][0].get("matcher").is_none());
+    }
+
+    #[test]
+    fn hyperlinks_are_forced_for_the_agent_but_not_its_bash_commands() {
+        let s = settings(Path::new("/opt/ftm/ftm"));
+        assert_eq!(s["env"]["FORCE_HYPERLINK"], "1");
+        assert!(s["hooks"]["SessionStart"][0].get("matcher").is_none());
+        let hook = s["hooks"]["SessionStart"][0]["hooks"][0]["command"].as_str().unwrap();
+        let run = |env_file: Option<&Path>| {
+            let mut sh = std::process::Command::new("/bin/sh");
+            sh.args(["-c", hook]).env_remove("CLAUDE_ENV_FILE");
+            if let Some(f) = env_file {
+                sh.env("CLAUDE_ENV_FILE", f);
+            }
+            sh.status().unwrap().success()
+        };
+        let dir = std::env::temp_dir().join(format!("ftmd-hooks-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("env.sh");
+        assert!(run(Some(&file)));
+        assert!(run(Some(&file)));
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "unset FORCE_HYPERLINK\nunset FORCE_HYPERLINK\n"
+        );
+        assert!(run(None));
+        assert!(run(Some(Path::new(""))));
+        assert!(run(Some(&dir.join("missing/env.sh"))));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

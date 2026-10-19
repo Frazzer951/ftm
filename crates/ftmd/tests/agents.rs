@@ -26,7 +26,6 @@ for arg in "$@"; do printf '%s\0' "$arg" >> "$out.argv"; done
   echo "FTM_WORKSPACE_ID=$FTM_WORKSPACE_ID"
   echo "FTM_PANE_ID=$FTM_PANE_ID"
   echo "FTM_SOCKET=$FTM_SOCKET"
-  echo "FORCE_HYPERLINK=$FORCE_HYPERLINK"
   echo "PWD=$(pwd -P)"
   if [ -e "$FAKE_OUT/setup-ran" ]; then echo "SETUP=yes"; else echo "SETUP=no"; fi
   echo "PID=$$"
@@ -167,7 +166,6 @@ fn agents_nest_report_status_and_clean_up() {
     assert_eq!(lv["FTM_WORKSPACE_ID"], leader.to_string());
     assert_eq!(lv["FTM_PANE_ID"], leader_ws.tabs[0].layout.panes()[0].to_string());
     assert_eq!(lv["FTM_SOCKET"], socket.to_str().unwrap());
-    assert_eq!(lv["FORCE_HYPERLINK"], "1");
     assert_eq!(Path::new(&lv["PWD"]), wt);
     assert_eq!(lv["SETUP"], "yes");
     assert_eq!(
