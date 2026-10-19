@@ -163,6 +163,18 @@ pub fn workspace_color(color: &str) -> Option<String> {
     (hex || WORKSPACE_COLORS.contains(&color.as_str())).then_some(color)
 }
 
+/// A folder's color for new workspaces that turns color off, rather than leaving it to the app's setting.
+pub const NO_COLOR: &str = "none";
+
+/// `color` in the form `Folder::color` keeps: what `workspace_color` takes, `random` or `none`, lowercased.
+pub fn folder_color(color: &str) -> Option<String> {
+    let lower = color.trim().to_lowercase();
+    if lower == RANDOM_COLOR || lower == NO_COLOR {
+        return Some(lower);
+    }
+    workspace_color(&lower)
+}
+
 /// The `#rrggbb` a stored `Workspace::color` draws as.
 pub fn color_hex(color: &str) -> &str {
     WORKSPACE_PALETTE
@@ -214,6 +226,9 @@ pub struct Folder {
     pub path: PathBuf,
     /// Unix seconds of the latest top-level spawn there.
     pub last_used: u64,
+    /// The color the app gives workspaces spawned here, as `folder_color` keeps it; unset follows the app's setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 impl Workspace {
@@ -251,6 +266,10 @@ mod tests {
         assert_eq!(workspace_color("teal"), None);
         assert_eq!(workspace_color("#abc"), None);
         assert_eq!(workspace_color("#abcdeg"), None);
+        assert_eq!(folder_color(" Random ").as_deref(), Some("random"));
+        assert_eq!(folder_color("NONE").as_deref(), Some("none"));
+        assert_eq!(folder_color("Pink").as_deref(), Some("pink"));
+        assert_eq!(folder_color("teal"), None);
         assert_eq!(color_hex("blue"), "#0091ff");
         assert_eq!(color_hex("#a0b1c2"), "#a0b1c2");
     }

@@ -28,6 +28,11 @@
         <div class="row"><button type="button" id="pick">Browse…</button><span id="folder">none</span></div>
         <div id="recent"></div>
         <label>Name <input name="name" placeholder="auto from task (agents), else folder or branch" /></label>
+        <div class="field">
+          <span>Color</span>
+          <div id="spawn-colors" class="color-chips" role="radiogroup" aria-label="Color"></div>
+          <span id="spawn-color-note" class="note"></span>
+        </div>
         <fieldset id="git" hidden>
           <label><input type="checkbox" name="worktree" /> New worktree</label>
           <label>Branch <input name="branch" /></label>
@@ -49,6 +54,7 @@
           <button type="button" role="tab" id="settings-tab-theme" aria-controls="settings-panel-theme">Theme</button>
           <button type="button" role="tab" id="settings-tab-sounds" aria-controls="settings-panel-sounds">Sounds</button>
           <button type="button" role="tab" id="settings-tab-input" aria-controls="settings-panel-input">Input</button>
+          <button type="button" role="tab" id="settings-tab-workspaces" aria-controls="settings-panel-workspaces">Workspaces</button>
           <button type="button" role="tab" id="settings-tab-updates" aria-controls="settings-panel-updates">Updates</button>
         </div>
         <div class="tabpanel" role="tabpanel" id="settings-panel-font" aria-labelledby="settings-tab-font">
@@ -161,6 +167,19 @@
                 <option value="nightly">Nightly</option>
               </select>
             </div>
+          </div>
+        </div>
+        <div class="tabpanel" role="tabpanel" id="settings-panel-workspaces" aria-labelledby="settings-tab-workspaces">
+          <div class="field">
+            <span>Color</span>
+            <div class="select-row">
+              <label for="folder-color">From a folder</label>
+              <div class="row">
+                <select id="folder-color"></select>
+                <input type="color" id="folder-color-custom" hidden />
+              </div>
+            </div>
+            <span class="note">For workspaces spawned from a folder: the folder's own Color… (right-click it in the sidebar) wins over this.</span>
           </div>
         </div>
         <p id="settings-error"></p>

@@ -10,7 +10,14 @@ import { LigaturesAddon } from "@xterm/addon-ligatures";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { chromeColors, pickerColor, WORKSPACE_COLORS, WORKSPACE_PALETTE } from "./colors.ts";
+import {
+  chipBackground,
+  chromeColors,
+  folderSpawnColor,
+  pickerColor,
+  WORKSPACE_COLORS,
+  WORKSPACE_PALETTE,
+} from "./colors.ts";
 import { dropText } from "./drop.ts";
 import { StatusSounds, statusDot, stillFinished } from "./finish.ts";
 import { clipboardKey, type OptionAsMeta, optionIsMeta, paneKey } from "./keys.ts";
@@ -61,6 +68,8 @@ interface Workspace {
 interface Folder {
   path: string;
   last_used: number;
+  /// For workspaces spawned here: a palette name, `#rrggbb`, `random` or `none`; missing follows the app's setting.
+  color?: string | null;
 }
 type FtmEvent =
   | { event: "workspaces"; workspaces: Workspace[] }
@@ -347,6 +356,12 @@ interface UpdateSettings {
 }
 let updateSettings: UpdateSettings = { check: null, channel: null };
 
+/// `folder_color` is what a folder without its own color gives new workspaces, as `Folder.color` takes it; empty is none.
+interface WorkspaceSettings {
+  folder_color: string;
+}
+let workspaceSettings: WorkspaceSettings = { folder_color: "" };
+
 const playSound = (name: string, volume = soundSettings.volume) => {
   play(name, volume).catch((err) => console.error(`playing ${name}`, err));
 };
@@ -363,6 +378,20 @@ function setupSettingsDialog() {
   let fonts: FontFamily[] = [];
   let family = settings.font_family;
   let customMode = false;
+
+  const folderColor = $<HTMLSelectElement>("folder-color");
+  const folderColorCustom = $<HTMLInputElement>("folder-color-custom");
+  folderColor.append(
+    ...[
+      ["", "None"],
+      ...WORKSPACE_COLORS.map((c) => [c, c[0].toUpperCase() + c.slice(1)]),
+      ["random", "Random"],
+      ["custom", "Custom…"],
+    ].map(([value, label]) => new Option(label, value)),
+  );
+  folderColor.onchange = () => {
+    folderColorCustom.hidden = folderColor.value !== "custom";
+  };
 
   // The open tab outlives the dialog, so settings reopens where it was left.
   const tabButtons = [...document.querySelectorAll<HTMLButtonElement>("#settings-tabs [role=tab]")];
@@ -653,6 +682,10 @@ function setupSettingsDialog() {
     $<HTMLSelectElement>("app-scroll").value = settings.app_scroll;
     $<HTMLSelectElement>("update-check").value = updateSettings.check === null ? "" : String(updateSettings.check);
     $<HTMLSelectElement>("update-channel").value = updateSettings.channel ?? "";
+    const hex = workspaceSettings.folder_color.startsWith("#");
+    folderColor.value = hex ? "custom" : workspaceSettings.folder_color;
+    folderColorCustom.value = pickerColor(workspaceSettings.folder_color);
+    folderColorCustom.hidden = !hex;
     $("settings-error").textContent = "";
     preview();
     dialog.showModal();
@@ -698,14 +731,20 @@ function setupSettingsDialog() {
       check: check === "" ? null : check === "true",
       channel: ($<HTMLSelectElement>("update-channel").value || null) as Channel | null,
     };
+    const workspacesNext: WorkspaceSettings = {
+      folder_color: folderColor.value === "custom" ? folderColorCustom.value : folderColor.value,
+    };
     try {
-      await invoke("save_settings", { settings: { terminal: next, theme: draft, sounds: soundDraft, updates } });
+      await invoke("save_settings", {
+        settings: { terminal: next, theme: draft, sounds: soundDraft, updates, workspaces: workspacesNext },
+      });
       const recheck = updates.check !== updateSettings.check || updates.channel !== updateSettings.channel;
       updateSettings = updates;
       if (recheck) checkForRelease().catch(console.error);
       settings = next;
       themeSettings = { ...draft };
       soundSettings = { ...soundDraft };
+      workspaceSettings = workspacesNext;
       saved = true;
       dialog.close();
       await applySettings();
@@ -1104,34 +1143,57 @@ function showColorMenu(x: number, y: number, ws: Workspace) {
       workspaceColor(c),
     ]),
     ...(ws.color?.startsWith("#") ? [[`${ws.color} ✓`, () => {}, ws.color] as MenuItem] : []),
-    ["Random", () => setColor(ws, "random")],
-    ["Custom…", () => pickColor(x, y, ws)],
+    ["Random", () => setColor(ws, "random"), chipBackground("random")],
+    ["Custom…", () => pickColor(x, y, ws.color, (hex) => setColor(ws, hex))],
     [ws.color ? "None" : "None ✓", () => setColor(ws, null)],
   ]);
 }
 
 let colorPicker: HTMLInputElement | undefined;
-let pickingFor: Workspace | undefined;
+let pickedColor: ((hex: string) => void) | undefined;
 
-/// Opens the system color picker at the menu's spot. Only `change` sets the color, so dragging around the picker
-/// sends ftmd one request rather than one per step.
-function pickColor(x: number, y: number, ws: Workspace) {
+/// Opens the system color picker at the menu's spot, starting from `current`. Only `change` calls `apply`, so dragging
+/// around the picker sends ftmd one request rather than one per step.
+function pickColor(x: number, y: number, current: string | null | undefined, apply: (hex: string) => void) {
   if (!colorPicker) {
     const input = document.createElement("input");
     input.type = "color";
     input.id = "color-picker";
     input.tabIndex = -1;
-    input.onchange = () => {
-      if (pickingFor) setColor(pickingFor, input.value);
-    };
+    input.onchange = () => pickedColor?.(input.value);
     document.body.append(input);
     colorPicker = input;
   }
-  pickingFor = ws;
-  colorPicker.value = pickerColor(ws.color);
+  pickedColor = apply;
+  colorPicker.value = pickerColor(current);
   colorPicker.style.left = `${x}px`;
   colorPicker.style.top = `${y}px`;
   colorPicker.click();
+}
+
+function setFolderColor(folder: Folder, color: string | null) {
+  request({ op: "set_folder_color", path: folder.path, color }).catch((err) => {
+    console.error(err);
+    notice("color", `Could not color ${basename(folder.path)}: ${err}`, "error");
+  });
+}
+
+/// The color workspaces spawned from the folder get: the app's setting unless the folder has its own.
+function showFolderColorMenu(x: number, y: number, folder: Folder) {
+  const own = folder.color ?? null;
+  const check = (c: string | null) => (own === c ? " ✓" : "");
+  showMenu(x, y, [
+    [`Use global setting${check(null)}`, () => setFolderColor(folder, null)],
+    [`None${check("none")}`, () => setFolderColor(folder, "none")],
+    ...WORKSPACE_COLORS.map((c): MenuItem => [
+      c[0].toUpperCase() + c.slice(1) + check(c),
+      () => setFolderColor(folder, c),
+      workspaceColor(c),
+    ]),
+    ...(own?.startsWith("#") ? [[`${own} ✓`, () => {}, own] as MenuItem] : []),
+    [`Random${check("random")}`, () => setFolderColor(folder, "random"), chipBackground("random")],
+    ["Custom…", () => pickColor(x, y, own, (hex) => setFolderColor(folder, hex))],
+  ]);
 }
 
 interface OpenTarget {
@@ -1302,6 +1364,13 @@ function folderRow(folder: Folder, draggable: boolean): HTMLLIElement {
   const name = document.createElement("span");
   name.className = "name";
   name.textContent = basename(folder.path);
+  if (folder.color && folder.color !== "none") {
+    const chip = document.createElement("span");
+    chip.className = "swatch";
+    chip.style.background = chipBackground(folder.color);
+    chip.title = `New workspaces here: ${folder.color}`;
+    name.prepend(chip);
+  }
   const sub = document.createElement("span");
   sub.className = "sub";
   const git = gitInfo.get(folder.path);
@@ -1332,6 +1401,7 @@ function folderRow(folder: Folder, draggable: boolean): HTMLLIElement {
     e.preventDefault();
     showMenu(e.clientX, e.clientY, [
       ...openInItems(folder.path),
+      ["Color…", () => showFolderColorMenu(e.clientX, e.clientY, folder)],
       ["Remove from list", () => request({ op: "remove_folder", path: folder.path }).catch(console.error)],
     ]);
   };
@@ -1352,6 +1422,7 @@ async function spawnAt(kind: "agent" | "terminal", path: string) {
       base: null,
       copy_changes: false,
       brief: null,
+      color: folderSpawnColor(folders.find((f) => f.path === path)?.color, workspaceSettings.folder_color),
     });
     selected = r.workspace.id;
     render();
@@ -1737,11 +1808,64 @@ function setupSpawnDialog() {
   const error = $("spawn-error");
   const create = $<HTMLButtonElement>("create");
   let folder: string | null = null;
+  /// `auto` follows the folder's color, else the setting; `none`, a palette name, `random` or `#rrggbb` is explicit.
+  let colorChoice = "auto";
+  const autoColor = () =>
+    folderSpawnColor(folders.find((f) => f.path === folder)?.color, workspaceSettings.folder_color);
+
+  const custom = document.createElement("input");
+  custom.type = "color";
+  custom.tabIndex = -1;
+  const customChip = document.createElement("label");
+  customChip.className = "chip dot";
+  customChip.title = "Custom…";
+  customChip.textContent = "…";
+  customChip.append(custom);
+  custom.onchange = () => {
+    colorChoice = custom.value;
+    showColors();
+  };
+  const chip = (value: string, label: string, title: string, swatch?: string) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = swatch ? "chip dot" : "chip";
+    b.dataset.color = value;
+    b.title = title;
+    b.setAttribute("role", "radio");
+    if (swatch) b.style.background = swatch;
+    else b.textContent = label;
+    b.onclick = () => {
+      colorChoice = value;
+      showColors();
+    };
+    return b;
+  };
+  $("spawn-colors").replaceChildren(
+    chip("auto", "Auto", "The folder's color, else the one in Settings → Workspaces"),
+    chip("none", "None", "No color"),
+    ...WORKSPACE_COLORS.map((c) => chip(c, c, c[0].toUpperCase() + c.slice(1), workspaceColor(c))),
+    chip("random", "Random", "A random color", chipBackground("random")),
+    customChip,
+  );
+  const showColors = () => {
+    for (const b of $("spawn-colors").querySelectorAll<HTMLElement>("[data-color]")) {
+      b.setAttribute("aria-checked", String(b.dataset.color === colorChoice));
+    }
+    const isCustom = colorChoice.startsWith("#");
+    customChip.setAttribute("aria-checked", String(isCustom));
+    customChip.style.background = isCustom ? colorChoice : "";
+    customChip.textContent = isCustom ? "" : "…";
+    customChip.append(custom);
+    const auto = autoColor();
+    $("spawn-color-note").textContent =
+      colorChoice === "auto" ? `Auto: ${auto ?? "none"}, from the folder's color, else Settings → Workspaces.` : "";
+  };
 
   const choose = async (dir: string) => {
     folder = dir;
     $("folder").textContent = tilde(dir);
     $("folder").title = dir;
+    showColors();
     const root = await invoke<string | null>("git_root", { path: dir });
     $("git").hidden = !root;
   };
@@ -1764,6 +1888,9 @@ function setupSpawnDialog() {
   openSpawn = (preset = {}) => {
     form.reset();
     folder = null;
+    colorChoice = "auto";
+    custom.value = WORKSPACE_PALETTE.blue;
+    showColors();
     $("folder").textContent = "none";
     $("git").hidden = true;
     error.textContent = "";
@@ -1818,6 +1945,7 @@ function setupSpawnDialog() {
         base: worktree ? text("base") : null,
         copy_changes: worktree && data.get("copy") === "on",
         brief: null,
+        color: colorChoice === "auto" ? autoColor() : colorChoice === "none" ? null : colorChoice,
       });
       selected = r.workspace.id;
       dialog.close();
@@ -1873,14 +2001,19 @@ getCurrentWebview()
 setupSidebarResize();
 setupSpawnDialog();
 setupSettingsDialog();
-invoke<{ terminal: TerminalSettings; theme: ThemeSettings; sounds: SoundSettings; updates: Partial<UpdateSettings> }>(
-  "get_settings",
-)
+invoke<{
+  terminal: TerminalSettings;
+  theme: ThemeSettings;
+  sounds: SoundSettings;
+  updates: Partial<UpdateSettings>;
+  workspaces?: Partial<WorkspaceSettings>;
+}>("get_settings")
   .then((loaded) => {
     updateSettings = { check: loaded.updates.check ?? null, channel: loaded.updates.channel ?? null };
     settings = loaded.terminal;
     themeSettings = loaded.theme;
     soundSettings = loaded.sounds;
+    workspaceSettings = { folder_color: loaded.workspaces?.folder_color ?? "" };
     applyThemeNamed(wantedTheme(themeSettings)).catch(console.error);
     return applySettings();
   })

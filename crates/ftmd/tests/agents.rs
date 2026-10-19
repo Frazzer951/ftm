@@ -214,7 +214,7 @@ fn agents_nest_report_status_and_clean_up() {
     assert_eq!(
         ftm(&bin, &socket, &["ping"]),
         format!(
-            "ftmd {} (features: claude_args, workspace_colors, workspace_order, spawn_color)",
+            "ftmd {} (features: claude_args, workspace_colors, workspace_order, spawn_color, folder_colors)",
             env!("CARGO_PKG_VERSION")
         )
     );

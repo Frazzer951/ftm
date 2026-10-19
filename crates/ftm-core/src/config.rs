@@ -69,6 +69,15 @@ pub struct Settings {
     pub theme: ThemeSettings,
     pub sounds: SoundSettings,
     pub updates: UpdateSettings,
+    pub workspaces: WorkspaceSettings,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkspaceSettings {
+    /// The color the app gives workspaces spawned from a folder that has none of its own, as `Folder::color` takes
+    /// it; empty gives none.
+    pub folder_color: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -298,6 +307,8 @@ mod tests {
         assert!(!settings.sounds.wait_for_subagents);
         settings.sounds.needs_input = String::new();
         settings.sounds.wait_for_subagents = true;
+        assert_eq!(settings.workspaces.folder_color, "");
+        settings.workspaces.folder_color = "random".into();
         settings.save(&path).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("future = \"keep\"") && text.contains("[other]"), "{text}");
@@ -306,6 +317,10 @@ mod tests {
         assert!(text.contains("wait_for_subagents = true"), "{text}");
         assert!(text.contains("[theme]") && text.contains("follow_system = true"), "{text}");
         assert!(text.contains("needs_input = \"\""), "{text}");
+        assert!(
+            text.contains("[workspaces]") && text.contains("folder_color = \"random\""),
+            "{text}"
+        );
         assert!(!text.contains("[updates]"), "{text}");
         assert_eq!(Settings::load(&path).unwrap(), settings);
 

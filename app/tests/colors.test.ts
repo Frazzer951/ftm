@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  chipBackground,
   chromeColors,
   contrast,
+  folderSpawnColor,
   luminance,
   mix,
   pickerColor,
@@ -91,4 +93,19 @@ test("the color picker starts from the workspace's color", () => {
   assert.equal(pickerColor(null), WORKSPACE_PALETTE.blue);
   assert.equal(pickerColor(undefined), WORKSPACE_PALETTE.blue);
   assert.equal(pickerColor("teal"), WORKSPACE_PALETTE.blue);
+});
+
+test("a folder's own color wins over the setting, and none turns color off", () => {
+  assert.equal(folderSpawnColor(undefined, ""), null);
+  assert.equal(folderSpawnColor(null, "random"), "random");
+  assert.equal(folderSpawnColor("blue", "random"), "blue");
+  assert.equal(folderSpawnColor("none", "random"), null);
+  assert.equal(folderSpawnColor(undefined, "none"), null);
+  assert.equal(folderSpawnColor("#a0b1c2", ""), "#a0b1c2");
+});
+
+test("chips draw palette names, hex and random", () => {
+  assert.equal(chipBackground("green"), WORKSPACE_PALETTE.green);
+  assert.equal(chipBackground("#a0b1c2"), "#a0b1c2");
+  assert.match(chipBackground("random"), /^conic-gradient\(/);
 });

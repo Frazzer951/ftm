@@ -380,3 +380,48 @@ fn a_resize_while_the_holder_hung_up_still_lands() {
     });
     assert_eq!(size.trim(), "30 100");
 }
+
+#[test]
+fn folders_keep_a_color_for_new_workspaces() {
+    let dir = temp_root("foldercolor");
+    let daemon = start_daemon("foldercolor", |_| {});
+    let mut conn = Conn::open(&daemon.socket);
+    spawn_command(&mut conn, &dir, None);
+    let path = dir.to_path_buf();
+    let mut color = || {
+        let Response::Folders { folders, .. } = conn.send(&Request::Folders) else {
+            panic!("expected folders")
+        };
+        folders.into_iter().find(|f| f.path == path).unwrap().color
+    };
+    let set = |conn: &mut Conn, path: &Path, color: Option<&str>| {
+        conn.try_send(&Request::SetFolderColor {
+            path: path.to_path_buf(),
+            color: color.map(str::to_string),
+        })
+    };
+    assert_eq!(color(), None);
+    assert!(matches!(
+        set(&mut Conn::open(&daemon.socket), &dir, Some(" Random ")),
+        Some(Response::Ok)
+    ));
+    assert_eq!(color().as_deref(), Some("random"));
+    let refused = |r: Option<Response>| matches!(r, Some(Response::Error { .. }));
+    assert!(refused(set(&mut Conn::open(&daemon.socket), &dir, Some("teal"))));
+    assert!(refused(set(
+        &mut Conn::open(&daemon.socket),
+        Path::new("/nowhere"),
+        Some("red")
+    )));
+    assert_eq!(color().as_deref(), Some("random"));
+    // A later spawn there moves the folder up without forgetting its color.
+    spawn_command(&mut Conn::open(&daemon.socket), &dir, None);
+    assert_eq!(color().as_deref(), Some("random"));
+    assert!(matches!(
+        set(&mut Conn::open(&daemon.socket), &dir, Some("NONE")),
+        Some(Response::Ok)
+    ));
+    assert_eq!(color().as_deref(), Some("none"));
+    assert!(matches!(set(&mut Conn::open(&daemon.socket), &dir, None), Some(Response::Ok)));
+    assert_eq!(color(), None);
+}

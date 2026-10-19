@@ -3,19 +3,19 @@ use crate::worktree;
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use eyre::{Result, WrapErr, bail, eyre};
 use ftm_core::model::{
-    Folder, Kind, Layout, PaneId, RANDOM_COLOR, SplitDir, Status, Tab, TabId, WORKSPACE_COLORS, Workspace, WorkspaceId,
-    Worktree, color_hex, workspace_color,
+    Folder, Kind, Layout, NO_COLOR, PaneId, RANDOM_COLOR, SplitDir, Status, Tab, TabId, WORKSPACE_COLORS, Workspace,
+    WorkspaceId, Worktree, color_hex, folder_color, workspace_color,
 };
 use ftm_core::protocol::{
-    Event, FEATURE_CLAUDE_ARGS, FEATURE_SPAWN_COLOR, FEATURE_WORKSPACE_COLORS, FEATURE_WORKSPACE_ORDER, Request, Response,
-    SpawnRequest,
+    Event, FEATURE_CLAUDE_ARGS, FEATURE_FOLDER_COLORS, FEATURE_SPAWN_COLOR, FEATURE_WORKSPACE_COLORS, FEATURE_WORKSPACE_ORDER,
+    Request, Response, SpawnRequest,
 };
 use ftm_core::{ENV_AGENT_CMD, ENV_NAME, ENV_PANE_ID, ENV_SOCKET, ENV_WORKSPACE_ID, color, paths};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak, mpsc};
@@ -269,8 +269,16 @@ impl State {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
+        let color = self.folders.iter().find(|f| f.path == path).and_then(|f| f.color.clone());
         self.folders.retain(|f| f.path != path);
-        self.folders.insert(0, Folder { path, last_used: now });
+        self.folders.insert(
+            0,
+            Folder {
+                path,
+                last_used: now,
+                color,
+            },
+        );
         self.emit_folders();
     }
 
@@ -585,7 +593,7 @@ impl std::fmt::Display for HolderVersion {
 
 impl std::error::Error for HolderVersion {}
 
-fn read_saved(path: &std::path::Path) -> Result<Option<Saved>> {
+fn read_saved(path: &Path) -> Result<Option<Saved>> {
     match std::fs::read(path) {
         Ok(bytes) => Ok(Some(
             serde_json::from_slice(&bytes).wrap_err_with(|| format!("parsing {}", path.display()))?,
@@ -1045,6 +1053,7 @@ pub fn handle(shared: &Shared, request: Request, peer: Option<i32>) -> Response 
                 FEATURE_WORKSPACE_COLORS,
                 FEATURE_WORKSPACE_ORDER,
                 FEATURE_SPAWN_COLOR,
+                FEATURE_FOLDER_COLORS,
             ]
             .map(String::from)
             .to_vec(),
@@ -1102,6 +1111,7 @@ pub fn handle(shared: &Shared, request: Request, peer: Option<i32>) -> Response 
             state.emit_folders();
             Ok(Response::Ok)
         },
+        Request::SetFolderColor { path, color } => set_folder_color(shared, &path, color.as_deref()),
         Request::ReorderFolders { paths } => {
             let mut state = lock(shared);
             state.folder_order = paths;
@@ -1329,6 +1339,28 @@ fn parse_color(color: Option<&str>) -> Result<Option<String>> {
     }
 }
 
+/// An empty `color` goes back to the app's setting, like `None`.
+fn set_folder_color(shared: &Shared, path: &Path, color: Option<&str>) -> Result<Response> {
+    let color = match color.map(str::trim).filter(|c| !c.is_empty()) {
+        None => None,
+        Some(c) => Some(folder_color(c).ok_or_else(|| {
+            eyre!(
+                "unknown color {c:?}: use {}, {RANDOM_COLOR}, {NO_COLOR} or #rrggbb",
+                WORKSPACE_COLORS.join(", ")
+            )
+        })?),
+    };
+    let mut state = lock(shared);
+    let folder = state
+        .folders
+        .iter_mut()
+        .find(|f| f.path == path)
+        .ok_or_else(|| eyre!("no remembered folder {}", path.display()))?;
+    folder.color = color;
+    state.emit_folders();
+    Ok(Response::Ok)
+}
+
 /// A child spawned without a color under a colored parent gets the parent's color nudged, one no other child of
 /// that parent has.
 fn inherited_color(state: &State, parent: WorkspaceId) -> Option<String> {
@@ -1455,12 +1487,12 @@ fn input(shared: &Shared, pane: PaneId, data: &str) -> Result<Response> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     fn folder(path: &str) -> Folder {
         Folder {
             path: path.into(),
             last_used: 0,
+            color: None,
         }
     }
 

@@ -49,6 +49,13 @@ pub enum Request {
     RemoveFolder {
         path: PathBuf,
     },
+    /// Sets the color the app gives workspaces spawned from a remembered folder: a name from `WORKSPACE_COLORS`,
+    /// `#rrggbb`, `random` or `none`. `None` goes back to the app's setting.
+    SetFolderColor {
+        path: PathBuf,
+        #[serde(default)]
+        color: Option<String>,
+    },
     /// Sets the sidebar order of the remembered folders. Paths it leaves out keep their place after the listed ones.
     ReorderFolders {
         paths: Vec<PathBuf>,
@@ -135,6 +142,8 @@ pub const FEATURE_CLAUDE_ARGS: &str = "claude_args";
 pub const FEATURE_SPAWN_COLOR: &str = "spawn_color";
 /// `Request::SetColor` and `Workspace.color`.
 pub const FEATURE_WORKSPACE_COLORS: &str = "workspace_colors";
+/// `Request::SetFolderColor` and `Folder.color`.
+pub const FEATURE_FOLDER_COLORS: &str = "folder_colors";
 /// `Request::ReorderWorkspaces`, and `List`/`Event::Workspaces` in that order.
 pub const FEATURE_WORKSPACE_ORDER: &str = "workspace_order";
 
@@ -292,5 +301,9 @@ mod tests {
         assert!(order.is_empty());
         let req: Request = serde_json::from_str(r#"{"op":"reorder_folders","paths":["/b","/a"]}"#).unwrap();
         assert!(matches!(req, Request::ReorderFolders { paths } if paths.len() == 2));
+        assert_eq!(folders[0].color, None);
+        assert!(!serde_json::to_string(&folders[0]).unwrap().contains("color"));
+        let req: Request = serde_json::from_str(r#"{"op":"set_folder_color","path":"/a"}"#).unwrap();
+        assert!(matches!(req, Request::SetFolderColor { color: None, .. }));
     }
 }
