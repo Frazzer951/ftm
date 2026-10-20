@@ -365,7 +365,7 @@ interface FontFamily {
 
 let fontList: Promise<FontFamily[]> | null = null;
 
-let soundSettings: SoundSettings = { needs_input: "Clink", completed: "Ding", volume: 0.7, wait_for_subagents: false };
+let soundSettings: SoundSettings = { needs_input: "Clink", completed: "Done", volume: 0.7, wait_for_subagents: false };
 
 type Channel = "stable" | "nightly";
 /// Unset (`null`) means automatic: check only on a pacman install, on this build's own channel.

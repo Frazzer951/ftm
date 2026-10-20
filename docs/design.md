@@ -162,7 +162,7 @@ name = "Supacode Dark"   # or follow_system = true with dark/light
 
 [sounds]
 needs_input = "Clink"    # a name from the sound list; "" plays nothing
-completed = "Ding"
+completed = "Done"
 volume = 0.7             # 0 to 1
 wait_for_subagents = false  # true: no finished sound while the agent still has background subagents running
 

@@ -131,7 +131,7 @@ impl Default for SoundSettings {
     fn default() -> Self {
         SoundSettings {
             needs_input: "Clink".into(),
-            completed: "Ding".into(),
+            completed: "Done".into(),
             volume: 0.7,
             wait_for_subagents: false,
         }
@@ -303,7 +303,7 @@ mod tests {
             dark: "Nord".into(),
             light: "Supacode Light".into(),
         };
-        assert_eq!(settings.sounds.completed, "Ding");
+        assert_eq!(settings.sounds.completed, "Done");
         assert!(!settings.sounds.wait_for_subagents);
         settings.sounds.needs_input = String::new();
         settings.sounds.wait_for_subagents = true;

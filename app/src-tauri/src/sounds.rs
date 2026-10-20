@@ -1,5 +1,6 @@
-//! Sounds for the status alerts: built into the app, dropped in `~/.config/ftm/sounds`, or the system's own. Clink and
-//! Ding are CC0 recordings from Freesound (`sounds/CREDITS.md`); the other builtins come from `scripts/gen-sounds.py`. The webview decides which formats it can play.
+//! Sounds for the status alerts: built into the app, dropped in `~/.config/ftm/sounds`, or the system's own. Clink,
+//! Ding and Done are CC0 recordings from Freesound (`sounds/CREDITS.md`); the other builtins come from
+//! `scripts/gen-sounds.py`. The webview decides which formats it can play.
 
 use ftm_core::paths;
 use ftm_core::theme::Source;
@@ -10,6 +11,7 @@ use std::path::{Path, PathBuf};
 const BUILTIN: &[(&str, &[u8])] = &[
     ("Clink", include_bytes!("../sounds/Clink.wav")),
     ("Ding", include_bytes!("../sounds/Ding.wav")),
+    ("Done", include_bytes!("../sounds/Done.wav")),
     ("Chime", include_bytes!("../sounds/Chime.wav")),
     ("Nudge", include_bytes!("../sounds/Nudge.wav")),
     ("Arpeggio", include_bytes!("../sounds/Arpeggio.wav")),
