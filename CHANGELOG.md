@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.15] - 2026-10-20
+
+### App
+
+- feat(app): replace the logo with the merge-a design
+- feat(app): show the logo and FTM in the sidebar header
+
 ## [0.1.14] - 2026-10-20
 
 ### App
