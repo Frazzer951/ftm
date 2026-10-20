@@ -7,6 +7,7 @@ mod links;
 mod open_in;
 mod sounds;
 mod themes;
+mod tray;
 mod update;
 
 use ftm_core::config::{Channel, Settings};
@@ -352,6 +353,7 @@ fn main() {
                 app.set_activation_policy(tauri::ActivationPolicy::Prohibited);
             }
             main_window(app.handle(), !background)?;
+            tray::install(app.handle())?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

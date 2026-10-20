@@ -134,7 +134,7 @@ dialog fieldset { border: 1px solid var(--border-strong); border-radius: 4px; di
 #menu .swatch { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 7px; }
 #sidebar header .actions { display: flex; gap: 4px; }
 #sidebar header .brand { display: flex; align-items: center; gap: 6px; }
-#sidebar header .brand img { width: 18px; height: 18px; }
+#sidebar header .brand svg { width: 17px; height: 14px; fill: currentColor; }
 dialog input[type="number"] { width: 100%; background: var(--bg); color: inherit; border: 1px solid var(--border-strong); border-radius: 4px; padding: 4px; }
 .hint { color: var(--warning); margin: 0; min-height: 1em; font-size: 12px; }
 #settings-error { color: var(--danger); margin: 0; min-height: 1em; }
