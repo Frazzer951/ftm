@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.14] - 2026-10-20
+
+### App
+
+- feat(app): new logo, and a Done sound as the default finished sound
+
 ## [0.1.13] - 2026-10-19
 
 ### Daemon
