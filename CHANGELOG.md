@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.16] - 2026-10-20
+
+### App
+
+- feat(app): replace the logo with Floating Steps and add a tray icon
+
+### Other
+
+- chore(deps): allow ISC for libloading via the tray's appindicator
+
 ## [0.1.15] - 2026-10-20
 
 ### App
