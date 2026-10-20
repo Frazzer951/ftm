@@ -22,12 +22,12 @@
     "longDescription": "FTM runs Claude Code agents and shells across repos and git worktrees, with agents nested under the agent that spawned them. Ships the ftm CLI and the ftmd daemon next to the app.",
     "linux": {
       "deb": {
-        "depends": ["gstreamer1.0-plugins-good"],
+        "depends": ["gstreamer1.0-plugins-good", "libayatana-appindicator3-1"],
         "conflicts": ["ftm-nightly"],
         "replaces": ["ftm-nightly"]
       },
       "rpm": {
-        "depends": ["gstreamer1-plugins-good"],
+        "depends": ["gstreamer1-plugins-good", "libayatana-appindicator-gtk3"],
         "conflicts": ["ftm-nightly"],
         "obsoletes": ["ftm-nightly"]
       }
