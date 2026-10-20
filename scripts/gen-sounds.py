@@ -3,8 +3,9 @@
 
     python3 scripts/gen-sounds.py
 
-Every tone is generated here, so the files carry no license beyond the repo's own. Clink.wav and Ding.wav in the same
-directory are recorded samples (see its CREDITS.md); this script only writes the names below and leaves them alone.
+Every tone is generated here, so the files carry no license beyond the repo's own. Clink.wav, Ding.wav and Done.wav in
+the same directory are recorded samples (see its CREDITS.md); this script only writes the names below and leaves them
+alone.
 """
 
 import math
