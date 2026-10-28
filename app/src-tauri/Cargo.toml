@@ -31,7 +31,7 @@ objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std"
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 objc2 = { version = "0.6.5", features = ["exception"] }
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSEvent", "NSGraphics", "NSResponder", "NSWindow"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSEvent", "NSGraphics", "NSGraphicsContext", "NSResponder", "NSWindow"] }
 # 0.37.2 is the first tao whose `sendEvent:` override is `extern "C-unwind"`; this also keeps the lockfile from going back.
 tao = { version = "0.37.2", default-features = false }
 
