@@ -37,6 +37,10 @@ function buffer(sound: SoundEntry): Promise<AudioBuffer> {
 
 let playing: AudioBufferSourceNode | null = null;
 
+/// Maps the 0..1 volume setting to a gain on a cubic taper, since loudness is heard logarithmically: 0.5 is about
+/// -18 dB rather than the -6 dB a linear gain gives, so the whole slider range is audible.
+export const gainFor = (volume: number) => Math.min(1, Math.max(0, volume)) ** 3;
+
 /// Plays the named sound, cutting off whatever is still playing; an empty or unknown name plays nothing.
 export async function play(name: string, volume: number) {
   if (!name) return;
@@ -47,7 +51,7 @@ export async function play(name: string, volume: number) {
   // Unconditional: a suspend from the last sound ending can still be pending while the state reads "running".
   await ac.resume();
   const gain = ac.createGain();
-  gain.gain.value = Math.min(1, Math.max(0, volume));
+  gain.gain.value = gainFor(volume);
   gain.connect(ac.destination);
   const source = ac.createBufferSource();
   source.buffer = data;
