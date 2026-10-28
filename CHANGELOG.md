@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.17] - 2026-10-28
+
+### App
+
+- fix(app): bump tao to 0.37.2 so AppKit exceptions in sendEvent: no longer abort
+- test(app): name the AppKit feature the sendEvent: test uses
+- fix(app): map the sound volume slider to gain on a cubic taper
+
+### Other
+
+- chore(deps): bump tokio to 1.54.1 and clipboard-win to 5.4.3
+
 ## [0.1.16] - 2026-10-20
 
 ### App
