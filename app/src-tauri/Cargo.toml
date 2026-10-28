@@ -21,7 +21,7 @@ tauri-plugin-clipboard-manager = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-window-state = "2"
-tokio = { version = "1.53.2", features = ["sync"] }
+tokio = { version = "1.54.1", features = ["sync"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-text = "22.0.0"
@@ -31,6 +31,14 @@ objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std"
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 objc2 = { version = "0.6.5", features = ["exception"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSEvent", "NSGraphics", "NSGraphicsContext", "NSResponder", "NSWindow"] }
+# 0.37.2 is the first tao whose `sendEvent:` override is `extern "C-unwind"`; this also keeps the lockfile from going back.
+tao = { version = "0.37.2", default-features = false }
+
+# Runs NSApplication on the main thread, which the libtest harness doesn't.
+[[test]]
+name = "send_event_exceptions"
+harness = false
 
 # Once per release, not once per crate.
 [package.metadata.release]

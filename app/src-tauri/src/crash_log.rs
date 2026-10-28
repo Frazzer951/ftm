@@ -69,9 +69,9 @@ fn timestamp(at: SystemTime) -> String {
     format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{s:02}Z")
 }
 
-/// tao overrides `-[NSApplication sendEvent:]` as `extern "C"`, so an Objective-C exception raised by AppKit while it
-/// dispatches an event cannot reach the handler in `-[NSApplication run]`; it aborts the app as
-/// `panic_cannot_unwind`, and the crash report never names the exception. Log each one as it is thrown instead.
+/// An Objective-C exception that unwinds into an `extern "C"` Rust frame (wry's `WKURLSchemeHandler` methods, for one)
+/// cannot reach the handler in `-[NSApplication run]`; it aborts the app as `panic_cannot_unwind`, and the crash report
+/// never names the exception. Log each one as it is thrown instead.
 #[cfg(target_os = "macos")]
 mod objc_exceptions {
     use super::{Backtrace, PathBuf, append};
@@ -240,8 +240,8 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
-    /// The crash itself: an exception thrown under an `extern "C"` frame (tao's `sendEvent:`) with an Objective-C
-    /// handler further up (`-[NSApplication run]`) aborts. Run in a child process, since it kills its process.
+    /// An exception thrown under an `extern "C"` frame with an Objective-C handler further up (`-[NSApplication run]`)
+    /// aborts. Run in a child process, since it kills its process.
     #[cfg(target_os = "macos")]
     #[test]
     fn objc_exception_through_extern_c_aborts_but_leaves_its_reason_in_the_log() {
