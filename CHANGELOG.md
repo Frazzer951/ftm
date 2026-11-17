@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.18] - 2026-11-17
+
+### CLI
+
+- feat(cli): move a workspace under another or to the top level with ftm move
+
 ## [0.1.17] - 2026-10-28
 
 ### App
