@@ -39,6 +39,12 @@ pub enum Request {
         #[serde(default)]
         color: Option<String>,
     },
+    /// Nests the workspace under `parent`, or makes it top level when `None`. Refused when `parent` is the workspace
+    /// itself or one of its descendants. Nesting a pinned workspace unpins it; its color is kept.
+    Move {
+        id: WorkspaceId,
+        parent: Option<WorkspaceId>,
+    },
     /// Clears the workspace's `unseen` flag: someone has looked at it.
     MarkSeen {
         id: WorkspaceId,
@@ -146,6 +152,8 @@ pub const FEATURE_WORKSPACE_COLORS: &str = "workspace_colors";
 pub const FEATURE_FOLDER_COLORS: &str = "folder_colors";
 /// `Request::ReorderWorkspaces`, and `List`/`Event::Workspaces` in that order.
 pub const FEATURE_WORKSPACE_ORDER: &str = "workspace_order";
+/// `Request::Move`.
+pub const FEATURE_MOVE: &str = "move";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]

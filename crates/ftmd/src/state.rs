@@ -7,8 +7,8 @@ use ftm_core::model::{
     WorkspaceId, Worktree, color_hex, folder_color, workspace_color,
 };
 use ftm_core::protocol::{
-    Event, FEATURE_CLAUDE_ARGS, FEATURE_FOLDER_COLORS, FEATURE_SPAWN_COLOR, FEATURE_WORKSPACE_COLORS, FEATURE_WORKSPACE_ORDER,
-    Request, Response, SpawnRequest,
+    Event, FEATURE_CLAUDE_ARGS, FEATURE_FOLDER_COLORS, FEATURE_MOVE, FEATURE_SPAWN_COLOR, FEATURE_WORKSPACE_COLORS,
+    FEATURE_WORKSPACE_ORDER, Request, Response, SpawnRequest,
 };
 use ftm_core::{ENV_AGENT_CMD, ENV_NAME, ENV_PANE_ID, ENV_SOCKET, ENV_WORKSPACE_ID, color, paths};
 use serde::{Deserialize, Serialize};
@@ -1054,6 +1054,7 @@ pub fn handle(shared: &Shared, request: Request, peer: Option<i32>) -> Response 
                 FEATURE_WORKSPACE_ORDER,
                 FEATURE_SPAWN_COLOR,
                 FEATURE_FOLDER_COLORS,
+                FEATURE_MOVE,
             ]
             .map(String::from)
             .to_vec(),
@@ -1086,6 +1087,7 @@ pub fn handle(shared: &Shared, request: Request, peer: Option<i32>) -> Response 
         Request::Rename { id, name } => rename(shared, id, &name),
         Request::Pin { id, pinned } => pin(shared, id, pinned),
         Request::SetColor { id, color } => set_color(shared, id, color.as_deref()),
+        Request::Move { id, parent } => move_workspace(shared, id, parent),
         Request::MarkSeen { id } => {
             let mut state = lock(shared);
             state
@@ -1319,6 +1321,35 @@ fn pin(shared: &Shared, id: WorkspaceId, pinned: bool) -> Result<Response> {
         bail!("workspace {id} is nested under another workspace; only top-level workspaces can be pinned");
     }
     state.workspace_mut(id)?.pinned = pinned;
+    state.emit_workspaces();
+    Ok(Response::Ok)
+}
+
+/// Pins are for top-level workspaces only, so nesting one unpins it. Its color stays: it was chosen for it, not
+/// inherited at the time.
+fn move_workspace(shared: &Shared, id: WorkspaceId, parent: Option<WorkspaceId>) -> Result<Response> {
+    let mut state = lock(shared);
+    state.workspace_mut(id)?;
+    if let Some(parent) = parent {
+        if !state.workspaces.contains_key(&parent) {
+            bail!("no workspace {parent}");
+        }
+        let mut ancestor = Some(parent);
+        while let Some(a) = ancestor {
+            if a == id {
+                bail!("cannot move workspace {id} under itself or one of its descendants");
+            }
+            ancestor = state.workspaces.get(&a).and_then(|w| w.parent);
+        }
+    }
+    let ws = state.workspace_mut(id)?;
+    if ws.parent == parent {
+        return Ok(Response::Ok);
+    }
+    ws.parent = parent;
+    if parent.is_some() {
+        ws.pinned = false;
+    }
     state.emit_workspaces();
     Ok(Response::Ok)
 }

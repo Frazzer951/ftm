@@ -214,10 +214,25 @@ fn agents_nest_report_status_and_clean_up() {
     assert_eq!(
         ftm(&bin, &socket, &["ping"]),
         format!(
-            "ftmd {} (features: claude_args, workspace_colors, workspace_order, spawn_color, folder_colors)",
+            "ftmd {} (features: claude_args, workspace_colors, workspace_order, spawn_color, folder_colors, move)",
             env!("CARGO_PKG_VERSION")
         )
     );
+    ftm(
+        &bin,
+        &socket,
+        &["move", &unnamed.to_string(), "--parent", &leader.to_string()],
+    );
+    assert_eq!(titled(unnamed).parent, Some(leader));
+    let cycle = Command::new(&bin)
+        .args(["move", &leader.to_string(), "--parent", &unnamed.to_string()])
+        .env("FTM_SOCKET", &socket)
+        .output()
+        .unwrap();
+    assert!(!cycle.status.success());
+    assert!(String::from_utf8_lossy(&cycle.stderr).contains("descendants"));
+    ftm(&bin, &socket, &["move", &unnamed.to_string(), "--top-level"]);
+    assert_eq!(titled(unnamed).parent, None);
     ftm(&bin, &socket, &["close", "--id", &unnamed.to_string()]);
 
     // Arguments after `--` reach Claude one argv entry each, after `-n` and before the brief, which `--` shields from

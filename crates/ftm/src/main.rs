@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use eyre::{Result, WrapErr, bail};
 use ftm_core::ENV_WORKSPACE_ID;
 use ftm_core::model::{Kind, PaneId, RANDOM_COLOR, Status, WORKSPACE_COLORS, Workspace, WorkspaceId, workspace_color};
-use ftm_core::protocol::{FEATURE_CLAUDE_ARGS, FEATURE_SPAWN_COLOR, Request, Response, SpawnRequest};
+use ftm_core::protocol::{FEATURE_CLAUDE_ARGS, FEATURE_MOVE, FEATURE_SPAWN_COLOR, Request, Response, SpawnRequest};
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -109,6 +109,17 @@ enum Command {
         clear: bool,
         #[arg(long, env = ENV_WORKSPACE_ID)]
         id: Option<WorkspaceId>,
+    },
+    /// Move a workspace in the sidebar tree: under another workspace, or to the top level. Nesting a pinned
+    /// workspace unpins it; its color is kept. Refused when ftmd is too old to move workspaces
+    Move {
+        id: WorkspaceId,
+        /// Nest it under this workspace (not itself or one of its descendants)
+        #[arg(long, required_unless_present = "top_level", conflicts_with = "top_level")]
+        parent: Option<WorkspaceId>,
+        /// Make it a top-level workspace
+        #[arg(long)]
+        top_level: bool,
     },
     /// Print a pane's screen and scrollback as text, or with --raw its buffered output bytes (last 1 MiB)
     Capture {
@@ -252,6 +263,10 @@ fn main() -> Result<()> {
             id: id
                 .ok_or_else(|| eyre::eyre!("no workspace: pass --id or run inside an FTM workspace (${ENV_WORKSPACE_ID})"))?,
             color,
+        },
+        Command::Move { id, parent, .. } => {
+            require_feature(FEATURE_MOVE, "moving workspaces")?;
+            Request::Move { id, parent }
         },
         Command::Capture { target, raw } => {
             let pane = resolve_pane(target)?;

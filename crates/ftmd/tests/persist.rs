@@ -541,6 +541,67 @@ fn workspace_order_and_colors_are_remembered() {
 }
 
 #[test]
+fn moving_a_workspace_reparents_it_live_and_is_remembered() {
+    let dir = temp_root("move");
+    let mut daemon = start_daemon("move", |_| {});
+    let mut req = Conn::open(&daemon.socket);
+    let [a, b, c] = ["a", "b", "c"].map(|name| spawn_terminal(&mut req, &dir, name).id);
+    req.send(&Request::Pin { id: b, pinned: true });
+    req.send(&Request::SetColor {
+        id: b,
+        color: Some("green".into()),
+    });
+    let mut events = Conn::open(&daemon.socket);
+    events.send(&Request::Subscribe);
+    let find = |req: &mut Conn, id| req.list().into_iter().find(|w| w.id == id).unwrap();
+
+    req.send(&Request::Move { id: b, parent: Some(a) });
+    req.send(&Request::Move { id: c, parent: Some(b) });
+    let moved = find(&mut req, b);
+    assert_eq!(moved.parent, Some(a));
+    assert!(!moved.pinned, "nesting unpins");
+    assert_eq!(moved.color.as_deref(), Some("green"), "color is kept");
+    // Subscribers, the app's sidebar among them, get the new tree.
+    loop {
+        let Event::Workspaces { workspaces } = events.line() else {
+            continue;
+        };
+        if workspaces.iter().any(|w| w.id == c && w.parent == Some(b)) {
+            break;
+        }
+    }
+
+    for (parent, needle) in [
+        (a, "descendants"),
+        (c, "descendants"),
+        (WorkspaceId::new_v4(), "no workspace"),
+    ] {
+        let Some(Response::Error { message }) = req.try_send(&Request::Move {
+            id: a,
+            parent: Some(parent),
+        }) else {
+            panic!("moving under {parent} should fail")
+        };
+        assert!(message.contains(needle), "{message}");
+    }
+    assert!(matches!(
+        req.try_send(&Request::Move {
+            id: WorkspaceId::new_v4(),
+            parent: None
+        }),
+        Some(Response::Error { .. })
+    ));
+    drop((req, events));
+
+    daemon.restart();
+    let mut req = Conn::open(&daemon.socket);
+    assert_eq!(find(&mut req, c).parent, Some(b));
+    req.send(&Request::Move { id: b, parent: None });
+    assert_eq!(find(&mut req, b).parent, None);
+    assert_eq!(find(&mut req, c).parent, Some(b), "children move with it");
+}
+
+#[test]
 fn finishing_a_turn_marks_the_workspace_unseen_until_looked_at() {
     let dir = temp_root("unseen");
     let mut daemon = start_daemon("unseen", |_| {});

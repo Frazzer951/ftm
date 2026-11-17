@@ -29,6 +29,19 @@ fn spawn_refuses_an_unknown_color() {
     assert!(stderr.contains("unknown color \"teal\""), "{stderr}");
 }
 
+#[test]
+fn move_takes_exactly_one_destination() {
+    let id = "00000000-0000-0000-0000-000000000001";
+    for args in [vec!["move", id], vec!["move", id, "--parent", id, "--top-level"]] {
+        let out = Command::new(env!("CARGO_BIN_EXE_ftm"))
+            .args(&args)
+            .env("FTM_SOCKET", "/nonexistent/ftmd.sock")
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+    }
+}
+
 /// Without a fetch gc cannot see an upstream deletion, so asking for both would silently remove nothing extra.
 #[test]
 fn gc_refuses_upstream_deleted_without_a_fetch() {
