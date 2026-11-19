@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.19] - 2026-11-19
+
+### App
+
+- feat(app): check for updates hourly on every install and offer each install's update
+
 ## [0.1.18] - 2026-11-17
 
 ### CLI
