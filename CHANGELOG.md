@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.20] - 2026-11-19
+
+### App
+
+- fix(app): run git_info and git_root off the main thread
+
 ## [0.1.19] - 2026-11-19
 
 ### App
