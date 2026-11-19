@@ -106,9 +106,19 @@ struct GitInfo {
 }
 
 /// Repo root, repo name and current branch (`HEAD` when detached) of `path`, or `None` outside a git repo.
+///
+/// Off the main thread: a sync command runs on the event loop, and the sidebar asks for every workspace and folder
+/// every few seconds, so the git forks would hold up input and terminal output.
 #[tauri::command]
-fn git_info(path: String) -> Option<GitInfo> {
-    let git = |args: &[&str]| Command::new("git").arg("-C").arg(Path::new(&path)).args(args).output().ok();
+async fn git_info(path: String) -> Option<GitInfo> {
+    tauri::async_runtime::spawn_blocking(move || read_git_info(&path))
+        .await
+        .ok()
+        .flatten()
+}
+
+fn read_git_info(path: &str) -> Option<GitInfo> {
+    let git = |args: &[&str]| Command::new("git").arg("-C").arg(Path::new(path)).args(args).output().ok();
     let out = git(&["rev-parse", "--show-toplevel", "--git-common-dir"])?;
     if !out.status.success() {
         return None;
@@ -123,7 +133,7 @@ fn git_info(path: String) -> Option<GitInfo> {
             || "HEAD".to_string(),
             |out| String::from_utf8_lossy(&out.stdout).trim().to_string(),
         );
-    let common = Path::new(&path).join(common);
+    let common = Path::new(path).join(common);
     let repo_dir = if common.file_name().is_some_and(|n| n == ".git") {
         common.parent()?
     } else {
@@ -233,16 +243,21 @@ async fn check_update() -> Option<update::Update> {
 }
 
 #[tauri::command]
-fn git_root(path: String) -> Option<String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(Path::new(&path))
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+async fn git_root(path: String) -> Option<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(Path::new(&path))
+            .args(["rev-parse", "--show-toplevel"])
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// The default macOS menu binds Cmd+W to Close Window; FTM uses it to close a pane. Edit stays for copy and paste.
@@ -430,7 +445,7 @@ mod tests {
     }
 
     fn info(dir: &Path) -> (String, String, String) {
-        let info = git_info(dir.to_string_lossy().into_owned()).expect("a git repo");
+        let info = read_git_info(&dir.to_string_lossy()).expect("a git repo");
         (info.root, info.repo, info.branch)
     }
 
@@ -464,7 +479,7 @@ mod tests {
         git(&repo, &["checkout", "-q", "--detach"]);
         assert_eq!(info(&repo), (root, "project".into(), "HEAD".into()));
 
-        assert!(git_info(base.to_string_lossy().into_owned()).is_none());
+        assert!(read_git_info(&base.to_string_lossy()).is_none());
         let _ = std::fs::remove_dir_all(&base);
     }
 
