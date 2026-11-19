@@ -20,6 +20,21 @@
     </main>
     <div id="parking"></div>
     <div id="notices"></div>
+    <dialog id="release">
+      <form method="dialog" id="release-form">
+        <h3 id="release-title"></h3>
+        <p id="release-fresh" class="hint"></p>
+        <p id="release-how"></p>
+        <pre id="release-commands"></pre>
+        <div class="row">
+          <button type="button" id="release-page">Release notes</button>
+          <span class="spacer"></span>
+          <button type="button" id="release-ignore">Ignore this version</button>
+          <button type="button" id="release-later">Later</button>
+          <button type="button" id="release-go"></button>
+        </div>
+      </form>
+    </dialog>
     <dialog id="spawn">
       <form method="dialog" id="spawn-form">
         <h3>New workspace</h3>
@@ -154,7 +169,7 @@
             <div class="select-row">
               <label for="update-check">Check</label>
               <select id="update-check">
-                <option value="">Automatic (pacman installs)</option>
+                <option value="">Automatic (all but dev builds)</option>
                 <option value="true">On</option>
                 <option value="false">Off</option>
               </select>

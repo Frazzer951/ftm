@@ -116,6 +116,11 @@ dialog input:not([type]), dialog input[list] { width: 100%; background: var(--bg
 dialog fieldset { border: 1px solid var(--border-strong); border-radius: 4px; display: flex; flex-direction: column; gap: 6px; }
 .row { display: flex; gap: 8px; align-items: center; }
 #folder { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+dialog#release { width: 460px; }
+#release-how { margin: 0; white-space: pre-wrap; }
+#release-fresh:empty, #release-commands:empty { display: none; }
+#release-commands { margin: 0; padding: 6px 8px; background: var(--bg); border: 1px solid var(--border-strong); border-radius: 4px; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; font-size: 12px; }
+#release-form .spacer { flex: 1; }
 #spawn-error { color: var(--danger); margin: 0; min-height: 1em; }
 .ws input.rename { flex: 1; min-width: 0; font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--accent); border-radius: 3px; padding: 0 3px; }
 .ws input.rename.invalid { border-color: var(--danger); }

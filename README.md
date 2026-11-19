@@ -20,21 +20,33 @@ Every release ships the app with the `ftm` CLI and the `ftmd` daemon inside it. 
 you installed with (`brew upgrade`, or the newer `.deb`, `.rpm` or `PKGBUILD`): within a few seconds the running ftmd
 moves itself onto the new build, keeping every session, and the app asks to be reopened.
 
-The app checks GitHub for a newer release about 10 seconds after it starts, then every 6 hours, and shows a notice
-when one is out. On an Arch install from a release `PKGBUILD` (`ftm-bin` or `ftm-nightly-bin`, owned by pacman under
-`/usr/bin`), the notice has an **Update** button. It opens an "FTM <version> update" terminal workspace that downloads
-the new `PKGBUILD` and runs `makepkg -si` there, so you can watch the build, confirm pacman's questions and type your
-sudo password. **Dismiss** hides that version until a newer one comes out. Other installs only check when you turn it
-on, and then just say a release is out.
+The app checks GitHub for a newer release about 10 seconds after it starts, then every hour. When one is out it asks
+in a dialog: **Update**, **Ignore this version** (stays quiet until a newer one ships) or **Later** (leaves a notice
+to come back to; the dialog doesn't come back for that version until the app restarts). What Update does depends on
+how this copy was installed:
+
+| Install | How the app tells | Update |
+| --- | --- | --- |
+| Homebrew cask (`ftm`, `ftm@nightly`) | the app bundle's cask is in Homebrew's `Caskroom` | runs `brew upgrade --cask frazzer951/ftm/ftm` (or `ftm@nightly`) in a terminal workspace |
+| `.dmg` or a copied `FTM.app` | any other app bundle | links the `.dmg` for this Mac and says how to replace the app and clear the quarantine flag |
+| Arch `ftm-bin` / `ftm-nightly-bin` | pacman owns `/usr/bin/ftm-app` | downloads the release `PKGBUILD` and runs `makepkg -si` in a terminal workspace |
+| `.deb` | dpkg owns `/usr/bin/ftm-app` | downloads the `.deb` for this architecture and runs `sudo apt install ./FTM_…deb` in a terminal workspace |
+| `.rpm` | rpm owns `/usr/bin/ftm-app` | downloads the `.rpm` for this architecture and runs `sudo dnf install ./FTM-…rpm` in a terminal workspace |
+| `scripts/install.sh` | built with `FTM_SOURCE_BUILD` set | a notice only: pull and rerun `scripts/install.sh` |
+| Dev build (`scripts/dev.sh`) | debug build | doesn't check unless `check = true` |
+| Anything else | | links the release page |
+
+The terminal workspace is called "FTM <version> update", so you can watch it, answer the package manager and type your
+sudo password. The dialog also shows the commands, to run them yourself instead.
 
 The check follows the build's own channel unless you pick one. Pick the other channel and the app offers its newest
-build as a **Switch**, whatever its version. Switching replaces the installed package (pacman asks before removing
-the other one) and starts a fresh daemon: open panes and sessions stay with the old one and don't carry over (see
+build as a **Switch**, whatever its version. Switching replaces the installed package on Linux (pacman asks before removing
+the other one; Homebrew installs the other cask next to it) and starts a fresh daemon: open panes and sessions stay with the old one and don't carry over (see
 below). Set both under ⚙ → Updates, or in `~/.config/ftm/config.toml`:
 
 ```toml
 [updates]
-check = false        # never check; true checks on any install. Unset: only on a pacman ftm-bin/ftm-nightly-bin install
+check = false        # never check. Unset: every install but a dev build; true includes dev builds
 channel = "nightly"  # or "stable". Unset: this build's own channel
 ```
 

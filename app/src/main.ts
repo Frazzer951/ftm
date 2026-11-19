@@ -2091,59 +2091,118 @@ interface Release {
   version: string;
   channel: Channel;
   switch: boolean;
+  install: { kind: string };
+  page: string;
+  download: string | null;
+  how: string;
+  commands: string | null;
   script: string | null;
+  prompt: boolean;
 }
 
 const releaseName = (r: Release) => `${r.channel === "nightly" ? "FTM Nightly" : "FTM"} ${r.version}`;
+const releaseKey = (r: Release) => `${r.channel} ${r.version}`;
 
-const DISMISSED_RELEASE = "ftm.dismissedRelease";
+const IGNORED_RELEASE = "ftm.dismissedRelease";
 
-function dismissedRelease(): string | null {
+function ignoredRelease(): string | null {
   try {
-    return localStorage.getItem(DISMISSED_RELEASE);
+    return localStorage.getItem(IGNORED_RELEASE);
   } catch {
     return null;
   }
 }
 
+function ignoreRelease(release: Release) {
+  try {
+    localStorage.setItem(IGNORED_RELEASE, release.version);
+  } catch {}
+  notice("release", null);
+}
+
+/// The release last brought up this session, so the hourly check doesn't ask again about one that is open, put off
+/// or being installed.
+let shownRelease: string | null = null;
+
 async function checkForRelease() {
   const release = await invoke<Release | null>("check_update");
-  if (!release) {
+  if (!release || release.version === ignoredRelease()) {
+    shownRelease = null;
     notice("release", null);
     return;
   }
-  if (release.version === dismissedRelease()) return;
-  const dismiss = () => {
-    try {
-      localStorage.setItem(DISMISSED_RELEASE, release.version);
-    } catch {}
-  };
-  const name = releaseName(release);
-  const fresh = release.switch
-    ? " Switching channels starts a fresh daemon: open panes and sessions stay with this one and don't carry over."
-    : "";
-  if (!release.script) {
-    const how = release.switch ? "Install it" : "Upgrade it";
-    notice("release", `${name} is available. ${how} with your package manager.${fresh}`, "info", [], dismiss);
-    return;
+  if (releaseKey(release) === shownRelease) return;
+  shownRelease = releaseKey(release);
+  if (release.prompt) {
+    showRelease(release);
+  } else {
+    releaseNotice(release);
   }
-  notice(
-    "release",
-    release.switch ? `Switch to ${name}?${fresh}` : `${name} is available.`,
-    "info",
-    [
-      [release.switch ? "Switch" : "Update", () => installRelease(release, release.script as string)],
-      ["Dismiss", dismiss],
-    ],
-    dismiss,
-  );
 }
 
-/// Runs the install in a pane of its own, where makepkg shows its progress and sudo can ask for the password.
+const switchWarning = (release: Release) =>
+  release.switch
+    ? "Switching channels starts a fresh daemon: open panes and sessions stay with this one and don't carry over."
+    : "";
+
+/// The quiet form: a notice that reopens the dialog.
+function releaseNotice(release: Release) {
+  const name = releaseName(release);
+  notice("release", release.switch ? `${name} is available to switch to.` : `${name} is available.`, "info", [
+    [release.switch ? "Switch…" : "Update…", () => showRelease(release)],
+    ["Ignore", () => ignoreRelease(release)],
+  ]);
+}
+
+function showRelease(release: Release) {
+  const dialog = $<HTMLDialogElement>("release");
+  const name = releaseName(release);
+  notice("release", null);
+  $("release-title").textContent = release.switch ? `Switch to ${name}?` : `${name} is available`;
+  $("release-fresh").textContent = switchWarning(release);
+  $("release-how").textContent = release.how;
+  $("release-commands").textContent = release.commands ?? "";
+  const go = $<HTMLButtonElement>("release-go");
+  const close = (then?: () => void) => {
+    dialog.onclose = null;
+    dialog.close();
+    then?.();
+  };
+  const script = release.script;
+  if (script) {
+    go.textContent = release.switch ? "Switch" : "Update";
+    go.onclick = () => close(() => installRelease(release, script));
+  } else if (release.download) {
+    const url = release.download;
+    go.textContent = "Download";
+    go.onclick = () => openUrl(url);
+  } else {
+    go.textContent = "Open release";
+    go.onclick = () => openUrl(release.page);
+  }
+  $("release-page").hidden = !script && !release.download;
+  $("release-page").onclick = () => openUrl(release.page);
+  $("release-ignore").onclick = () => close(() => ignoreRelease(release));
+  $("release-later").onclick = () => close(() => releaseNotice(release));
+  // Escape counts as Later.
+  dialog.onclose = () => {
+    dialog.onclose = null;
+    releaseNotice(release);
+  };
+  if (!dialog.open) dialog.showModal();
+  go.focus();
+}
+
+function openUrl(url: string) {
+  invoke("open_url", { url }).catch((err) => notice("release", `Could not open ${url}: ${err}`, "error"));
+}
+
+/// Runs the install in a pane of its own, where the package manager shows its progress and sudo can ask for the
+/// password.
 async function installRelease(release: Release, script: string) {
   // An ftmd older than this app ignores the command and would open a bare shell.
   if (!daemonCurrent) {
-    notice("release", `To install ${releaseName(release)}, run this in a terminal:\n\n${script}`, "info");
+    notice("release", `To install ${releaseName(release)}, run this in a terminal:\n\n${release.commands ?? script}`, "info");
     return;
   }
   try {
@@ -2168,4 +2227,4 @@ async function installRelease(release: Release, script: string) {
 }
 
 setTimeout(() => checkForRelease().catch(console.error), 10_000);
-setInterval(() => checkForRelease().catch(console.error), 6 * 60 * 60 * 1000);
+setInterval(() => checkForRelease().catch(console.error), 60 * 60 * 1000);
