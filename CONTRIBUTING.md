@@ -40,6 +40,12 @@ To try the CLI against the dev daemon, point it at the same socket:
 `FTM_SOCKET=$XDG_RUNTIME_DIR/ftm/ftmd-dev.sock ./target/debug/ftm ls`. On macOS the socket folder is
 `~/Library/Caches/ftm` unless `XDG_RUNTIME_DIR` is set.
 
+To try the update dialog, start dev with `FTM_UPDATE_FAKE_VERSION=0.0.1` (the check treats the app as that version,
+so the real latest release counts as newer) and optionally `FTM_UPDATE_FAKE_INSTALL=brew` (or `pacman`, `mac_app`,
+`deb`, `rpm`, `source`, `dev`, `unknown`) to see another install's dialog. The check runs 10 seconds after launch.
+Update really runs that install's commands in a terminal workspace, so close the pane rather than typing a password
+when the install isn't yours. Ignore remembers the version in the dev app's `localStorage`.
+
 ## Checks
 
 CI runs these on every pull request (Rust on Linux and macOS). Run them before you push:

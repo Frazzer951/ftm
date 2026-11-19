@@ -10,7 +10,7 @@ mod themes;
 mod tray;
 mod update;
 
-use ftm_core::config::{Channel, Settings};
+use ftm_core::config::Settings;
 use ftm_core::paths;
 use ftm_core::protocol::{Request, Response};
 use std::path::Path;
@@ -210,19 +210,12 @@ fn save_settings(settings: Settings) -> Result<(), String> {
     settings.save(&paths::settings_path()).map_err(|e| e.to_string())
 }
 
-/// A newer release on the `[updates] channel` (else this build's), or the other channel's newest as a switch, if the
-/// `[updates] check` setting (else whether this install can upgrade itself) asks to look.
-/// Being offline or rate limited is only logged.
+/// See `update::look`. Being offline or rate limited is only logged.
 #[tauri::command]
 async fn check_update() -> Option<update::Update> {
     tauri::async_runtime::spawn_blocking(|| {
         let updates = Settings::load(&paths::settings_path()).unwrap_or_default().updates;
-        let installable = update::installable();
-        if !updates.check.unwrap_or(installable) {
-            return None;
-        }
-        let channel = updates.channel.unwrap_or_else(Channel::current);
-        update::check(env!("CARGO_PKG_VERSION"), channel, installable)
+        update::look(&updates)
             .inspect_err(|e| eprintln!("update check: {e}"))
             .ok()
             .flatten()

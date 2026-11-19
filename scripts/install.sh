@@ -77,7 +77,8 @@ build() {
   ensure_app_deps "$REPO/app"
   local args=(--config src-tauri/tauri.bundle.conf.json)
   if [ -n "${1:-}" ]; then args+=(--bundles "$1"); else args+=(--no-bundle); fi
-  (cd "$REPO/app" && npm run tauri build -- "${args[@]}")
+  # Tells the app's update check that this build came from a checkout.
+  (cd "$REPO/app" && FTM_SOURCE_BUILD=1 npm run tauri build -- "${args[@]}")
 }
 
 install_macos() {

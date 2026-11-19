@@ -83,8 +83,7 @@ pub struct WorkspaceSettings {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UpdateSettings {
-    /// Look for a newer release. Unset means only when installed from the release's `PKGBUILD` (pacman `ftm-bin`),
-    /// the one install the app can upgrade by itself.
+    /// Look for a newer release, hourly. Unset means on for every install but a dev build.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub check: Option<bool>,
     /// The channel to update from. Unset means this build's own; the other one is offered as a switch.
