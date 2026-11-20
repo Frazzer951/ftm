@@ -32,8 +32,8 @@ fn send(client: State<'_, daemon::Client>, request: Request) {
 fn subscribe(app: AppHandle, events: State<'_, daemon::Events>) {
     let (daemon, failed) = (app.clone(), app.clone());
     events.restart(
-        move |event| {
-            let _ = app.emit("ftm-event", event);
+        move |batch| {
+            let _ = app.emit("ftm-events", batch);
         },
         move |version| {
             let _ = daemon.emit(

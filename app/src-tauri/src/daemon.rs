@@ -279,6 +279,8 @@ fn send(daemon: &Daemon, conn: &mut Option<Conn>, request: &Request) -> Result<R
 }
 
 const FAILURE_REPEAT: Duration = Duration::from_secs(30);
+/// The least time between two batches of events handed to the page.
+const BATCH_INTERVAL: Duration = Duration::from_millis(8);
 
 /// Forwards daemon events to the frontend. The page starts it once it is listening, and again after a reload, so
 /// each start gets a fresh replay; an older stream notices the generation change and stops. Each (re)connect first
@@ -304,7 +306,7 @@ impl Events {
 
     pub fn restart(
         &self,
-        emit: impl Fn(Event) + Send + 'static,
+        emit: impl Fn(Vec<Event>) + Send + 'static,
         connected: impl Fn(String) + Send + 'static,
         failed: impl Fn(String) + Send + 'static,
     ) {
@@ -313,9 +315,25 @@ impl Events {
             let _ = old.shutdown(Shutdown::Both);
         }
         let (daemon, current, slot) = (self.daemon.clone(), self.generation.clone(), self.stream.clone());
+        let (events, batches) = mpsc::channel();
+        let still = current.clone();
         // Runs on the main thread (from the `subscribe` command), where a panic takes the whole app down.
+        let spawned = std::thread::Builder::new().name("ftmd-batches".into()).spawn(move || {
+            forward_batches(&batches, BATCH_INTERVAL, |batch| {
+                if still.load(Ordering::SeqCst) == generation {
+                    emit(batch);
+                }
+            });
+        });
+        if let Err(e) = spawned {
+            eprintln!("starting the ftmd event batches: {e}");
+            return;
+        }
         let spawned = std::thread::Builder::new().name("ftmd-events".into()).spawn(move || {
             let live = || current.load(Ordering::SeqCst) == generation;
+            let emit = |event| {
+                let _ = events.send(event);
+            };
             let mut reported: Option<(Instant, String)> = None;
             while live() {
                 let reached = Cell::new(false);
@@ -343,6 +361,27 @@ impl Events {
         if let Err(e) = spawned {
             eprintln!("starting the ftmd event stream: {e}");
         }
+    }
+}
+
+/// Hands `emit` every event that has arrived, at most once per `interval`; the first event after a quiet spell goes
+/// out at once. Each emit is a script the webview compiles and runs on its main thread, so emitting every event on
+/// its own freezes all panes while one pane floods output. Ends once the sender is gone and the queue is drained.
+fn forward_batches(events: &mpsc::Receiver<Event>, interval: Duration, emit: impl Fn(Vec<Event>)) {
+    let mut last: Option<Instant> = None;
+    while let Ok(first) = events.recv() {
+        let mut batch = vec![first];
+        if let Some(due) = last.map(|at| at + interval) {
+            while let Some(left) = due.checked_duration_since(Instant::now()) {
+                match events.recv_timeout(left) {
+                    Ok(event) => batch.push(event),
+                    Err(_) => break,
+                }
+            }
+        }
+        batch.extend(events.try_iter());
+        emit(batch);
+        last = Some(Instant::now());
     }
 }
 
@@ -547,11 +586,13 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let versions = tx.clone();
         events.restart(
-            move |event| {
-                let _ = tx.send(match event {
-                    Event::UpdateBlocked { reason, .. } => reason,
-                    other => format!("{other:?}"),
-                });
+            move |batch| {
+                for event in batch {
+                    let _ = tx.send(match event {
+                        Event::UpdateBlocked { reason, .. } => reason,
+                        other => format!("{other:?}"),
+                    });
+                }
             },
             move |version| {
                 let _ = versions.send(version);
@@ -590,7 +631,7 @@ mod tests {
         let events = Events::new(dying_ftmd(&dir, &launched));
         let (tx, rx) = mpsc::channel();
         events.restart(
-            |event| panic!("{event:?}"),
+            |batch| panic!("{batch:?}"),
             |version| panic!("{version}"),
             move |e| {
                 let _ = tx.send(e);
@@ -605,5 +646,39 @@ mod tests {
         assert!(rx.recv_timeout(Duration::from_millis(1500)).is_err());
         events.restart(|_| {}, |_| {}, |_| {});
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_burst_of_events_reaches_the_page_in_few_batches_and_in_order() {
+        let event = |n: usize| Event::UpdateBlocked {
+            version: None,
+            reason: n.to_string(),
+        };
+        let (tx, rx) = mpsc::channel();
+        let (batches_tx, batches) = mpsc::channel();
+        let forwarder = std::thread::spawn(move || {
+            forward_batches(&rx, Duration::from_millis(200), |batch| {
+                let _ = batches_tx.send(batch);
+            });
+        });
+        tx.send(event(0)).unwrap();
+        let first = batches.recv_timeout(Duration::from_millis(100)).unwrap();
+        assert_eq!(first.len(), 1, "the first event after a quiet spell waits for nothing");
+        for n in 1..=500 {
+            tx.send(event(n)).unwrap();
+        }
+        drop(tx);
+        forwarder.join().unwrap();
+        let rest: Vec<Vec<Event>> = batches.try_iter().collect();
+        assert!(rest.len() <= 2, "{} batches", rest.len());
+        let order: Vec<String> = rest
+            .into_iter()
+            .flatten()
+            .map(|e| match e {
+                Event::UpdateBlocked { reason, .. } => reason,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(order, (1..=500).map(|n| n.to_string()).collect::<Vec<_>>());
     }
 }

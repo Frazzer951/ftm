@@ -2039,7 +2039,9 @@ invoke<{
   .catch(console.error);
 render();
 
-const events = listen<FtmEvent>("ftm-event", ({ payload }) => {
+const events = listen<FtmEvent[]>("ftm-events", ({ payload }) => payload.forEach(onEvent));
+
+function onEvent(payload: FtmEvent) {
   if (payload.event === "workspaces") {
     onWorkspaces(payload.workspaces);
   } else if (payload.event === "folders") {
@@ -2065,7 +2067,7 @@ const events = listen<FtmEvent>("ftm-event", ({ payload }) => {
       v.term.write(decode(payload.data));
     }
   }
-});
+}
 
 /// Whether the daemon, as of the last (re)connect, is at least as new as the app; an older one may not know how to
 /// run a command.
