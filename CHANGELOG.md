@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.22] - 2026-11-20
+
+### CLI
+
+- feat(cli): ftm show puts a file in a workspace's viewer panel without taking focus (ftm#124)
+
+### App
+
+- feat(app): artifact viewer side panel for markdown, HTML, images and video (ftm#124)
+- fix(app): keep the viewer's Blob URL alive and report media that cannot load
+- feat(app): inline sixel and iTerm2 images in panes, replay buffers cut between escape sequences (ftm#124)
+- fix(app): join iTerm2 multipart inline images for the image addon
+
 ## [0.1.21] - 2026-11-20
 
 ### App
