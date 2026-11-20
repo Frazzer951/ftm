@@ -166,6 +166,7 @@ LEADER=$(./target/debug/ftm spawn agent --name leader)
 FTM_WORKSPACE_ID=$LEADER ./target/debug/ftm spawn agent --path ../some-repo --worktree fix/thing
 WORKER=$(./target/debug/ftm spawn agent --name worker -- --model claude-sonnet-5-5 --permission-mode auto)  # args after -- go to claude
 ./target/debug/ftm move "$WORKER" --parent "$LEADER"   # or --top-level
+FTM_WORKSPACE_ID=$WORKER ./target/debug/ftm ask "Postgres or SQLite?" --option Postgres --option SQLite  # in the app's Tasks tab; the answer is typed into the worker
 ./target/debug/ftm ls
 ./target/debug/ftm gc          # merged worktrees; --yes removes them and their branches
 ```
