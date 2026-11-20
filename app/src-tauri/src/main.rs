@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod artifacts;
 mod crash_log;
 mod daemon;
 mod fonts;
@@ -192,6 +193,28 @@ async fn open_in(target: String, path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn open_file(path: String, line: Option<u32>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || open_in::open_file(&path, line))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn artifact_stat(path: String) -> Result<artifacts::Stat, String> {
+    tauri::async_runtime::spawn_blocking(move || artifacts::stat(&path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn read_artifact(path: String) -> Result<tauri::ipc::Response, String> {
+    tauri::async_runtime::spawn_blocking(move || artifacts::read(&path))
+        .await
+        .map_err(|e| e.to_string())?
+        .map(tauri::ipc::Response::new)
+}
+
+#[tauri::command]
 fn open_url(url: String) -> Result<(), String> {
     links::open(&url)
 }
@@ -379,6 +402,9 @@ fn main() {
             open_targets,
             open_in,
             open_url,
+            open_file,
+            artifact_stat,
+            read_artifact,
             log,
             ensure_on_screen,
             check_update

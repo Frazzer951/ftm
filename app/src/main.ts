@@ -9,7 +9,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { LigaturesAddon } from "@xterm/addon-ligatures";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
-import { Terminal } from "@xterm/xterm";
+import { type ILinkProvider, Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import {
   chipBackground,
@@ -19,6 +19,7 @@ import {
   WORKSPACE_COLORS,
   WORKSPACE_PALETTE,
 } from "./colors.ts";
+import { artifactKind, fileUrlPath, findPaths, resolvePath, splitLine } from "./artifacts.ts";
 import { dropText } from "./drop.ts";
 import { StatusSounds, statusDot, stillFinished } from "./finish.ts";
 import { clipboardKey, type OptionAsMeta, optionIsMeta, paneKey } from "./keys.ts";
@@ -39,6 +40,7 @@ import { loadSounds, play, type SoundEntry, type SoundSettings } from "./sounds.
 import "./style.css";
 import { Tabs } from "./tabs.ts";
 import { compareVersions, versionNotice } from "./version.ts";
+import { type Stat, Viewer } from "./viewer.ts";
 import { type AppScroll, type AppWheel, appWheel } from "./wheel.ts";
 
 type Id = string;
@@ -105,11 +107,89 @@ console.error = (...args: unknown[]) => {
 };
 window.addEventListener("error", (e) => report(`${e.message} at ${e.filename}:${e.lineno}`));
 window.addEventListener("unhandledrejection", (e) => report(`unhandled rejection: ${e.reason?.stack ?? e.reason}`));
-function openLink(e: MouseEvent, text: string) {
+/// A Cmd+clicked link in a pane: web and mail links go to the OS, `file:` links to the viewer or VS Code.
+function activateLink(pane: Id, e: MouseEvent, text: string) {
+  if (!opensLink(e, isMac)) return;
+  const file = fileUrlPath(text);
+  if (file) {
+    e.preventDefault();
+    openPath(workspaceOf(pane)?.id, file);
+    return;
+  }
   const url = openableUrl(text);
-  if (!url || !opensLink(e, isMac)) return;
+  if (!url) return;
   e.preventDefault();
   invoke("open_url", { url }).catch(console.error);
+}
+
+/// Rendered kinds (markdown, HTML, images, video) open in the workspace's viewer panel, anything else in VS Code.
+function openPath(ws: Id | undefined, path: string, line?: number) {
+  if (ws && artifactKind(path)) {
+    viewer.open(ws, path);
+    return;
+  }
+  invoke("open_file", { path, line: line ?? null }).catch((e) => notice("open-file", String(e), "error"));
+}
+
+const workspaceOf = (pane: Id) => workspaces.find((w) => w.tabs.some((t) => panesOf(t.layout).includes(pane)));
+
+const statCache = new Map<string, { ok: boolean; at: number }>();
+/// Whether `path` is a file, remembered briefly: hovering a line asks for every path-like run in it.
+async function isFile(path: string): Promise<boolean> {
+  const cached = statCache.get(path);
+  if (cached && Date.now() - cached.at < 3000) return cached.ok;
+  const ok = await invoke<Stat>("artifact_stat", { path }).then(
+    () => true,
+    () => false,
+  );
+  if (statCache.size > 500) statCache.clear();
+  statCache.set(path, { ok, at: Date.now() });
+  return ok;
+}
+
+/// Paths printed as plain text (`docs/plan.md`, `src/a.rs:12`), relative to the workspace folder, link when the file
+/// exists. Cell columns are counted per cell, since wide characters take two.
+function pathLinks(term: Terminal, pane: Id): ILinkProvider {
+  return {
+    provideLinks(y, callback) {
+      const line = term.buffer.active.getLine(y - 1);
+      const ws = workspaceOf(pane);
+      if (!line || !ws) return callback(undefined);
+      const columns: number[] = [];
+      let text = "";
+      for (let x = 0; x < line.length; x++) {
+        const cell = line.getCell(x);
+        if (!cell || cell.getWidth() === 0) continue;
+        const chars = cell.getChars() || " ";
+        for (let i = 0; i < chars.length; i++) columns.push(x);
+        text += chars;
+      }
+      const runs = findPaths(text);
+      if (!runs.length) return callback(undefined);
+      Promise.all(
+        runs.map(async (run) => {
+          const { path, line: at } = splitLine(run.text);
+          const abs = resolvePath(path, ws.cwd, home);
+          return (await isFile(abs)) ? { run, abs, at } : undefined;
+        }),
+      ).then((found) => {
+        const links = found.flatMap((f) =>
+          f
+            ? [
+                {
+                  range: { start: { x: columns[f.run.start] + 1, y }, end: { x: columns[f.run.end - 1] + 1, y } },
+                  text: f.run.text,
+                  activate: (e: MouseEvent) => {
+                    if (opensLink(e, isMac)) openPath(ws.id, f.abs, f.at);
+                  },
+                },
+              ]
+            : [],
+        );
+        callback(links.length ? links : undefined);
+      }, () => callback(undefined));
+    },
+  };
 }
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -169,7 +249,7 @@ function view(pane: Id): PaneView {
     allowProposedApi: true,
     // OSC 8 hyperlinks; mailto: and the rest still go through openableUrl's allowlist.
     linkHandler: {
-      activate: openLink,
+      activate: (e, text) => activateLink(pane, e, text),
       hover: (_e, text) => {
         if (term.element) term.element.title = text;
       },
@@ -179,7 +259,8 @@ function view(pane: Id): PaneView {
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
-  term.loadAddon(new WebLinksAddon(openLink));
+  term.loadAddon(new WebLinksAddon((e, uri) => activateLink(pane, e, uri)));
+  term.registerLinkProvider(pathLinks(term, pane));
   term.open(el);
   // WebKitGTK without its DMA-BUF renderer (forced on in main.rs) leaves a WebGL canvas unpainted until something
   // else repaints the page, so output shows up one keystroke late; the DOM renderer has no such lag.
@@ -804,6 +885,7 @@ function onWorkspaces(list: Workspace[]) {
       views.delete(id);
     }
   }
+  if (list.length) viewer.prune(new Set(list.map((w) => w.id)));
   if (!restoredUi) {
     restoredUi = true;
     restoreUi(list);
@@ -870,6 +952,7 @@ function render() {
   renderSidebar();
   renderTabs();
   renderPanes();
+  viewer.show(selected);
 }
 
 const displayName = (ws: Workspace) => ws.title ?? ws.auto_title ?? ws.name;
@@ -1451,6 +1534,22 @@ async function spawnAt(kind: "agent" | "terminal", path: string) {
 }
 
 let home = "";
+const viewer = new Viewer(
+  $("viewer"),
+  {
+    read: async (path) => new Uint8Array(await invoke<ArrayBuffer>("read_artifact", { path })),
+    stat: (path) => invoke<Stat>("artifact_stat", { path }),
+    openInEditor: (path) => openPath(undefined, path),
+    openLink: (url) => {
+      const file = fileUrlPath(url);
+      if (file) openPath(selected ?? undefined, file);
+      else if (openableUrl(url)) invoke("open_url", { url: openableUrl(url) }).catch(console.error);
+    },
+    openPath: (path) => openPath(selected ?? undefined, path),
+  },
+  () => home,
+  isMac ? "⌘B" : "Ctrl+Shift+B",
+);
 homeDir().then((h) => (home = h.replace(/\/$/, ""))).catch(() => {});
 
 const tilde = (path: string) => (home && (path === home || path.startsWith(home + "/")) ? "~" + path.slice(home.length) : path);
@@ -1812,7 +1911,9 @@ function shortcut(e: KeyboardEvent) {
           ? () => split("column")
           : key === "w"
             ? closePane
-            : null;
+            : key === "b"
+              ? () => viewer.toggle()
+              : null;
   if (!action) return;
   e.preventDefault();
   e.stopPropagation();

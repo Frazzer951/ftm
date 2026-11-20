@@ -81,7 +81,41 @@ pub fn open(target: &str, path: &str) -> Result<(), String> {
     if !path.is_absolute() || !path.is_dir() {
         return Err(format!("{} is not a folder", path.display()));
     }
-    let mut command = command(target, path);
+    launch(target.name, command(target, path))
+}
+
+/// Opens one file in VS Code, at `line` if given. Other targets only take folders.
+pub fn open_file(path: &str, line: Option<u32>) -> Result<(), String> {
+    let path = Path::new(path);
+    if !path.is_absolute() || !path.is_file() {
+        return Err(format!("{} is not a file", path.display()));
+    }
+    let vscode = TARGETS.iter().find(|t| t.id == "vscode").expect("VS Code is a target");
+    launch(vscode.name, file_command(path, line))
+}
+
+/// `open -b` passes no line; the `vscode://file` URL does, and VS Code registers it on install.
+#[cfg(target_os = "macos")]
+fn file_command(path: &Path, line: Option<u32>) -> Command {
+    let mut command = Command::new("open");
+    match line {
+        Some(line) => command.arg(format!("vscode://file{}:{line}", encode_path(path))),
+        None => command.args(["-b", "com.microsoft.VSCode"]).arg(path),
+    };
+    command
+}
+
+#[cfg(not(target_os = "macos"))]
+fn file_command(path: &Path, line: Option<u32>) -> Command {
+    let mut command = Command::new("code");
+    match line {
+        Some(line) => command.arg("-g").arg(format!("{}:{line}", path.display())),
+        None => command.arg(path),
+    };
+    command
+}
+
+fn launch(name: &str, mut command: Command) -> Result<(), String> {
     let program = command.get_program().to_string_lossy().into_owned();
     let mut child = command
         .stdin(Stdio::null())
@@ -105,8 +139,7 @@ pub fn open(target: &str, path: &str) -> Result<(), String> {
             std::thread::sleep(Duration::from_millis(50));
             let stderr = stderr.lock().unwrap_or_else(PoisonError::into_inner);
             Err(format!(
-                "opening in {} failed: {}",
-                target.name,
+                "opening in {name} failed: {}",
                 String::from_utf8_lossy(&stderr).trim()
             ))
         },
@@ -219,9 +252,8 @@ fn command(target: &Target, path: &Path) -> Command {
     command
 }
 
-/// Percent-encodes everything but unreserved characters and `/`; GitKraken decodes the path with
-/// decodeURIComponent.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code, reason = "only macOS opens GitKraken by URL"))]
+/// Percent-encodes everything but unreserved characters and `/`, for the `gitkraken://` and `vscode://file` URLs.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code, reason = "only macOS opens apps by URL"))]
 fn encode_path(path: &Path) -> String {
     use std::os::unix::ffi::OsStrExt;
     let mut out = String::new();

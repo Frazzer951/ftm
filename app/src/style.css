@@ -17,6 +17,27 @@ button:hover { background: var(--hover); }
 body.resizing-sidebar { cursor: col-resize; user-select: none; }
 #sidebar header { display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; font-weight: 600; }
 #sections { overflow-y: auto; flex: 1; }
+#viewer { position: relative; width: clamp(240px, var(--viewer-width, 480px), 70vw); flex: none; background: var(--bg); border-left: 1px solid var(--border); display: flex; flex-direction: column; min-width: 0; }
+#viewer[hidden] { display: none; }
+#viewer .resize { position: absolute; top: 0; bottom: 0; left: -3px; width: 6px; z-index: 5; cursor: col-resize; }
+#viewer .resize:hover, .resizing-viewer #viewer .resize { background: linear-gradient(to right, transparent 2px, var(--accent) 2px, var(--accent) 4px, transparent 4px); }
+body.resizing-viewer { cursor: col-resize; user-select: none; }
+body.resizing-viewer iframe { pointer-events: none; }
+#viewer header { display: flex; align-items: center; gap: 4px; padding: 4px; background: var(--sidebar); border-bottom: 1px solid var(--border); min-height: 32px; }
+#viewer header .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 4px; font-weight: 600; }
+#viewer header .recent { max-width: 40%; }
+#viewer header .recent[hidden] { display: none; }
+#viewer .body { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; }
+#viewer .doc { flex: 1; width: 100%; border: none; background: var(--bg); }
+#viewer .media { flex: 1; display: flex; align-items: center; justify-content: center; padding: 12px; min-height: 0; }
+#viewer .media img, #viewer .media video { max-width: 100%; max-height: 100%; object-fit: contain; }
+#viewer .message { padding: 16px; color: var(--muted); overflow-wrap: anywhere; }
+#viewer .message.error { color: var(--danger); }
+#viewer .strip { display: none; }
+#viewer.collapsed { width: 28px; }
+#viewer.collapsed > :not(.strip) { display: none; }
+#viewer.collapsed .strip { display: block; flex: 1; width: 100%; padding: 8px 0; border: none; border-radius: 0; background: var(--sidebar); color: var(--muted); writing-mode: vertical-rl; text-align: start; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+#viewer.collapsed .strip:hover { background: var(--hover); color: var(--text); }
 #sections ul { list-style: none; margin: 0; padding: 0; }
 #sections ul ul { padding-left: 14px; }
 .section-head { display: flex; width: 100%; gap: 6px; align-items: center; background: none; border: none; border-radius: 0; padding: 8px 10px 4px; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); text-align: left; }
