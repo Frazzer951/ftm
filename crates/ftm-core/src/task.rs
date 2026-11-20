@@ -89,6 +89,33 @@ pub fn reply_message(task: &Task, answer: &str) -> String {
     format!("[FTM task #{} {verb}] {label}: {} — A:{sep}{answer}", task.id, task.title)
 }
 
+/// What every agent is told about the task inbox when its session starts (`ftm hook session-start`). It sits in
+/// every agent's context, so it stays short.
+pub const AGENT_GUIDE: &str = r#"FTM task inbox: reach the user from this pane without them switching to it. Use "$FTM_BIN" when the ftm on PATH may be older.
+- ftm ask "<question>" [--body TEXT | --body-file FILE|-] [--option ANSWER]...  a decision only the user can make: approvals, production or irreversible actions, permission changes, product calls. Prints the task number N.
+- ftm flag "<title>" [--body TEXT | --body-file FILE|-]  an FYI the user should see; no answer expected.
+- ftm tasks [--json] [--all] lists tasks; ftm task done N resolves your own task (run it if you settle the question before the user answers); ftm task rm N deletes it.
+After posting, end your turn. The answer arrives as your next prompt, exactly:
+  [FTM task #N answered] Q: <question> — A: <answer>
+  [FTM task #N reply] FYI: <title> — A: <reply>
+A multi-line answer starts on the line after "A:".
+Routing: technical and design questions go to your leader over SendMessage if you have one, not to ftm ask; approvals relayed over SendMessage get refused, so anything only the user can approve goes through ftm ask. A leader does not re-ask what a worker already asked. Never run ftm task answer or ftm task dismiss yourself: those are the user's."#;
+
+/// The `SessionStart` hook's output for a session starting from `source` (Claude Code's hook input): the guide as
+/// `additionalContext` for a fresh conversation (`startup`, `clear`), nothing when tasks are off or for `resume` and
+/// `compact`, whose conversation already holds it.
+pub fn session_start_output(source: &str, enabled: bool) -> Option<String> {
+    if !enabled || !matches!(source, "startup" | "clear") {
+        return None;
+    }
+    Some(
+        serde_json::json!({
+            "hookSpecificOutput": { "hookEventName": "SessionStart", "additionalContext": AGENT_GUIDE }
+        })
+        .to_string(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,6 +152,23 @@ mod tests {
             reply_message(&task(TaskKind::Flag), "thanks\r\n\x1b[201~more"),
             "[FTM task #7 reply] FYI: Use Postgres or SQLite? — A:\nthanks\n[201~more"
         );
+    }
+
+    #[test]
+    fn the_guide_goes_to_fresh_sessions_while_tasks_are_on() {
+        let out: serde_json::Value = serde_json::from_str(&session_start_output("startup", true).unwrap()).unwrap();
+        assert_eq!(out["hookSpecificOutput"]["hookEventName"], "SessionStart");
+        let guide = out["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        assert!(guide.contains("[FTM task #N answered] Q: <question> — A: <answer>"));
+        assert!(session_start_output("clear", true).is_some());
+        assert_eq!(session_start_output("resume", true), None);
+        assert_eq!(session_start_output("compact", true), None);
+        assert_eq!(session_start_output("startup", false), None);
+        // The guide quotes the reply format the code produces.
+        let mut t = task(TaskKind::Decision);
+        t.id = 0;
+        t.title = "<question>".into();
+        assert!(guide.contains(&reply_message(&t, "<answer>").replace("#0", "#N")));
     }
 
     #[test]

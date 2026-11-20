@@ -871,6 +871,51 @@ fn tasks_reach_the_agent_that_posted_them() {
     );
     assert!(ftm_err(&bin, &socket, &["task", "answer", &ask.to_string(), "again"]).contains("already answered"));
 
+    // An agent cannot answer or dismiss a task, its own or another's, by mistake.
+    for args in [&["task", "answer", "1", "yes"][..], &["task", "dismiss", "1"]] {
+        let out = Command::new(&bin)
+            .args(args)
+            .env("FTM_SOCKET", &socket)
+            .env("FTM_WORKSPACE_ID", plain.to_string())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !out.status.success() && stderr.contains("not from an agent workspace"),
+            "{stderr}"
+        );
+    }
+
+    // `--json` keeps every field on every item, with the agent's names.
+    let json: Vec<serde_json::Value> = serde_json::from_str(&ftm(&bin, &socket, &["tasks", "--json", "--all"])).unwrap();
+    let keys = [
+        "id",
+        "workspace",
+        "agent_name",
+        "agent_spawn_name",
+        "kind",
+        "title",
+        "body",
+        "options",
+        "created_at",
+        "state",
+        "closed_at",
+        "answer",
+    ];
+    for item in &json {
+        let mut have: Vec<&str> = item.as_object().unwrap().keys().map(String::as_str).collect();
+        have.sort_unstable();
+        let mut want = keys.to_vec();
+        want.sort_unstable();
+        assert_eq!(have, want);
+    }
+    let answered_json = json.iter().find(|t| t["id"] == ask).unwrap();
+    assert_eq!(answered_json["agent_spawn_name"], "paste");
+    assert_eq!(answered_json["state"], "answered");
+    assert!(answered_json["closed_at"].is_u64());
+    let open_json = json.iter().find(|t| t["id"] == flag).unwrap();
+    assert!(open_json["closed_at"].is_null() && open_json["answer"].is_null());
+
     // Without bracketed paste the reply goes on one line, so no newline submits half of it.
     let plain_flag = id_of("plain", "flag");
     ftm(&bin, &socket, &["task", "answer", &plain_flag.to_string(), "ok,\nwill look"]);

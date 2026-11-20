@@ -87,3 +87,58 @@ fn ftmd_hanging_up_without_a_reply_is_an_error() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn with_config(name: &str, config: Option<&str>) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("ftm-cli-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("ftm")).unwrap();
+    if let Some(config) = config {
+        std::fs::write(dir.join("ftm/config.toml"), config).unwrap();
+    }
+    dir
+}
+
+fn session_start(config_home: &std::path::Path, source: &str) -> String {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ftm"))
+        .args(["hook", "session-start"])
+        .env("XDG_CONFIG_HOME", config_home)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let input = format!(r#"{{"hook_event_name":"SessionStart","source":"{source}"}}"#);
+    std::io::Write::write_all(child.stdin.as_mut().unwrap(), input.as_bytes()).unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// The setting is read when the hook runs, so flipping it reaches the next agent without restarting ftmd.
+#[test]
+fn session_start_tells_fresh_agents_about_tasks_while_they_are_on() {
+    let on = with_config("tasks-on", None);
+    let out: serde_json::Value = serde_json::from_str(&session_start(&on, "startup")).unwrap();
+    let guide = out["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+    assert!(
+        guide.contains("ftm ask") && guide.contains("[FTM task #N answered]"),
+        "{guide}"
+    );
+    assert_eq!(session_start(&on, "compact"), "");
+    let off = with_config("tasks-off", Some("[tasks]\nenabled = false\n"));
+    assert_eq!(session_start(&off, "startup"), "");
+    let broken = with_config("tasks-broken", Some("[tasks\n"));
+    assert!(session_start(&broken, "startup").contains("additionalContext"));
+
+    let out = Command::new(env!("CARGO_BIN_EXE_ftm"))
+        .args(["ask", "q", "--id", "00000000-0000-0000-0000-000000000001"])
+        .env("XDG_CONFIG_HOME", &off)
+        .env("FTM_SOCKET", "/nonexistent/ftmd.sock")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("tasks are off in FTM settings"), "{stderr}");
+    for dir in [on, off, broken] {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}

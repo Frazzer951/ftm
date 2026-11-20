@@ -23,6 +23,8 @@ export interface ViewerHost {
 export interface ViewerTasks {
   el: HTMLElement;
   counts(): { open: number; decisions: number };
+  /// Off in Settings: no Tasks tab, and a workspace without a file has no panel.
+  enabled(): boolean;
 }
 
 type PanelTab = "file" | "tasks";
@@ -264,7 +266,8 @@ export class Viewer {
 
   private tab(): PanelTab {
     const entry = this.current();
-    return entry?.path ? (entry.tab ?? "file") : "tasks";
+    if (!entry?.path) return "tasks";
+    return this.tasks.enabled() ? (entry.tab ?? "file") : "file";
   }
 
   private setCollapsed(collapsed: boolean) {
@@ -324,6 +327,7 @@ export class Viewer {
     this.fileTab.classList.toggle("active", tab === "file");
     this.tasksTab.classList.toggle("active", tab === "tasks");
     this.fileTab.hidden = !path;
+    this.tasksTab.hidden = !this.tasks.enabled();
     this.fileControls.hidden = tab !== "file";
     this.stripLabel.textContent = path ? basename(path) : "Tasks";
     if (!path || !entry || !this.shown) {

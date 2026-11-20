@@ -471,6 +471,9 @@ interface WorkspaceSettings {
   folder_color: string;
 }
 let workspaceSettings: WorkspaceSettings = { folder_color: "" };
+/// `[notifications] enabled` and `[tasks] enabled`; both on unless config.toml says otherwise.
+let notificationsEnabled = true;
+let tasksEnabled = true;
 
 const playSound = (name: string, volume = soundSettings.volume) => {
   play(name, volume).catch((err) => console.error(`playing ${name}`, err));
@@ -796,6 +799,8 @@ function setupSettingsDialog() {
     folderColor.value = hex ? "custom" : workspaceSettings.folder_color;
     folderColorCustom.value = pickerColor(workspaceSettings.folder_color);
     folderColorCustom.hidden = !hex;
+    $<HTMLInputElement>("notifications-enabled").checked = notificationsEnabled;
+    $<HTMLInputElement>("tasks-enabled").checked = tasksEnabled;
     $("settings-error").textContent = "";
     preview();
     dialog.showModal();
@@ -844,10 +849,26 @@ function setupSettingsDialog() {
     const workspacesNext: WorkspaceSettings = {
       folder_color: folderColor.value === "custom" ? folderColorCustom.value : folderColor.value,
     };
+    const notificationsNext = $<HTMLInputElement>("notifications-enabled").checked;
+    const tasksNext = $<HTMLInputElement>("tasks-enabled").checked;
     try {
       await invoke("save_settings", {
-        settings: { terminal: next, theme: draft, sounds: soundDraft, updates, workspaces: workspacesNext },
+        settings: {
+          terminal: next,
+          theme: draft,
+          sounds: soundDraft,
+          updates,
+          workspaces: workspacesNext,
+          notifications: { enabled: notificationsNext },
+          tasks: { enabled: tasksNext },
+        },
       });
+      notificationsEnabled = notificationsNext;
+      if (tasksNext !== tasksEnabled) {
+        tasksEnabled = tasksNext;
+        viewer.tasksChanged();
+        renderSidebar();
+      }
       const recheck = updates.check !== updateSettings.check || updates.channel !== updateSettings.channel;
       updateSettings = updates;
       if (recheck) checkForRelease().catch(console.error);
@@ -1202,7 +1223,7 @@ function workspaceRow(ws: Workspace, draggable: boolean): HTMLElement {
     badge.title = `${waiting} agent${waiting === 1 ? "" : "s"} below need input`;
     row.append(badge);
   }
-  const asked = inbox.openFor(ws.id);
+  const asked = tasksEnabled ? inbox.openFor(ws.id) : 0;
   if (asked > 0) {
     const tasks = document.createElement("span");
     tasks.className = "task-badge";
@@ -1279,8 +1300,9 @@ const taskAlerts = new TaskAlerts();
 async function onTasks(tasks: Task[]) {
   inbox.setTasks(tasks);
   const fresh = taskAlerts.update(tasks);
-  if (!fresh.length) return;
+  if (!fresh.length || !tasksEnabled) return;
   if (fresh.some((t) => t.kind === "decision")) playSound(soundSettings.needs_input);
+  if (!notificationsEnabled) return;
   let granted = await isPermissionGranted();
   if (!granted) granted = (await requestPermission()) === "granted";
   if (!granted) return;
@@ -1612,7 +1634,11 @@ const viewer = new Viewer(
   },
   () => home,
   isMac ? "⌘B" : "Ctrl+Shift+B",
-  { el: inbox.root, counts: () => inbox.counts() },
+  {
+    el: inbox.root,
+    counts: () => (tasksEnabled ? inbox.counts() : { open: 0, decisions: 0 }),
+    enabled: () => tasksEnabled,
+  },
 );
 homeDir().then((h) => (home = h.replace(/\/$/, ""))).catch(() => {});
 
@@ -1758,6 +1784,7 @@ function onStatusChanges(list: Workspace[]) {
 }
 
 async function notifyNeedsInput(fresh: Workspace[]) {
+  if (!notificationsEnabled) return;
   let granted = await isPermissionGranted();
   if (!granted) granted = (await requestPermission()) === "granted";
   if (!granted) return;
@@ -2194,6 +2221,8 @@ invoke<{
   sounds: SoundSettings;
   updates: Partial<UpdateSettings>;
   workspaces?: Partial<WorkspaceSettings>;
+  notifications?: { enabled?: boolean };
+  tasks?: { enabled?: boolean };
 }>("get_settings")
   .then((loaded) => {
     updateSettings = { check: loaded.updates.check ?? null, channel: loaded.updates.channel ?? null };
@@ -2201,6 +2230,10 @@ invoke<{
     themeSettings = loaded.theme;
     soundSettings = loaded.sounds;
     workspaceSettings = { folder_color: loaded.workspaces?.folder_color ?? "" };
+    notificationsEnabled = loaded.notifications?.enabled ?? true;
+    tasksEnabled = loaded.tasks?.enabled ?? true;
+    viewer.tasksChanged();
+    renderSidebar();
     applyThemeNamed(wantedTheme(themeSettings)).catch(console.error);
     return applySettings();
   })
