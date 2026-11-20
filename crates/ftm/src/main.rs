@@ -8,8 +8,9 @@ use eyre::{Result, WrapErr, bail};
 use ftm_core::ENV_WORKSPACE_ID;
 use ftm_core::model::{Kind, PaneId, RANDOM_COLOR, Status, WORKSPACE_COLORS, Workspace, WorkspaceId, workspace_color};
 use ftm_core::protocol::{
-    FEATURE_CLAUDE_ARGS, FEATURE_MOVE, FEATURE_SHOW, FEATURE_SPAWN_COLOR, Request, Response, SpawnRequest,
+    FEATURE_CLAUDE_ARGS, FEATURE_MOVE, FEATURE_SHOW, FEATURE_SPAWN_COLOR, FEATURE_TASKS, Request, Response, SpawnRequest,
 };
+use ftm_core::task::{Task, TaskId, TaskKind, TaskState};
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -165,6 +166,88 @@ enum Command {
         #[arg(long, env = ENV_WORKSPACE_ID)]
         id: Option<WorkspaceId>,
     },
+    /// Ask the user for a decision in the app's Tasks section; prints the task id. The answer is typed into this
+    /// agent's pane as `[FTM task #<id> answered] Q: <title> — A: <answer>`
+    Ask {
+        /// The question, on one line
+        title: String,
+        #[command(flatten)]
+        body: BodyArgs,
+        /// A suggested answer, shown as a button; repeat for more
+        #[arg(long = "option", value_name = "ANSWER")]
+        options: Vec<String>,
+        /// Workspace of the agent asking
+        #[arg(long, env = ENV_WORKSPACE_ID)]
+        id: Option<WorkspaceId>,
+    },
+    /// Flag something for the user (FYI) in the app's Tasks section; prints the task id. No answer is expected, but a
+    /// reply is typed into this agent's pane as `[FTM task #<id> reply] FYI: <title> — A: <reply>`
+    Flag {
+        /// What to flag, on one line
+        title: String,
+        #[command(flatten)]
+        body: BodyArgs,
+        /// Workspace of the agent flagging
+        #[arg(long, env = ENV_WORKSPACE_ID)]
+        id: Option<WorkspaceId>,
+    },
+    /// List tasks: open ones, or with --all also the answered, dismissed and resolved ones ftmd keeps
+    Tasks {
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        all: bool,
+    },
+    /// Act on one task
+    Task {
+        #[command(subcommand)]
+        action: TaskAction,
+    },
+}
+
+#[derive(clap::Args)]
+struct BodyArgs {
+    /// Markdown context: what you found, what you recommend
+    #[arg(long, conflicts_with = "body_file")]
+    body: Option<String>,
+    /// Read the body from a file, or stdin for -
+    #[arg(long, value_name = "FILE")]
+    body_file: Option<PathBuf>,
+}
+
+impl BodyArgs {
+    fn read(self) -> Result<Option<String>> {
+        match (self.body, self.body_file) {
+            (Some(body), _) => Ok(Some(body)),
+            (None, Some(path)) if path.as_os_str() == "-" => Ok(Some(std::io::read_to_string(std::io::stdin())?)),
+            (None, Some(path)) => Ok(Some(
+                std::fs::read_to_string(&path).wrap_err_with(|| format!("reading {}", path.display()))?,
+            )),
+            (None, None) => Ok(None),
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum TaskAction {
+    /// Mark your own open task resolved (you worked it out, or it no longer matters)
+    Done {
+        task: TaskId,
+        /// Only act on a task of this workspace; defaults to the one this runs in
+        #[arg(long, env = ENV_WORKSPACE_ID)]
+        id: Option<WorkspaceId>,
+    },
+    /// Delete your own task, whatever its state
+    Rm {
+        task: TaskId,
+        /// Only act on a task of this workspace; defaults to the one this runs in
+        #[arg(long, env = ENV_WORKSPACE_ID)]
+        id: Option<WorkspaceId>,
+    },
+    /// Answer an open task as the user would from the sidebar: the answer is typed into the agent's pane
+    Answer { task: TaskId, answer: String },
+    /// Put an open task away without answering
+    Dismiss { task: TaskId },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -303,13 +386,83 @@ fn main() -> Result<()> {
             require_feature(FEATURE_SHOW, "showing files")?;
             Request::Show { id, path }
         },
+        Command::Ask {
+            title,
+            body,
+            options,
+            id,
+        } => post_task(TaskKind::Decision, title, body, options, id)?,
+        Command::Flag { title, body, id } => post_task(TaskKind::Flag, title, body, Vec::new(), id)?,
+        Command::Tasks { json, all } => return list_tasks(json, all),
+        Command::Task { action } => {
+            require_feature(FEATURE_TASKS, "tasks")?;
+            match action {
+                TaskAction::Done { task, id } => Request::ResolveTask { id: task, workspace: id },
+                TaskAction::Rm { task, id } => Request::RemoveTask { id: task, workspace: id },
+                TaskAction::Answer { task, answer } => Request::AnswerTask { id: task, answer },
+                TaskAction::Dismiss { task } => Request::DismissTask { id: task },
+            }
+        },
     };
 
     match client::send(&request)? {
         Response::Pong { version, features } if features.is_empty() => println!("ftmd {version}"),
         Response::Pong { version, features } => println!("ftmd {version} (features: {})", features.join(", ")),
         Response::Spawned { workspace } => println!("{}", workspace.id),
+        Response::Task { task } => println!("{}", task.id),
         _ => {},
+    }
+    Ok(())
+}
+
+fn post_task(kind: TaskKind, title: String, body: BodyArgs, options: Vec<String>, id: Option<WorkspaceId>) -> Result<Request> {
+    let workspace =
+        id.ok_or_else(|| eyre::eyre!("no workspace: pass --id or run inside an FTM workspace (${ENV_WORKSPACE_ID})"))?;
+    if title.trim().is_empty() {
+        bail!("the title is blank");
+    }
+    let body = body.read()?;
+    require_feature(FEATURE_TASKS, "tasks")?;
+    Ok(Request::PostTask {
+        workspace,
+        kind,
+        title,
+        body,
+        options,
+    })
+}
+
+fn list_tasks(json: bool, all: bool) -> Result<()> {
+    require_feature(FEATURE_TASKS, "tasks")?;
+    let Response::Tasks { tasks } = client::send(&Request::Tasks)? else {
+        bail!("unexpected response from ftmd");
+    };
+    let tasks: Vec<Task> = tasks.into_iter().filter(|t| all || t.state == TaskState::Open).collect();
+    if json {
+        println!("{}", serde_json::to_string_pretty(&tasks)?);
+        return Ok(());
+    }
+    let Response::Workspaces { workspaces } = client::send(&Request::List)? else {
+        bail!("unexpected response from ftmd");
+    };
+    for t in &tasks {
+        let from = workspaces
+            .iter()
+            .find(|w| w.id == t.workspace)
+            .map_or_else(|| t.workspace.to_string(), |w| w.display_name().to_string());
+        let kind = match t.kind {
+            TaskKind::Decision => "decision",
+            TaskKind::Flag => "flag",
+            TaskKind::Unknown => "?",
+        };
+        let state = match t.state {
+            TaskState::Open => String::new(),
+            other => format!(" ({})", format!("{other:?}").to_lowercase()),
+        };
+        println!("#{} {kind}{state} [{from}] {}", t.id, t.title);
+        if let Some(answer) = &t.answer {
+            println!("    -> {}", answer.replace('\n', "\n       "));
+        }
     }
     Ok(())
 }

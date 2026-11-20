@@ -2,6 +2,7 @@
 //! After a `Subscribe` request is answered, that connection only carries `Event` lines.
 
 use crate::model::{Folder, Kind, PaneId, SplitDir, Status, Workspace, WorkspaceId};
+use crate::task::{Task, TaskId, TaskKind};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -104,6 +105,40 @@ pub enum Request {
         id: WorkspaceId,
         path: PathBuf,
     },
+    /// Posts a task for the user from the agent in `workspace`, answered with `Response::Task`.
+    PostTask {
+        workspace: WorkspaceId,
+        kind: TaskKind,
+        title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        options: Vec<String>,
+    },
+    /// Every task ftmd keeps, open or not, as `Response::Tasks`.
+    Tasks,
+    /// Types the answer, with the task's title for context, into the posting agent's first pane, then marks the task
+    /// answered. Refused, leaving the task as it was, when it is no longer open or the agent cannot take input.
+    AnswerTask {
+        id: TaskId,
+        answer: String,
+    },
+    /// The user puts an open task away without answering.
+    DismissTask {
+        id: TaskId,
+    },
+    /// The agent resolved or withdrew an open task itself. With `workspace`, refused for another workspace's task.
+    ResolveTask {
+        id: TaskId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace: Option<WorkspaceId>,
+    },
+    /// Forgets a task, whatever its state. With `workspace`, refused for another workspace's task.
+    RemoveTask {
+        id: TaskId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace: Option<WorkspaceId>,
+    },
     /// For `ftm attach`: after `Ok`, the connection carries only `Event::Output` for this pane, starting with a redraw
     /// of its current screen (`reset` set), and ends when the pane does.
     Attach {
@@ -162,6 +197,8 @@ pub const FEATURE_WORKSPACE_ORDER: &str = "workspace_order";
 pub const FEATURE_MOVE: &str = "move";
 /// `Request::Show` and `Event::Show`.
 pub const FEATURE_SHOW: &str = "show";
+/// `Request::PostTask` and the other task requests, `Event::Tasks`.
+pub const FEATURE_TASKS: &str = "tasks";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
@@ -191,6 +228,12 @@ pub enum Response {
     /// `data` is base64.
     Output {
         data: String,
+    },
+    Task {
+        task: Box<Task>,
+    },
+    Tasks {
+        tasks: Vec<Task>,
     },
     Ok,
     Error {
@@ -224,6 +267,8 @@ pub enum Event {
     UpdateBlocked { version: Option<String>, reason: String },
     /// `ftm show`: a file for the workspace's viewer panel. Sent only to clients subscribed at the time.
     Show { workspace: WorkspaceId, path: PathBuf },
+    /// Every task ftmd keeps, oldest first; sent on subscribe and after every change.
+    Tasks { tasks: Vec<Task> },
     /// An event from a newer ftmd. Never sent.
     #[serde(other)]
     Unknown,
@@ -323,5 +368,29 @@ mod tests {
         assert!(!serde_json::to_string(&folders[0]).unwrap().contains("color"));
         let req: Request = serde_json::from_str(r#"{"op":"set_folder_color","path":"/a"}"#).unwrap();
         assert!(matches!(req, Request::SetFolderColor { color: None, .. }));
+    }
+
+    #[test]
+    fn task_requests_and_events_on_the_wire() {
+        let req: Request = serde_json::from_str(
+            r#"{"op":"post_task","workspace":"00000000-0000-0000-0000-000000000000","kind":"decision","title":"t"}"#,
+        )
+        .unwrap();
+        assert!(matches!(req, Request::PostTask { body: None, ref options, .. } if options.is_empty()));
+        let json = serde_json::to_string(&Request::ResolveTask { id: 3, workspace: None }).unwrap();
+        assert_eq!(json, r#"{"op":"resolve_task","id":3}"#);
+        let json = serde_json::to_string(&Request::AnswerTask {
+            id: 3,
+            answer: "a".into(),
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"op":"answer_task","id":3,"answer":"a"}"#);
+        let Event::Tasks { tasks } = serde_json::from_str(
+            r#"{"event":"tasks","tasks":[{"id":1,"workspace":"00000000-0000-0000-0000-000000000000","kind":"flag","title":"t","created_at":5,"state":"answered","answer":"ok"}]}"#,
+        )
+        .unwrap() else {
+            panic!()
+        };
+        assert_eq!(tasks[0].answer.as_deref(), Some("ok"));
     }
 }

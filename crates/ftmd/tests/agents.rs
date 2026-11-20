@@ -722,7 +722,7 @@ fn claude_args_are_refused_by_an_older_ftmd() {
     let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
     let server = std::thread::spawn(move || {
         let mut requests = String::new();
-        for _ in 0..3 {
+        for _ in 0..6 {
             let (stream, _) = listener.accept().unwrap();
             std::io::BufRead::read_line(&mut std::io::BufReader::new(&stream), &mut requests).unwrap();
             (&stream).write_all(b"{\"result\":\"pong\",\"version\":\"0.1.8\"}\n").unwrap();
@@ -753,8 +753,163 @@ fn claude_args_are_refused_by_an_older_ftmd() {
         .unwrap();
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("ftmd 0.1.8 does not support --color"));
+    // Nor tasks, which it would answer with a parse error rather than a reason.
+    let id = WorkspaceId::nil().to_string();
+    for args in [&["ask", "q", "--id", &id][..], &["flag", "f", "--id", &id], &["tasks"]] {
+        let out = Command::new(ftm_bin())
+            .args(args)
+            .env("FTM_SOCKET", &socket)
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{args:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("ftmd 0.1.8 does not support tasks"), "{args:?}: {stderr}");
+    }
     assert!(
         server.join().unwrap().lines().all(|r| r.contains(r#""op":"ping""#)),
         "only pings reach the old ftmd"
     );
+}
+
+/// Posts a decision and a flag through `ftm`, then records every byte typed into its pane. `paste` agents turn on
+/// bracketed paste first, as Claude Code does.
+const TASK_AGENT: &str = r###"#!/bin/sh
+PATH="$FTM_BIN_DIR:$PATH"
+out="$FAKE_OUT/$FTM_NAME"
+ftm ask "Pick a
+  database" --body "## Found
+Both work." --option Postgres --option SQLite > "$out.ask" 2>&1 || exit 1
+printf 'Tests are flaky\n' | ftm flag "CI is red" --body-file - > "$out.flag" 2>&1 || exit 1
+case "$FTM_NAME" in paste*) printf '\033[?2004h' ;; esac
+trap '' HUP
+stty raw -echo
+touch "$out.ready"
+exec cat > "$out.typed"
+"###;
+
+fn ftm_err(bin: &Path, socket: &Path, args: &[&str]) -> String {
+    let out = Command::new(bin)
+        .args(args)
+        .env("FTM_SOCKET", socket)
+        .env_remove("FTM_WORKSPACE_ID")
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "ftm {args:?} should fail");
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+fn tasks(bin: &Path, socket: &Path, all: bool) -> Vec<ftm_core::task::Task> {
+    let args: &[&str] = if all {
+        &["tasks", "--json", "--all"]
+    } else {
+        &["tasks", "--json"]
+    };
+    serde_json::from_str(&ftm(bin, socket, args)).unwrap()
+}
+
+#[test]
+fn tasks_reach_the_agent_that_posted_them() {
+    use ftm_core::task::{TaskKind, TaskState};
+    let bin = ftm_bin();
+    let root = temp_root("tasks");
+    let out = root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let fake = root.join("fake-claude");
+    write_executable(&fake, TASK_AGENT.as_bytes());
+    let mut daemon = start_daemon("tasks", |c| {
+        c.env("FTM_AGENT_CMD", &fake)
+            .env("FTM_BIN_DIR", bin.parent().unwrap())
+            .env("FAKE_OUT", &out);
+    });
+    let socket = daemon.socket.clone();
+    let spawn = |name: &str| -> WorkspaceId {
+        let id = ftm(
+            &bin,
+            &socket,
+            &["spawn", "agent", "--name", name, "--path", root.to_str().unwrap()],
+        );
+        wait_for(&format!("{name} to post"), Duration::from_secs(20), || {
+            out.join(format!("{name}.ready")).exists()
+        });
+        id.parse().unwrap()
+    };
+    let (paste, plain) = (spawn("paste"), spawn("plain"));
+    let typed = |name: &str| std::fs::read(out.join(format!("{name}.typed"))).unwrap_or_default();
+    let id_of = |name: &str, kind: &str| -> u64 {
+        let text = std::fs::read_to_string(out.join(format!("{name}.{kind}"))).unwrap();
+        text.trim().parse().unwrap_or_else(|e| panic!("{name}.{kind}: {e}: {text}"))
+    };
+    let (ask, flag) = (id_of("paste", "ask"), id_of("paste", "flag"));
+
+    let open = tasks(&bin, &socket, false);
+    assert_eq!(open.len(), 4);
+    let decision = open.iter().find(|t| t.id == ask).unwrap();
+    assert_eq!(
+        (decision.kind, decision.state, decision.workspace),
+        (TaskKind::Decision, TaskState::Open, paste)
+    );
+    assert_eq!(decision.title, "Pick a database");
+    assert_eq!(decision.body.as_deref(), Some("## Found\nBoth work."));
+    assert_eq!(decision.options, ["Postgres", "SQLite"]);
+    let fyi = open.iter().find(|t| t.id == flag).unwrap();
+    assert_eq!((fyi.kind, fyi.body.as_deref()), (TaskKind::Flag, Some("Tests are flaky\n")));
+
+    // A multi-line answer goes in as one bracketed paste, then Enter on its own.
+    ftm(
+        &bin,
+        &socket,
+        &["task", "answer", &ask.to_string(), "Postgres.\nUse the pool."],
+    );
+    let want = format!("\x1b[200~[FTM task #{ask} answered] Q: Pick a database — A:\nPostgres.\nUse the pool.\x1b[201~\r");
+    wait_for("the answer to be typed", Duration::from_secs(10), || {
+        typed("paste") == want.as_bytes()
+    });
+    let answered = tasks(&bin, &socket, true).into_iter().find(|t| t.id == ask).unwrap();
+    assert_eq!(
+        (answered.state, answered.answer.as_deref()),
+        (TaskState::Answered, Some("Postgres.\nUse the pool."))
+    );
+    assert!(ftm_err(&bin, &socket, &["task", "answer", &ask.to_string(), "again"]).contains("already answered"));
+
+    // Without bracketed paste the reply goes on one line, so no newline submits half of it.
+    let plain_flag = id_of("plain", "flag");
+    ftm(&bin, &socket, &["task", "answer", &plain_flag.to_string(), "ok,\nwill look"]);
+    let want = format!("[FTM task #{plain_flag} reply] FYI: CI is red — A: ok, will look\r");
+    wait_for("the plain reply to be typed", Duration::from_secs(10), || {
+        typed("plain") == want.as_bytes()
+    });
+
+    // An agent withdraws only its own tasks, and a withdrawn task cannot be answered.
+    let flag_s = flag.to_string();
+    let foreign = ftm_err(&bin, &socket, &["task", "done", &flag_s, "--id", &plain.to_string()]);
+    assert!(foreign.contains("another workspace"), "{foreign}");
+    ftm(&bin, &socket, &["task", "done", &flag_s, "--id", &paste.to_string()]);
+    let late = ftm_err(&bin, &socket, &["task", "answer", &flag_s, "too late"]);
+    assert!(late.contains("resolved by the agent"), "{late}");
+    ftm(&bin, &socket, &["task", "rm", &flag_s]);
+    assert!(ftm_err(&bin, &socket, &["task", "answer", &flag_s, "x"]).contains("may have withdrawn it"));
+
+    // An agent showing a prompt would take typed text as keys for it, so the answer waits and the task stays open.
+    let plain_ask = id_of("plain", "ask");
+    ftm(&bin, &socket, &["status", "needs-input", "--id", &plain.to_string()]);
+    let busy = ftm_err(&bin, &socket, &["task", "answer", &plain_ask.to_string(), "x"]);
+    assert!(busy.contains("waiting on a prompt"), "{busy}");
+    assert_eq!(
+        tasks(&bin, &socket, false).iter().map(|t| t.id).collect::<Vec<_>>(),
+        [plain_ask]
+    );
+
+    // Tasks survive a restart, numbering carries on, and closing the workspace drops its tasks.
+    daemon.restart();
+    let kept = tasks(&bin, &socket, true);
+    assert_eq!(
+        kept.iter().map(|t| t.id).collect::<Vec<_>>(),
+        [ask, id_of("plain", "ask"), plain_flag]
+    );
+    let next = ftm(&bin, &socket, &["flag", "after restart", "--id", &plain.to_string()]);
+    assert!(next.parse::<u64>().unwrap() > ask.max(plain_ask).max(plain_flag).max(flag));
+    ftm(&bin, &socket, &["task", "dismiss", &next]);
+    ftm(&bin, &socket, &["close", "--id", &plain.to_string()]);
+    assert_eq!(tasks(&bin, &socket, true).iter().map(|t| t.id).collect::<Vec<_>>(), [ask]);
+    assert!(ftm_err(&bin, &socket, &["ask", " ", "--id", &paste.to_string()]).contains("blank"));
 }
