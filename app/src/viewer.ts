@@ -19,6 +19,14 @@ export interface ViewerHost {
   openPath(path: string): void;
 }
 
+/// The panel's Tasks tab: every agent's open tasks, the same whichever workspace is shown.
+export interface ViewerTasks {
+  el: HTMLElement;
+  counts(): { open: number; decisions: number };
+}
+
+type PanelTab = "file" | "tasks";
+
 /// What a workspace's panel shows, kept across restarts.
 interface Entry {
   path: string | null;
@@ -26,10 +34,15 @@ interface Entry {
   /// Opened while the workspace was not on screen, or while the panel was collapsed.
   unread: boolean;
   recent: string[];
+  /// Which tab shows while the workspace has a file; without one the panel only has Tasks.
+  tab?: PanelTab;
 }
 
 const STATE_KEY = "ftm.viewer";
 const WIDTH_KEY = "ftm.viewerWidth";
+/// Whether the panel is collapsed in workspaces without a file, where it only shows Tasks. One flag for all of them,
+/// since the tasks are the same everywhere.
+const TASKS_COLLAPSED_KEY = "ftm.tasksCollapsed";
 const WIDTH_DEFAULT = 480;
 const RECENT_MAX = 10;
 /// Images inlined into a markdown document, each and in all.
@@ -77,9 +90,10 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, props: Record<string,
   return e;
 }
 
-/// The side panel that shows a workspace's artifact: markdown, HTML, images and video. One panel, its contents
-/// swapped as the selected workspace changes; each workspace remembers its file, whether the panel is collapsed, and
-/// its recent files.
+/// The side panel that shows a workspace's artifact (markdown, HTML, images and video) and, in a second tab, every
+/// agent's open tasks. One panel, its contents swapped as the selected workspace changes; each workspace remembers its
+/// file, its tab, whether the panel is collapsed, and its recent files. A workspace without a file shows the panel
+/// only while there are open tasks, collapsed or not by one shared flag.
 export class Viewer {
   private entries = new Map<Id, Entry>();
   private shown: Id | null = null;
@@ -97,15 +111,30 @@ export class Viewer {
   private readonly title: HTMLElement;
   private readonly recent: HTMLSelectElement;
   private readonly strip: HTMLButtonElement;
+  private readonly stripLabel: HTMLElement;
+  private readonly stripBadge: HTMLElement;
+  private readonly fileTab: HTMLButtonElement;
+  private readonly tasksTab: HTMLButtonElement;
+  private readonly tasksBadge: HTMLElement;
+  private readonly fileControls: HTMLElement;
+  private tasksCollapsed: boolean;
 
   constructor(
     root: HTMLElement,
     private readonly host: ViewerHost,
     private readonly home: () => string,
     shortcut: string,
+    private readonly tasks: ViewerTasks,
   ) {
     this.root = root;
     this.loadState();
+    this.tasksCollapsed = (() => {
+      try {
+        return localStorage.getItem(TASKS_COLLAPSED_KEY) !== "false";
+      } catch {
+        return true;
+      }
+    })();
     this.title = el("span", { className: "title" });
     this.recent = el("select", { className: "recent", title: "Recent files" });
     this.recent.onchange = () => {
@@ -120,12 +149,32 @@ export class Viewer {
     collapse.onclick = () => this.setCollapsed(true);
     const close = el("button", { type: "button", textContent: "×", title: "Close" });
     close.onclick = () => this.close();
-    this.strip = el("button", { type: "button", className: "strip", title: `Expand (${shortcut})` });
+    this.stripLabel = el("span", { className: "label" });
+    this.stripBadge = el("span", { className: "strip-badge" });
+    this.strip = el("button", { type: "button", className: "strip", title: `Expand (${shortcut})` }, this.stripBadge, this.stripLabel);
     this.strip.onclick = () => this.setCollapsed(false);
+    this.stripBadge.onclick = (e) => {
+      e.stopPropagation();
+      this.setTab("tasks");
+      this.setCollapsed(false);
+    };
     this.body = el("div", { className: "body" });
+    this.fileTab = el("button", { type: "button", className: "tab file-tab" }, this.title);
+    this.fileTab.onclick = () => this.setTab("file");
+    this.tasksBadge = el("span", { className: "tab-badge" });
+    this.tasksTab = el("button", { type: "button", className: "tab", title: "Every agent's open tasks" }, "Tasks", this.tasksBadge);
+    this.tasksTab.onclick = () => this.setTab("tasks");
+    this.fileControls = el("span", { className: "file-controls" }, this.recent, editor, close);
+    tasks.el.classList.add("tasks-body");
     const resize = el("div", { className: "resize", title: "Drag to resize, double-click to reset" });
     this.setupResize(resize);
-    root.replaceChildren(resize, this.strip, el("header", {}, collapse, this.title, this.recent, editor, close), this.body);
+    root.replaceChildren(
+      resize,
+      this.strip,
+      el("header", {}, collapse, el("span", { className: "tabs" }, this.fileTab, this.tasksTab), this.fileControls),
+      this.body,
+      tasks.el,
+    );
     document.addEventListener("visibilitychange", () => this.schedule());
     window.addEventListener("message", (e) => this.onFrameMessage(e));
   }
@@ -136,6 +185,7 @@ export class Viewer {
     const entry = this.entry(ws);
     entry.path = path;
     entry.collapsed = false;
+    entry.tab = "file";
     entry.recent = [path, ...entry.recent.filter((p) => p !== path)].slice(0, RECENT_MAX);
     entry.unread = opts.focus === false && ws !== this.shown;
     this.save();
@@ -156,8 +206,25 @@ export class Viewer {
   }
 
   toggle() {
-    const entry = this.current();
-    if (entry?.path) this.setCollapsed(!entry.collapsed);
+    if (!this.root.hidden) this.setCollapsed(!this.collapsed());
+  }
+
+  /// The open tasks changed.
+  tasksChanged() {
+    this.render();
+  }
+
+  /// Shows the Tasks tab, expanded, in `ws`: picking an agent from the tasks keeps them on screen.
+  showTasks(ws: Id) {
+    const entry = this.entries.get(ws);
+    if (entry?.path) {
+      entry.tab = "tasks";
+      entry.collapsed = false;
+      this.save();
+    } else {
+      this.setTasksCollapsed(false);
+    }
+    if (ws === this.shown) this.render();
   }
 
   /// Forgets workspaces that are gone.
@@ -190,10 +257,40 @@ export class Viewer {
     return entry;
   }
 
+  private collapsed(): boolean {
+    const entry = this.current();
+    return entry?.path ? entry.collapsed : this.tasksCollapsed;
+  }
+
+  private tab(): PanelTab {
+    const entry = this.current();
+    return entry?.path ? (entry.tab ?? "file") : "tasks";
+  }
+
   private setCollapsed(collapsed: boolean) {
     const entry = this.current();
-    if (!entry) return;
-    entry.collapsed = collapsed;
+    if (entry?.path) {
+      entry.collapsed = collapsed;
+      this.save();
+    } else {
+      this.setTasksCollapsed(collapsed);
+    }
+    this.render();
+  }
+
+  private setTasksCollapsed(collapsed: boolean) {
+    this.tasksCollapsed = collapsed;
+    try {
+      localStorage.setItem(TASKS_COLLAPSED_KEY, String(collapsed));
+    } catch {
+      // Only the collapsed state is lost.
+    }
+  }
+
+  private setTab(tab: PanelTab) {
+    const entry = this.current();
+    if (!entry?.path) return;
+    entry.tab = tab;
     this.save();
     this.render();
   }
@@ -209,21 +306,38 @@ export class Viewer {
   private render() {
     const entry = this.current();
     const path = entry?.path ?? null;
-    this.root.hidden = !path;
-    this.root.classList.toggle("collapsed", !!entry?.collapsed);
+    const { open, decisions } = this.tasks.counts();
+    const collapsed = this.collapsed();
+    const tab = this.tab();
+    this.root.hidden = !this.shown || (!path && open === 0);
+    this.root.classList.toggle("collapsed", collapsed);
+    this.root.classList.toggle("show-tasks", tab === "tasks");
+    this.root.classList.toggle("has-file", !!path);
+    const count = open ? `${open}` : "";
+    const summary = `${open} open task${open === 1 ? "" : "s"}, ${decisions} waiting on a decision`;
+    for (const badge of [this.stripBadge, this.tasksBadge]) {
+      badge.textContent = count;
+      badge.hidden = !open;
+      badge.classList.toggle("urgent", decisions > 0);
+      badge.title = summary;
+    }
+    this.fileTab.classList.toggle("active", tab === "file");
+    this.tasksTab.classList.toggle("active", tab === "tasks");
+    this.fileTab.hidden = !path;
+    this.fileControls.hidden = tab !== "file";
+    this.stripLabel.textContent = path ? basename(path) : "Tasks";
     if (!path || !entry || !this.shown) {
       this.clear();
       this.schedule();
       return;
     }
     this.title.textContent = basename(path);
-    this.title.title = path;
-    this.strip.textContent = basename(path);
+    this.fileTab.title = path;
     this.recent.hidden = entry.recent.length < 2;
     this.recent.replaceChildren(
       ...entry.recent.map((p) => el("option", { value: p, textContent: basename(p), title: p, selected: p === path })),
     );
-    if (entry.collapsed) {
+    if (collapsed || tab === "tasks") {
       // Collapsing keeps a document but not a video, which would keep the media keys and keep playing.
       if (artifactKind(path) === "video") this.clear();
     } else if (this.rendered?.ws !== this.shown || this.rendered.path !== path) {
@@ -235,7 +349,7 @@ export class Viewer {
   /// Polls the shown file while the panel is open and the window visible, for live reload.
   private schedule() {
     const entry = this.current();
-    const want = !!entry?.path && !entry.collapsed && document.visibilityState === "visible";
+    const want = !!entry?.path && !entry.collapsed && this.tab() === "file" && document.visibilityState === "visible";
     if (want && this.poll === undefined) {
       this.poll = window.setInterval(() => this.check().catch(console.error), POLL_MS);
     } else if (!want && this.poll !== undefined) {
@@ -463,6 +577,7 @@ export class Viewer {
           collapsed: !!e.collapsed,
           unread: !!e.unread,
           recent: Array.isArray(e.recent) ? e.recent.filter((p): p is string => typeof p === "string").slice(0, RECENT_MAX) : [],
+          tab: e.tab === "tasks" ? "tasks" : undefined,
         });
       }
     } catch {
