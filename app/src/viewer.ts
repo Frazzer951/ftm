@@ -283,6 +283,7 @@ export class Viewer {
     try {
       const version = await this.version(path);
       let node: HTMLElement;
+      let url: string | null = null;
       if (version === "missing") {
         node = el("p", { className: "message", textContent: `${path} not found. It shows up here once it exists.` });
       } else if (!kind) {
@@ -290,11 +291,15 @@ export class Viewer {
       } else {
         const bytes = await this.host.read(path);
         if (token !== this.seq) return;
-        node = await this.build(kind, path, bytes, docScroll);
+        ({ node, url } = await this.build(kind, path, bytes, docScroll));
       }
-      if (token !== this.seq || this.shown !== ws || this.current()?.path !== path) return;
+      if (token !== this.seq || this.shown !== ws || this.current()?.path !== path) {
+        if (url) URL.revokeObjectURL(url);
+        return;
+      }
       const scroll = fresh ? 0 : this.body.scrollTop;
       this.clear();
+      this.blobUrl = url;
       this.body.append(node);
       this.rendered = { ws, path, version };
       this.body.scrollTop = scroll;
@@ -309,12 +314,20 @@ export class Viewer {
     }
   }
 
-  private async build(kind: ArtifactKind, path: string, bytes: Uint8Array, scroll: number): Promise<HTMLElement> {
+  /// The node to show, and the Blob URL it holds (revoked once the node is replaced).
+  private async build(kind: ArtifactKind, path: string, bytes: Uint8Array, scroll: number): Promise<{ node: HTMLElement; url: string | null }> {
     if (kind === "image" || kind === "video") {
-      this.blobUrl = URL.createObjectURL(new Blob([bytes as BlobPart], { type: mimeType(path) }));
+      const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type: mimeType(path) }));
       const media = kind === "image" ? el("img", { alt: basename(path) }) : el("video", { controls: true, preload: "metadata" });
-      media.src = this.blobUrl;
-      return el("div", { className: `media ${kind}` }, media);
+      const box = el("div", { className: `media ${kind}` }, media);
+      media.addEventListener("error", () => {
+        const err = media instanceof HTMLVideoElement ? media.error : null;
+        const why = err ? `${err.code} ${err.message}`.trim() : "unknown";
+        console.error(`viewer: cannot show ${path}: ${why}`);
+        box.replaceChildren(el("p", { className: "message error", textContent: `WebKit cannot show ${basename(path)} (${why}).` }));
+      });
+      media.src = url;
+      return { node: box, url };
     }
     const text = new TextDecoder().decode(bytes);
     const frame = el("iframe", { className: "doc", title: basename(path) });
@@ -324,14 +337,14 @@ export class Viewer {
       frame.setAttribute("sandbox", "allow-scripts");
       // Links open in a new window, which the sandbox (no `allow-popups`) refuses, rather than navigating the frame.
       frame.srcdoc = withCsp(text, HTML_CSP, '<base target="_blank">');
-      return frame;
+      return { node: frame, url: null };
     }
     // Sanitized, and the CSP lets only DOC_SCRIPT run, in an opaque origin like HTML artifacts.
     frame.setAttribute("sandbox", "allow-scripts");
     frame.classList.add("markdown");
     frame.srcdoc = await this.markdownDocument(text, dirname(path), scroll);
     frame.dataset.dir = dirname(path);
-    return frame;
+    return { node: frame, url: null };
   }
 
   private async markdownDocument(text: string, dir: string, scroll: number): Promise<string> {
