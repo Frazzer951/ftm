@@ -43,7 +43,7 @@ import { loadSounds, play, type SoundEntry, type SoundSettings } from "./sounds.
 import "./style.css";
 import { Tabs } from "./tabs.ts";
 import { type Task, TaskAlerts } from "./tasks.ts";
-import { compareVersions, versionNotice } from "./version.ts";
+import { checkStatus, compareVersions, type UpdateCheck, versionNotice } from "./version.ts";
 import { type Stat, Viewer } from "./viewer.ts";
 import { type AppScroll, type AppWheel, appWheel } from "./wheel.ts";
 
@@ -795,6 +795,7 @@ function setupSettingsDialog() {
     $<HTMLSelectElement>("app-scroll").value = settings.app_scroll;
     $<HTMLSelectElement>("update-check").value = updateSettings.check === null ? "" : String(updateSettings.check);
     $<HTMLSelectElement>("update-channel").value = updateSettings.channel ?? "";
+    renderUpdateStatus();
     const hex = workspaceSettings.folder_color.startsWith("#");
     folderColor.value = hex ? "custom" : workspaceSettings.folder_color;
     folderColorCustom.value = pickerColor(workspaceSettings.folder_color);
@@ -2333,8 +2334,48 @@ function ignoreRelease(release: Release) {
 /// or being installed.
 let shownRelease: string | null = null;
 
-async function checkForRelease() {
-  const release = await invoke<Release | null>("check_update");
+let lastCheck: UpdateCheck | null = null;
+let checking = false;
+
+function renderUpdateStatus() {
+  const status = $("update-status");
+  $<HTMLButtonElement>("update-now").disabled = checking;
+  status.textContent = checking ? "Checking…" : lastCheck ? checkStatus(lastCheck, new Date()) : "";
+  status.classList.toggle("error", !checking && lastCheck !== null && "error" in lastCheck);
+}
+
+$("update-now").onclick = async () => {
+  checking = true;
+  renderUpdateStatus();
+  try {
+    await checkForRelease(true);
+  } finally {
+    checking = false;
+    renderUpdateStatus();
+  }
+};
+
+/// A manual check (the Updates tab's button) opens the dialog for any release on offer, ignored or already shown.
+async function checkForRelease(manual = false) {
+  let checked: { current: string; update: Release | null } | null;
+  try {
+    checked = await invoke("check_update", { manual });
+  } catch (err) {
+    lastCheck = { at: new Date(), error: String(err) };
+    renderUpdateStatus();
+    if (!manual) console.error("update check", err);
+    return;
+  }
+  if (checked) {
+    lastCheck = { at: new Date(), ...checked };
+    renderUpdateStatus();
+  }
+  const release = checked?.update ?? null;
+  if (manual && release) {
+    shownRelease = releaseKey(release);
+    showRelease(release);
+    return;
+  }
   if (!release || release.version === ignoredRelease()) {
     shownRelease = null;
     notice("release", null);

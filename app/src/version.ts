@@ -35,3 +35,21 @@ export function versionNotice(daemon: string, app: string): string | null {
   }
   return `ftmd is still running ${daemon}, older than this app (${app}), so some features may not work until it moves to the new build.`;
 }
+
+export type UpdateCheck =
+  | { at: Date; current: string; update: { version: string; channel: string; switch: boolean } | null }
+  | { at: Date; error: string };
+
+/// The Updates tab's line about the last update check.
+export function checkStatus(check: UpdateCheck, now: Date): string {
+  const time: Intl.DateTimeFormatOptions = { hour: "numeric", minute: "2-digit" };
+  const when =
+    check.at.toDateString() === now.toDateString()
+      ? check.at.toLocaleTimeString([], time)
+      : check.at.toLocaleString([], { ...time, month: "short", day: "numeric" });
+  if ("error" in check) return `The check at ${when} failed: ${check.error}`;
+  const { current, update } = check;
+  if (!update) return `Up to date: this is ${current}. Last checked ${when}.`;
+  const name = `${update.channel === "nightly" ? "FTM Nightly" : "FTM"} ${update.version}`;
+  return `${name} is available${update.switch ? " to switch to" : ""} (this is ${current}). Last checked ${when}.`;
+}

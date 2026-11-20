@@ -243,19 +243,15 @@ fn save_settings(settings: Settings) -> Result<(), String> {
     settings.save(&paths::settings_path()).map_err(|e| e.to_string())
 }
 
-/// See `update::look`. Being offline or rate limited is only logged.
+/// See `update::look`. `None` when the check is off. The hourly check only logs errors; the Updates tab shows them.
 #[tauri::command]
-async fn check_update() -> Option<update::Update> {
-    tauri::async_runtime::spawn_blocking(|| {
+async fn check_update(manual: bool) -> Result<Option<update::Checked>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
         let updates = Settings::load(&paths::settings_path()).unwrap_or_default().updates;
-        update::look(&updates)
-            .inspect_err(|e| eprintln!("update check: {e}"))
-            .ok()
-            .flatten()
+        update::look(&updates, manual).inspect_err(|e| eprintln!("update check: {e}"))
     })
     .await
-    .ok()
-    .flatten()
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

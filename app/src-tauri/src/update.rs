@@ -497,13 +497,27 @@ fn check(current: &str, target: Channel, install: &Install) -> Result<Option<Upd
     Ok(release.and_then(|r| offer(r, &current, Channel::current(), target, install, std::env::consts::ARCH)))
 }
 
+/// The result of a check that ran: the version this build counts as (`FTM_UPDATE_FAKE_VERSION` when set) and the
+/// release on offer, if any.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Checked {
+    pub current: String,
+    pub update: Option<Update>,
+}
+
+/// Whether to look: a manual check always does, otherwise `[updates] check`, which unset means every install but a dev
+/// build that isn't faking one.
+fn wanted(check: Option<bool>, manual: bool, faking: bool, install: &Install) -> bool {
+    manual || check.unwrap_or(faking || *install != Install::Dev)
+}
+
 /// What `[updates]` asks to look for: a newer release on its channel (else this build's), or the other channel's newest
-/// as a switch. Every install but a dev build looks unless `check = false`.
+/// as a switch. `None` when the check is off; `manual` (the Updates tab's Check now) looks regardless.
 ///
 /// To try the prompt, `FTM_UPDATE_FAKE_VERSION` makes this build pretend to be that version and
 /// `FTM_UPDATE_FAKE_INSTALL` (`pacman`, `brew`, `mac_app`, `deb`, `rpm`, `source`, `dev` or `unknown`) to have been
 /// installed that way. Either one turns the check on for a dev build.
-pub fn look(settings: &UpdateSettings) -> Result<Option<Update>, String> {
+pub fn look(settings: &UpdateSettings, manual: bool) -> Result<Option<Checked>, String> {
     let fake_version = std::env::var("FTM_UPDATE_FAKE_VERSION").ok().filter(|v| !v.is_empty());
     let fake_install = match std::env::var("FTM_UPDATE_FAKE_INSTALL") {
         Ok(kind) if !kind.is_empty() => {
@@ -513,15 +527,13 @@ pub fn look(settings: &UpdateSettings) -> Result<Option<Update>, String> {
     };
     let faking = fake_version.is_some() || fake_install.is_some();
     let install = fake_install.unwrap_or_else(install);
-    if !settings.check.unwrap_or(faking || install != Install::Dev) {
+    if !wanted(settings.check, manual, faking, &install) {
         return Ok(None);
     }
     let channel = settings.channel.unwrap_or_else(Channel::current);
-    check(
-        fake_version.as_deref().unwrap_or(env!("CARGO_PKG_VERSION")),
-        channel,
-        &install,
-    )
+    let current = fake_version.unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+    let update = check(&current, channel, &install)?;
+    Ok(Some(Checked { current, update }))
 }
 
 #[cfg(test)]
@@ -983,5 +995,19 @@ mod tests {
             assert_eq!(serde_json::to_value(&install).unwrap()["kind"], kind);
         }
         assert_eq!(Install::fake("snap"), None);
+    }
+
+    #[test]
+    fn wanted_checks() {
+        let pacman = Install::Pacman;
+        assert!(wanted(None, false, false, &pacman));
+        assert!(!wanted(None, false, false, &Install::Dev));
+        assert!(wanted(None, false, true, &Install::Dev));
+        assert!(!wanted(Some(false), false, true, &pacman));
+        assert!(wanted(Some(true), false, false, &Install::Dev));
+        for check in [None, Some(false), Some(true)] {
+            assert!(wanted(check, true, false, &Install::Dev));
+            assert!(wanted(check, true, false, &pacman));
+        }
     }
 }
