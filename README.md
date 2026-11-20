@@ -42,7 +42,8 @@ sudo password. The dialog also shows the commands, to run them yourself instead.
 The check follows the build's own channel unless you pick one. Pick the other channel and the app offers its newest
 build as a **Switch**, whatever its version. Switching replaces the installed package on Linux (pacman asks before removing
 the other one; Homebrew installs the other cask next to it) and starts a fresh daemon: open panes and sessions stay with the old one and don't carry over (see
-below). Set both under ⚙ → Updates, or in `~/.config/ftm/config.toml`:
+below). ⚙ → Updates → **Check for updates** checks right away, even with checks off or for an ignored version, and
+shows the result under the button. Set both under ⚙ → Updates, or in `~/.config/ftm/config.toml`:
 
 ```toml
 [updates]
