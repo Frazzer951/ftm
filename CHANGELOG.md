@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.21] - 2026-11-20
+
+### App
+
+- fix(app): batch ftmd events so output bursts don't stall the page
+
 ## [0.1.20] - 2026-11-19
 
 ### App
