@@ -5,6 +5,7 @@
 //! why.
 
 use crate::frame::{self, Frame};
+use crate::trim::Tail;
 use eyre::{Result, WrapErr, bail, eyre};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
@@ -26,7 +27,7 @@ struct Shared {
     /// A `Kill` in progress. The terminal hits end of stream as soon as the shell dies (macOS revokes it), while a
     /// SIGHUP-ignoring job may still need its SIGKILL, so exiting waits for this.
     killing: Option<std::thread::JoinHandle<()>>,
-    buffer: Vec<u8>,
+    buffer: Tail,
     client: Option<UnixStream>,
     /// Some ftmd has been sent the buffer.
     attached: bool,
@@ -83,7 +84,7 @@ pub fn run(args: &[String]) -> Result<()> {
     let child = Arc::new(Mutex::new(child));
     let shared = Arc::new(Mutex::new(Shared {
         killing: None,
-        buffer: Vec::new(),
+        buffer: Tail::new(BUFFER_CAP, BUFFER_SLACK),
         client: None,
         attached: false,
         eof: false,
@@ -107,7 +108,7 @@ pub fn run(args: &[String]) -> Result<()> {
                 rows: s.rows,
                 cols: s.cols,
             };
-            if frame::write(&mut out, &hello).is_err() || frame::write(&mut out, &Frame::Output(s.buffer.clone())).is_err() {
+            if frame::write(&mut out, &hello).is_err() || frame::write(&mut out, &Frame::Output(s.buffer.to_vec())).is_err() {
                 continue;
             }
             s.attached = true;
@@ -147,11 +148,7 @@ fn pump_output(
             Err(_) => break,
         };
         let mut s = lock(shared);
-        s.buffer.extend_from_slice(&buf[..n]);
-        if s.buffer.len() > BUFFER_CAP + BUFFER_SLACK {
-            let excess = s.buffer.len() - BUFFER_CAP;
-            s.buffer.drain(..excess);
-        }
+        s.buffer.push(&buf[..n]);
         // An ftmd that stopped reading may hold half a frame: hang up on it entirely, so it reconnects for the buffer.
         if let Some(client) = s.client.as_mut()
             && frame::write(client, &Frame::Output(buf[..n].to_vec())).is_err()

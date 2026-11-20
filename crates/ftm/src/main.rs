@@ -7,7 +7,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use eyre::{Result, WrapErr, bail};
 use ftm_core::ENV_WORKSPACE_ID;
 use ftm_core::model::{Kind, PaneId, RANDOM_COLOR, Status, WORKSPACE_COLORS, Workspace, WorkspaceId, workspace_color};
-use ftm_core::protocol::{FEATURE_CLAUDE_ARGS, FEATURE_MOVE, FEATURE_SPAWN_COLOR, Request, Response, SpawnRequest};
+use ftm_core::protocol::{
+    FEATURE_CLAUDE_ARGS, FEATURE_MOVE, FEATURE_SHOW, FEATURE_SPAWN_COLOR, Request, Response, SpawnRequest,
+};
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -155,6 +157,14 @@ enum Command {
         #[arg(long)]
         enter: bool,
     },
+    /// Show a file in the workspace's viewer panel in the app (markdown, HTML, images, video), without switching to
+    /// that workspace
+    Show {
+        file: PathBuf,
+        /// Workspace whose panel shows it
+        #[arg(long, env = ENV_WORKSPACE_ID)]
+        id: Option<WorkspaceId>,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -283,6 +293,16 @@ fn main() -> Result<()> {
             include_upstream_deleted,
         } => return gc::run(yes, !no_fetch, include_upstream_deleted),
         Command::Send { target, text, enter } => return send(resolve_pane(target)?, &text, enter),
+        Command::Show { file, id } => {
+            let id =
+                id.ok_or_else(|| eyre::eyre!("no workspace: pass --id or run inside an FTM workspace (${ENV_WORKSPACE_ID})"))?;
+            let path = std::fs::canonicalize(&file).wrap_err_with(|| format!("{}", file.display()))?;
+            if !path.is_file() {
+                bail!("{} is not a file", file.display());
+            }
+            require_feature(FEATURE_SHOW, "showing files")?;
+            Request::Show { id, path }
+        },
     };
 
     match client::send(&request)? {

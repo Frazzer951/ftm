@@ -784,3 +784,36 @@ fn detaching_gives_the_pane_back_its_size() {
         capture(&mut req, pane).contains("B1\n40 120")
     });
 }
+
+#[test]
+fn show_reaches_subscribers_for_a_known_workspace() {
+    let dir = temp_root("show");
+    let daemon = start_daemon("show", |_| {});
+    let mut req = Conn::open(&daemon.socket);
+    let ws = spawn_terminal(&mut req, &dir, "a").id;
+    let mut events = Conn::open(&daemon.socket);
+    events.send(&Request::Subscribe);
+    let path = dir.join("plan.md");
+    assert!(matches!(
+        req.send(&Request::Show {
+            id: ws,
+            path: path.clone()
+        }),
+        Response::Ok
+    ));
+    loop {
+        if let Event::Show { workspace, path: shown } = events.line() {
+            assert_eq!((workspace, shown), (ws, path));
+            break;
+        }
+    }
+    for (id, file, needle) in [
+        (WorkspaceId::new_v4(), dir.join("plan.md"), "no workspace"),
+        (ws, "plan.md".into(), "absolute"),
+    ] {
+        let Some(Response::Error { message }) = req.try_send(&Request::Show { id, path: file }) else {
+            panic!("show should fail");
+        };
+        assert!(message.contains(needle), "{message}");
+    }
+}
