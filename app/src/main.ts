@@ -24,6 +24,7 @@ import { artifactKind, fileUrlPath, findPaths, resolvePath, splitLine } from "./
 import { dropText } from "./drop.ts";
 import { StatusSounds, statusDot, stillFinished } from "./finish.ts";
 import { clipboardKey, type OptionAsMeta, optionIsMeta, paneKey } from "./keys.ts";
+import { MultipartImages } from "./iterm.ts";
 import { KeyLayout, type KeyProtocol, kittyKeyboard } from "./kitty.ts";
 import { openableUrl, opensLink } from "./links.ts";
 import {
@@ -89,6 +90,7 @@ interface PaneView {
   ligatures?: LigaturesAddon;
   kitty: KeyProtocol;
   wheel: AppWheel;
+  images: MultipartImages;
   /// Replays of the daemon's buffer in flight; queries in them (DA, DSR, kitty's `CSI ? u`) were answered long ago,
   /// so nothing xterm sends meanwhile reaches the pane.
   replaying: number;
@@ -309,7 +311,7 @@ function view(pane: Id): PaneView {
   term.textarea?.setAttribute("writingsuggestions", "false");
   term.textarea?.setAttribute("autocomplete", "off");
   term.textarea?.addEventListener("focus", () => setFocus(pane));
-  const v: PaneView = { term, fit, kitty, wheel, replaying: 0, el, cols: 0, rows: 0 };
+  const v: PaneView = { term, fit, kitty, wheel, images: new MultipartImages(), replaying: 0, el, cols: 0, rows: 0 };
   setLigatures(v);
   views.set(pane, v);
   return v;
@@ -2178,10 +2180,11 @@ function onEvent(payload: FtmEvent) {
       v.term.reset();
       v.kitty.reset();
       v.wheel.reset();
+      v.images.reset();
       v.replaying++;
-      v.term.write(decode(payload.data), () => v.replaying--);
+      v.term.write(v.images.feed(decode(payload.data)), () => v.replaying--);
     } else {
-      v.term.write(decode(payload.data));
+      v.term.write(v.images.feed(decode(payload.data)));
     }
   }
 }
