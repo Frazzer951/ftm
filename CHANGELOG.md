@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.1.23] - 2026-11-20
+
+### App
+
+- feat(app): Tasks tab in the viewer panel, answered in place, with badges on the strip and agent rows (ftm#129)
+- feat(app): Check for updates button in Settings → Updates, with the result inline (ftm#131)
+
+### Docs
+
+- docs: tasks in design.md; test expects the tasks feature (ftm#129)
+- docs(readme): ftm ask in the CLI examples (ftm#129)
+
+### Other
+
+- feat: tasks posted by agents (ftm ask/flag), answered into the agent's pane (ftm#129)
+- feat: [tasks] and [notifications] settings, the task guide injected at session start, stable ftm tasks --json, no self-answers (ftm#129)
+
 ## [0.1.22] - 2026-11-20
 
 ### CLI
