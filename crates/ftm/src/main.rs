@@ -6,10 +6,12 @@ use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use clap::{Parser, Subcommand, ValueEnum};
 use eyre::{Result, WrapErr, bail};
 use ftm_core::ENV_WORKSPACE_ID;
+use ftm_core::config::Settings;
 use ftm_core::model::{Kind, PaneId, RANDOM_COLOR, Status, WORKSPACE_COLORS, Workspace, WorkspaceId, workspace_color};
 use ftm_core::protocol::{
-    FEATURE_CLAUDE_ARGS, FEATURE_MOVE, FEATURE_SHOW, FEATURE_SPAWN_COLOR, Request, Response, SpawnRequest,
+    FEATURE_CLAUDE_ARGS, FEATURE_MOVE, FEATURE_SHOW, FEATURE_SPAWN_COLOR, FEATURE_TASKS, Request, Response, SpawnRequest,
 };
+use ftm_core::task::{Task, TaskId, TaskKind, TaskState, session_start_output};
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -165,6 +167,99 @@ enum Command {
         #[arg(long, env = ENV_WORKSPACE_ID)]
         id: Option<WorkspaceId>,
     },
+    /// Ask the user for a decision in the app's Tasks section; prints the task id. The answer is typed into this
+    /// agent's pane as `[FTM task #<id> answered] Q: <title> — A: <answer>`
+    Ask {
+        /// The question, on one line
+        title: String,
+        #[command(flatten)]
+        body: BodyArgs,
+        /// A suggested answer, shown as a button; repeat for more
+        #[arg(long = "option", value_name = "ANSWER")]
+        options: Vec<String>,
+        /// Workspace of the agent asking
+        #[arg(long, env = ENV_WORKSPACE_ID)]
+        id: Option<WorkspaceId>,
+    },
+    /// Flag something for the user (FYI) in the app's Tasks section; prints the task id. No answer is expected, but a
+    /// reply is typed into this agent's pane as `[FTM task #<id> reply] FYI: <title> — A: <reply>`
+    Flag {
+        /// What to flag, on one line
+        title: String,
+        #[command(flatten)]
+        body: BodyArgs,
+        /// Workspace of the agent flagging
+        #[arg(long, env = ENV_WORKSPACE_ID)]
+        id: Option<WorkspaceId>,
+    },
+    /// List tasks: open ones, or with --all also the answered, dismissed and resolved ones ftmd keeps
+    Tasks {
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        all: bool,
+    },
+    /// Act on one task
+    Task {
+        #[command(subcommand)]
+        action: TaskAction,
+    },
+    /// Run a Claude Code hook (called from the hook settings ftmd gives agents)
+    #[command(hide = true)]
+    Hook {
+        #[arg(value_enum)]
+        event: HookEvent,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum HookEvent {
+    SessionStart,
+}
+
+#[derive(clap::Args)]
+struct BodyArgs {
+    /// Markdown context: what you found, what you recommend
+    #[arg(long, conflicts_with = "body_file")]
+    body: Option<String>,
+    /// Read the body from a file, or stdin for -
+    #[arg(long, value_name = "FILE")]
+    body_file: Option<PathBuf>,
+}
+
+impl BodyArgs {
+    fn read(self) -> Result<Option<String>> {
+        match (self.body, self.body_file) {
+            (Some(body), _) => Ok(Some(body)),
+            (None, Some(path)) if path.as_os_str() == "-" => Ok(Some(std::io::read_to_string(std::io::stdin())?)),
+            (None, Some(path)) => Ok(Some(
+                std::fs::read_to_string(&path).wrap_err_with(|| format!("reading {}", path.display()))?,
+            )),
+            (None, None) => Ok(None),
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum TaskAction {
+    /// Mark your own open task resolved (you worked it out, or it no longer matters)
+    Done {
+        task: TaskId,
+        /// Only act on a task of this workspace; defaults to the one this runs in
+        #[arg(long, env = ENV_WORKSPACE_ID)]
+        id: Option<WorkspaceId>,
+    },
+    /// Delete your own task, whatever its state
+    Rm {
+        task: TaskId,
+        /// Only act on a task of this workspace; defaults to the one this runs in
+        #[arg(long, env = ENV_WORKSPACE_ID)]
+        id: Option<WorkspaceId>,
+    },
+    /// Answer an open task as the user would from the sidebar: the answer is typed into the agent's pane
+    Answer { task: TaskId, answer: String },
+    /// Put an open task away without answering
+    Dismiss { task: TaskId },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -303,15 +398,151 @@ fn main() -> Result<()> {
             require_feature(FEATURE_SHOW, "showing files")?;
             Request::Show { id, path }
         },
+        Command::Hook {
+            event: HookEvent::SessionStart,
+        } => {
+            session_start();
+            return Ok(());
+        },
+        Command::Ask {
+            title,
+            body,
+            options,
+            id,
+        } => post_task(TaskKind::Decision, title, body, options, id)?,
+        Command::Flag { title, body, id } => post_task(TaskKind::Flag, title, body, Vec::new(), id)?,
+        Command::Tasks { json, all } => return list_tasks(json, all),
+        Command::Task { action } => {
+            require_feature(FEATURE_TASKS, "tasks")?;
+            if matches!(action, TaskAction::Answer { .. } | TaskAction::Dismiss { .. }) {
+                refuse_from_an_agent()?;
+            }
+            match action {
+                TaskAction::Done { task, id } => Request::ResolveTask { id: task, workspace: id },
+                TaskAction::Rm { task, id } => Request::RemoveTask { id: task, workspace: id },
+                TaskAction::Answer { task, answer } => Request::AnswerTask { id: task, answer },
+                TaskAction::Dismiss { task } => Request::DismissTask { id: task },
+            }
+        },
     };
 
     match client::send(&request)? {
         Response::Pong { version, features } if features.is_empty() => println!("ftmd {version}"),
         Response::Pong { version, features } => println!("ftmd {version} (features: {})", features.join(", ")),
         Response::Spawned { workspace } => println!("{}", workspace.id),
+        Response::Task { task } => println!("{}", task.id),
         _ => {},
     }
     Ok(())
+}
+
+/// Prints the task guide for a fresh agent session while tasks are on; never fails, since a hook's error would show
+/// in the agent's session. The setting is read now, so flipping it reaches the next agent without restarting ftmd.
+fn session_start() {
+    let input: serde_json::Value =
+        serde_json::from_str(&std::io::read_to_string(std::io::stdin()).unwrap_or_default()).unwrap_or_default();
+    let enabled = tasks_enabled();
+    if let Some(out) = session_start_output(input["source"].as_str().unwrap_or("startup"), enabled) {
+        println!("{out}");
+    }
+}
+
+/// `[tasks] enabled` in the app's config.toml; an unreadable file counts as the default, on.
+fn tasks_enabled() -> bool {
+    Settings::load(&ftm_core::paths::settings_path()).map_or(true, |s| s.tasks.enabled)
+}
+
+/// Answering or dismissing is the user's: an agent doing it would approve its own question. Not a security boundary
+/// (`ftm send` types anything), only a guard against doing it by mistake.
+fn refuse_from_an_agent() -> Result<()> {
+    let Some(id) = std::env::var(ENV_WORKSPACE_ID)
+        .ok()
+        .and_then(|v| v.parse::<WorkspaceId>().ok())
+    else {
+        return Ok(());
+    };
+    let Response::Workspaces { workspaces } = client::send(&Request::List)? else {
+        bail!("unexpected response from ftmd");
+    };
+    if workspaces.iter().any(|w| w.id == id && w.kind == Kind::Agent) {
+        bail!("tasks are answered and dismissed by the user, not from an agent workspace");
+    }
+    Ok(())
+}
+
+fn post_task(kind: TaskKind, title: String, body: BodyArgs, options: Vec<String>, id: Option<WorkspaceId>) -> Result<Request> {
+    let workspace =
+        id.ok_or_else(|| eyre::eyre!("no workspace: pass --id or run inside an FTM workspace (${ENV_WORKSPACE_ID})"))?;
+    if title.trim().is_empty() {
+        bail!("the title is blank");
+    }
+    if !tasks_enabled() {
+        bail!("tasks are off in FTM settings ([tasks] enabled in config.toml)");
+    }
+    let body = body.read()?;
+    require_feature(FEATURE_TASKS, "tasks")?;
+    Ok(Request::PostTask {
+        workspace,
+        kind,
+        title,
+        body,
+        options,
+    })
+}
+
+fn list_tasks(json: bool, all: bool) -> Result<()> {
+    require_feature(FEATURE_TASKS, "tasks")?;
+    let Response::Tasks { tasks } = client::send(&Request::Tasks)? else {
+        bail!("unexpected response from ftmd");
+    };
+    let tasks: Vec<Task> = tasks.into_iter().filter(|t| all || t.state == TaskState::Open).collect();
+    let Response::Workspaces { workspaces } = client::send(&Request::List)? else {
+        bail!("unexpected response from ftmd");
+    };
+    if json {
+        let items: Vec<serde_json::Value> = tasks.iter().map(|t| task_json(t, &workspaces)).collect();
+        println!("{}", serde_json::to_string_pretty(&items)?);
+        return Ok(());
+    }
+    for t in &tasks {
+        let from = workspaces
+            .iter()
+            .find(|w| w.id == t.workspace)
+            .map_or_else(|| t.workspace.to_string(), |w| w.display_name().to_string());
+        let kind = match t.kind {
+            TaskKind::Decision => "decision",
+            TaskKind::Flag => "flag",
+            TaskKind::Unknown => "?",
+        };
+        let state = match t.state {
+            TaskState::Open => String::new(),
+            other => format!(" ({})", format!("{other:?}").to_lowercase()),
+        };
+        println!("#{} {kind}{state} [{from}] {}", t.id, t.title);
+        if let Some(answer) = &t.answer {
+            println!("    -> {}", answer.replace('\n', "\n       "));
+        }
+    }
+    Ok(())
+}
+
+/// One task for `ftm tasks --json`, with every field present (null when unset), so watchers can rely on the shape.
+fn task_json(t: &Task, workspaces: &[Workspace]) -> serde_json::Value {
+    let ws = workspaces.iter().find(|w| w.id == t.workspace);
+    serde_json::json!({
+        "id": t.id,
+        "workspace": t.workspace,
+        "agent_name": ws.map(Workspace::display_name),
+        "agent_spawn_name": ws.map(|w| &w.name),
+        "kind": t.kind,
+        "title": t.title,
+        "body": t.body,
+        "options": t.options,
+        "created_at": t.created_at,
+        "state": t.state,
+        "closed_at": t.closed_at,
+        "answer": t.answer,
+    })
 }
 
 /// Claude Code takes a longer burst of input as a paste, CR included, so Enter goes in its own write once the TUI has

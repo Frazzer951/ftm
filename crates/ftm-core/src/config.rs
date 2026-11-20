@@ -70,6 +70,36 @@ pub struct Settings {
     pub sounds: SoundSettings,
     pub updates: UpdateSettings,
     pub workspaces: WorkspaceSettings,
+    pub notifications: NotificationSettings,
+    pub tasks: TaskSettings,
+}
+
+/// Desktop notifications: an agent needing input, a new task.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NotificationSettings {
+    pub enabled: bool,
+}
+
+impl Default for NotificationSettings {
+    fn default() -> Self {
+        NotificationSettings { enabled: true }
+    }
+}
+
+/// The task inbox (`ftm ask` / `ftm flag`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TaskSettings {
+    /// Agents are told how to use it when their session starts, `ftm ask`/`ftm flag` work, and the app shows the
+    /// Tasks tab. Off, none of that happens.
+    pub enabled: bool,
+}
+
+impl Default for TaskSettings {
+    fn default() -> Self {
+        TaskSettings { enabled: true }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -321,6 +351,11 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("[updates]"), "{text}");
+        assert!(settings.notifications.enabled && settings.tasks.enabled);
+        settings.notifications.enabled = false;
+        settings.save(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("[notifications]\nenabled = false"), "{text}");
         assert_eq!(Settings::load(&path).unwrap(), settings);
 
         std::fs::write(&path, "[updates]\ncheck = false\n").unwrap();

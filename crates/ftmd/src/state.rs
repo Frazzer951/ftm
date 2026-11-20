@@ -8,9 +8,10 @@ use ftm_core::model::{
     WorkspaceId, Worktree, color_hex, folder_color, workspace_color,
 };
 use ftm_core::protocol::{
-    Event, FEATURE_CLAUDE_ARGS, FEATURE_FOLDER_COLORS, FEATURE_MOVE, FEATURE_SHOW, FEATURE_SPAWN_COLOR,
+    Event, FEATURE_CLAUDE_ARGS, FEATURE_FOLDER_COLORS, FEATURE_MOVE, FEATURE_SHOW, FEATURE_SPAWN_COLOR, FEATURE_TASKS,
     FEATURE_WORKSPACE_COLORS, FEATURE_WORKSPACE_ORDER, Request, Response, SpawnRequest,
 };
+use ftm_core::task::{Task, TaskId, TaskKind, TaskState, clean_text, clean_title, reply_message};
 use ftm_core::{ENV_AGENT_CMD, ENV_NAME, ENV_PANE_ID, ENV_SOCKET, ENV_WORKSPACE_ID, color, paths};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -39,6 +40,11 @@ const REDRAW_NUDGE: Duration = Duration::from_millis(150);
 const INPUT_CHUNK: usize = 64 << 10;
 /// Changes within this long of each other are saved together: every tool use of every agent sets its status.
 const SAVE_DELAY: Duration = Duration::from_millis(250);
+/// Tasks that are no longer open are kept for `ftm tasks --all`, up to this many.
+const CLOSED_TASKS_KEPT: usize = 200;
+/// Claude Code takes a quick burst of input ending in CR as a paste, so the Enter that submits an answer goes in its
+/// own write once the TUI has taken in the text.
+const ANSWER_ENTER_DELAY: Duration = Duration::from_millis(150);
 
 pub struct State {
     workspaces: BTreeMap<WorkspaceId, Workspace>,
@@ -48,6 +54,9 @@ pub struct State {
     folder_order: Vec<PathBuf>,
     /// The sidebar's workspace order, set by dragging; `list` puts any workspace it lacks at the end.
     workspace_order: Vec<WorkspaceId>,
+    /// Oldest first.
+    tasks: Vec<Task>,
+    next_task: TaskId,
     panes: HashMap<PaneId, Pane>,
     events: broadcast::Sender<Event>,
     socket: PathBuf,
@@ -197,6 +206,10 @@ struct Saved {
     folder_order: Vec<PathBuf>,
     #[serde(default)]
     workspace_order: Vec<WorkspaceId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tasks: Vec<Task>,
+    #[serde(default)]
+    next_task: TaskId,
 }
 
 /// What the first command in a pane runs before handing over to a login shell.
@@ -221,6 +234,8 @@ impl State {
             folders: Vec::new(),
             folder_order: Vec::new(),
             workspace_order: Vec::new(),
+            tasks: Vec::new(),
+            next_task: 1,
             panes: HashMap::new(),
             events: broadcast::channel(1024).0,
             holders: paths::holders_dir(&socket),
@@ -249,6 +264,20 @@ impl State {
     /// Every change goes through here, so it is also where the tree is saved.
     fn emit_workspaces(&self) {
         let _ = self.events.send(Event::Workspaces { workspaces: self.list() });
+        self.saver.request();
+    }
+
+    fn emit_tasks(&mut self) {
+        let closed = self.tasks.iter().filter(|t| t.state != TaskState::Open).count();
+        let mut excess = closed.saturating_sub(CLOSED_TASKS_KEPT);
+        self.tasks.retain(|t| {
+            let keep = excess == 0 || t.state == TaskState::Open;
+            excess -= usize::from(!keep);
+            keep
+        });
+        let _ = self.events.send(Event::Tasks {
+            tasks: self.tasks.clone(),
+        });
         self.saver.request();
     }
 
@@ -295,6 +324,8 @@ impl State {
                     workspaces,
                     folders: self.folders.clone(),
                     folder_order: self.folder_order.clone(),
+                    tasks: self.tasks.clone(),
+                    next_task: self.next_task,
                 }
             }),
         }
@@ -696,6 +727,10 @@ pub fn load(shared: &Shared) -> Result<()> {
     state.folder_order = folder_order(saved.folder_order, &saved.folders);
     state.folders = saved.folders;
     state.workspace_order = workspace_order(saved.workspace_order, &state.workspaces);
+    state.tasks = saved.tasks;
+    let State { tasks, workspaces, .. } = &mut *state;
+    tasks.retain(|t| workspaces.contains_key(&t.workspace));
+    state.next_task = saved.next_task.max(state.tasks.iter().map(|t| t.id + 1).max().unwrap_or(1));
     let ids: Vec<WorkspaceId> = state.workspaces.keys().copied().collect();
     for ws in state.workspaces.values_mut() {
         if ws.parent.is_some_and(|p| !ids.contains(&p)) {
@@ -734,6 +769,7 @@ pub fn load(shared: &Shared) -> Result<()> {
         state.workspaces.len()
     );
     state.emit_workspaces();
+    state.emit_tasks();
     Ok(())
 }
 
@@ -958,6 +994,9 @@ pub fn subscribe(shared: &Shared) -> (broadcast::Receiver<Event>, Vec<Event>) {
             workspaces: state.list(),
         },
         state.folders_event(),
+        Event::Tasks {
+            tasks: state.tasks.clone(),
+        },
     ];
     replay.extend(state.panes.iter().map(|(id, pane)| Event::Output {
         pane: *id,
@@ -1065,6 +1104,7 @@ pub fn handle(shared: &Shared, request: Request, peer: Option<i32>) -> Response 
                 FEATURE_FOLDER_COLORS,
                 FEATURE_MOVE,
                 FEATURE_SHOW,
+                FEATURE_TASKS,
             ]
             .map(String::from)
             .to_vec(),
@@ -1145,6 +1185,20 @@ pub fn handle(shared: &Shared, request: Request, peer: Option<i32>) -> Response 
         },
         Request::Input { pane, data } => input(shared, pane, &data),
         Request::Show { id, path } => show(shared, id, path),
+        Request::PostTask {
+            workspace,
+            kind,
+            title,
+            body,
+            options,
+        } => post_task(shared, workspace, kind, &title, body.as_deref(), &options),
+        Request::Tasks => Ok(Response::Tasks {
+            tasks: lock(shared).tasks.clone(),
+        }),
+        Request::AnswerTask { id, answer } => answer_task(shared, id, &answer),
+        Request::DismissTask { id } => close_task(shared, id, None, TaskState::Dismissed),
+        Request::ResolveTask { id, workspace } => close_task(shared, id, workspace, TaskState::Resolved),
+        Request::RemoveTask { id, workspace } => remove_task(shared, id, workspace),
         Request::Capture { pane, raw } => capture(shared, pane, raw),
         Request::Resize { pane, cols, rows } => resize(shared, pane, cols, rows, peer),
         Request::SetStatus { .. } => Err(eyre!("unknown status")),
@@ -1153,6 +1207,161 @@ pub fn handle(shared: &Shared, request: Request, peer: Option<i32>) -> Response 
     result.unwrap_or_else(|e| Response::Error {
         message: format!("{e:#}"),
     })
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+fn post_task(
+    shared: &Shared,
+    workspace: WorkspaceId,
+    kind: TaskKind,
+    title: &str,
+    body: Option<&str>,
+    options: &[String],
+) -> Result<Response> {
+    if kind == TaskKind::Unknown {
+        bail!("unknown task kind");
+    }
+    let title = clean_title(title).ok_or_else(|| eyre!("the title is blank"))?;
+    let body = body.map(clean_text).filter(|b| !b.trim().is_empty());
+    let options: Vec<String> = options.iter().filter_map(|o| clean_title(o)).collect();
+    let mut state = lock(shared);
+    if !state.workspaces.contains_key(&workspace) {
+        bail!("no workspace {workspace}");
+    }
+    let task = Task {
+        id: state.next_task,
+        workspace,
+        kind,
+        title,
+        body,
+        options,
+        created_at: unix_now(),
+        state: TaskState::Open,
+        answer: None,
+        closed_at: None,
+    };
+    state.next_task += 1;
+    state.tasks.push(task.clone());
+    state.emit_tasks();
+    Ok(Response::Task { task: Box::new(task) })
+}
+
+fn task_state_name(state: TaskState) -> &'static str {
+    match state {
+        TaskState::Open => "open",
+        TaskState::Answered => "answered",
+        TaskState::Dismissed => "dismissed",
+        TaskState::Resolved => "resolved by the agent",
+        TaskState::Unknown => "closed",
+    }
+}
+
+/// The open task `id`, else why it cannot be acted on.
+fn open_task(state: &mut State, id: TaskId, workspace: Option<WorkspaceId>) -> Result<&mut Task> {
+    let task = state
+        .tasks
+        .iter_mut()
+        .find(|t| t.id == id)
+        .ok_or_else(|| eyre!("no task #{id}; the agent may have withdrawn it"))?;
+    if workspace.is_some_and(|w| w != task.workspace) {
+        bail!("task #{id} belongs to another workspace");
+    }
+    if task.state != TaskState::Open {
+        bail!("task #{id} is already {}", task_state_name(task.state));
+    }
+    Ok(task)
+}
+
+fn close_task(shared: &Shared, id: TaskId, workspace: Option<WorkspaceId>, to: TaskState) -> Result<Response> {
+    let mut state = lock(shared);
+    let task = open_task(&mut state, id, workspace)?;
+    task.state = to;
+    task.closed_at = Some(unix_now());
+    state.emit_tasks();
+    Ok(Response::Ok)
+}
+
+fn remove_task(shared: &Shared, id: TaskId, workspace: Option<WorkspaceId>) -> Result<Response> {
+    let mut state = lock(shared);
+    let i = state
+        .tasks
+        .iter()
+        .position(|t| t.id == id)
+        .ok_or_else(|| eyre!("no task #{id}"))?;
+    if workspace.is_some_and(|w| w != state.tasks[i].workspace) {
+        bail!("task #{id} belongs to another workspace");
+    }
+    state.tasks.remove(i);
+    state.emit_tasks();
+    Ok(Response::Ok)
+}
+
+/// The agent pane an answer goes to, and whether its program takes bracketed paste; refused unless the agent is at a
+/// point where typed text reaches it as a prompt.
+fn answer_target(state: &State, workspace: WorkspaceId) -> Result<(PaneId, bool)> {
+    let ws = state
+        .workspaces
+        .get(&workspace)
+        .ok_or_else(|| eyre!("the workspace that posted it is gone"))?;
+    let name = ws.display_name();
+    if ws.kind != Kind::Agent {
+        bail!("{name} is not an agent workspace, so there is nothing to answer; dismiss it instead");
+    }
+    match ws.status {
+        Status::NeedsInput => bail!("{name} is waiting on a prompt in its pane; answer that first"),
+        Status::Done | Status::Failed => bail!("{name}'s Claude session has ended"),
+        _ => {},
+    }
+    let pane = ws
+        .agent_pane
+        .filter(|p| ws.tabs.iter().any(|t| t.layout.contains(*p)))
+        .or_else(|| ws.tabs.first().map(|t| t.layout.panes()[0]))
+        .ok_or_else(|| eyre!("{name} has no open pane"))?;
+    match state.panes.get(&pane) {
+        Some(p) if !p.exited => Ok((pane, p.screen.screen().bracketed_paste())),
+        _ => bail!("{name} has no live pane"),
+    }
+}
+
+/// Types the reply as one paste (Claude Code keeps its newlines and does not submit at each), then Enter on its own.
+/// A program without bracketed paste gets the reply on one line instead, so no newline submits half of it. While the
+/// agent is mid-turn Claude Code queues the prompt until the turn ends.
+fn answer_task(shared: &Shared, id: TaskId, answer: &str) -> Result<Response> {
+    let answer = clean_text(answer);
+    let answer = answer.trim();
+    if answer.is_empty() {
+        bail!("the answer is blank");
+    }
+    let (pane, text) = {
+        let mut state = lock(shared);
+        let workspace = open_task(&mut state, id, None)?.workspace;
+        let (pane, paste) = answer_target(&state, workspace)?;
+        let task = open_task(&mut state, id, None)?;
+        let message = reply_message(task, answer);
+        let text = if paste {
+            format!("\x1b[200~{message}\x1b[201~")
+        } else {
+            message.split_whitespace().collect::<Vec<_>>().join(" ")
+        };
+        state.send_to_holder(pane, Frame::Input(text.clone().into_bytes()))?;
+        (pane, text)
+    };
+    tracing::info!("answered task #{id} in pane {pane} ({} bytes)", text.len());
+    std::thread::sleep(ANSWER_ENTER_DELAY);
+    let mut state = lock(shared);
+    state.send_to_holder(pane, Frame::Input(b"\r".to_vec()))?;
+    if let Some(task) = state.tasks.iter_mut().find(|t| t.id == id && t.state == TaskState::Open) {
+        task.state = TaskState::Answered;
+        task.answer = Some(answer.to_string());
+        task.closed_at = Some(unix_now());
+    }
+    state.emit_tasks();
+    Ok(Response::Ok)
 }
 
 fn set_status(ws: &mut Workspace, status: Status, background_agents: u32) {
@@ -1301,6 +1510,10 @@ fn close(shared: &Shared, id: WorkspaceId, remove_worktree: bool) -> Result<Resp
         let panes: Vec<Pane> = ids.iter().filter_map(|k| state.panes.remove(k)).collect();
         tracing::info!("closing workspace {} ({id}) and its panes {ids:?}", ws.name);
         state.emit_workspaces();
+        if state.tasks.iter().any(|t| t.workspace == id) {
+            state.tasks.retain(|t| t.workspace != id);
+            state.emit_tasks();
+        }
         (ws, panes)
     };
     let reaping: Vec<_> = panes.into_iter().map(reap).collect();

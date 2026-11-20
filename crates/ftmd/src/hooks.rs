@@ -54,9 +54,16 @@ pub fn settings(ftm: &Path) -> Value {
             .expect("array")
             .push(group);
     }
+    // `ftm hook session-start` reads `[tasks] enabled` when it runs, so the setting needs no ftmd restart.
     hooks.insert(
         "SessionStart".into(),
-        json!([{ "hooks": [{ "type": "command", "command": HYPERLINK_ENV, "timeout": 5 }] }]),
+        json!([
+            { "hooks": [{ "type": "command", "command": HYPERLINK_ENV, "timeout": 5 }] },
+            {
+                "matcher": "startup|clear",
+                "hooks": [{ "type": "command", "command": format!("{ftm} hook session-start 2>/dev/null || true"), "timeout": 5 }],
+            },
+        ]),
     );
     json!({ "env": { "FORCE_HYPERLINK": "1" }, "hooks": hooks })
 }
@@ -107,6 +114,12 @@ mod tests {
         let s = settings(Path::new("/opt/ftm/ftm"));
         assert_eq!(s["env"]["FORCE_HYPERLINK"], "1");
         assert!(s["hooks"]["SessionStart"][0].get("matcher").is_none());
+        let tasks = &s["hooks"]["SessionStart"][1];
+        assert_eq!(tasks["matcher"], "startup|clear");
+        assert_eq!(
+            tasks["hooks"][0]["command"],
+            "'/opt/ftm/ftm' hook session-start 2>/dev/null || true"
+        );
         let hook = s["hooks"]["SessionStart"][0]["hooks"][0]["command"].as_str().unwrap();
         let run = |env_file: Option<&Path>| {
             let mut sh = std::process::Command::new("/bin/sh");

@@ -68,7 +68,7 @@
         <div id="settings-tabs" role="tablist" aria-label="Settings">
           <button type="button" role="tab" id="settings-tab-font" aria-controls="settings-panel-font">Font</button>
           <button type="button" role="tab" id="settings-tab-theme" aria-controls="settings-panel-theme">Theme</button>
-          <button type="button" role="tab" id="settings-tab-sounds" aria-controls="settings-panel-sounds">Sounds</button>
+          <button type="button" role="tab" id="settings-tab-sounds" aria-controls="settings-panel-sounds">Alerts</button>
           <button type="button" role="tab" id="settings-tab-input" aria-controls="settings-panel-input">Input</button>
           <button type="button" role="tab" id="settings-tab-workspaces" aria-controls="settings-panel-workspaces">Workspaces</button>
           <button type="button" role="tab" id="settings-tab-updates" aria-controls="settings-panel-updates">Updates</button>
@@ -120,6 +120,10 @@
           </div>
         </div>
         <div class="tabpanel" role="tabpanel" id="settings-panel-sounds" aria-labelledby="settings-tab-sounds">
+          <div class="field">
+            <span>Notifications</span>
+            <label><input type="checkbox" id="notifications-enabled" /> Desktop notifications when an agent needs input or posts a task</label>
+          </div>
           <div class="field">
             <span>Sounds</span>
             <div class="sound-row">
@@ -196,6 +200,11 @@
               </div>
             </div>
             <span class="note">For workspaces spawned from a folder: the folder's own Color… (right-click it in the sidebar) wins over this.</span>
+          </div>
+          <div class="field">
+            <span>Tasks</span>
+            <label><input type="checkbox" id="tasks-enabled" /> Agents can ask you for decisions and flag things in the Tasks panel</label>
+            <span class="note">Each new agent is told how to use <code>ftm ask</code> and <code>ftm flag</code>. Off, they are not told, the commands refuse, and the Tasks panel hides.</span>
           </div>
         </div>
         <p id="settings-error"></p>

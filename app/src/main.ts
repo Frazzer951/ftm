@@ -36,11 +36,13 @@ import {
   sameOrder,
   sortRows,
 } from "./order.ts";
+import { Inbox } from "./inbox.ts";
 import { replyFilter } from "./replies.ts";
 import { clampSidebarWidth, SIDEBAR_DEFAULT } from "./sidebar.ts";
 import { loadSounds, play, type SoundEntry, type SoundSettings } from "./sounds.ts";
 import "./style.css";
 import { Tabs } from "./tabs.ts";
+import { type Task, TaskAlerts } from "./tasks.ts";
 import { compareVersions, versionNotice } from "./version.ts";
 import { type Stat, Viewer } from "./viewer.ts";
 import { type AppScroll, type AppWheel, appWheel } from "./wheel.ts";
@@ -82,7 +84,8 @@ type FtmEvent =
   | { event: "folders"; folders: Folder[]; order?: string[] }
   | { event: "output"; pane: Id; data: string; reset: boolean }
   | { event: "update_blocked"; version: string | null; reason: string }
-  | { event: "show"; workspace: Id; path: string };
+  | { event: "show"; workspace: Id; path: string }
+  | { event: "tasks"; tasks: Task[] };
 
 interface PaneView {
   term: Terminal;
@@ -468,6 +471,9 @@ interface WorkspaceSettings {
   folder_color: string;
 }
 let workspaceSettings: WorkspaceSettings = { folder_color: "" };
+/// `[notifications] enabled` and `[tasks] enabled`; both on unless config.toml says otherwise.
+let notificationsEnabled = true;
+let tasksEnabled = true;
 
 const playSound = (name: string, volume = soundSettings.volume) => {
   play(name, volume).catch((err) => console.error(`playing ${name}`, err));
@@ -793,6 +799,8 @@ function setupSettingsDialog() {
     folderColor.value = hex ? "custom" : workspaceSettings.folder_color;
     folderColorCustom.value = pickerColor(workspaceSettings.folder_color);
     folderColorCustom.hidden = !hex;
+    $<HTMLInputElement>("notifications-enabled").checked = notificationsEnabled;
+    $<HTMLInputElement>("tasks-enabled").checked = tasksEnabled;
     $("settings-error").textContent = "";
     preview();
     dialog.showModal();
@@ -841,10 +849,26 @@ function setupSettingsDialog() {
     const workspacesNext: WorkspaceSettings = {
       folder_color: folderColor.value === "custom" ? folderColorCustom.value : folderColor.value,
     };
+    const notificationsNext = $<HTMLInputElement>("notifications-enabled").checked;
+    const tasksNext = $<HTMLInputElement>("tasks-enabled").checked;
     try {
       await invoke("save_settings", {
-        settings: { terminal: next, theme: draft, sounds: soundDraft, updates, workspaces: workspacesNext },
+        settings: {
+          terminal: next,
+          theme: draft,
+          sounds: soundDraft,
+          updates,
+          workspaces: workspacesNext,
+          notifications: { enabled: notificationsNext },
+          tasks: { enabled: tasksNext },
+        },
       });
+      notificationsEnabled = notificationsNext;
+      if (tasksNext !== tasksEnabled) {
+        tasksEnabled = tasksNext;
+        viewer.tasksChanged();
+        renderSidebar();
+      }
       const recheck = updates.check !== updateSettings.check || updates.channel !== updateSettings.channel;
       updateSettings = updates;
       if (recheck) checkForRelease().catch(console.error);
@@ -1122,6 +1146,7 @@ function renderSidebar() {
       ["manual", "name"],
     ],
   ];
+  inbox.render();
   $("sections").replaceChildren(
     ...sections
       .filter(([key, , rows]) => rows.length > 0 || key === "folders")
@@ -1198,6 +1223,14 @@ function workspaceRow(ws: Workspace, draggable: boolean): HTMLElement {
     badge.title = `${waiting} agent${waiting === 1 ? "" : "s"} below need input`;
     row.append(badge);
   }
+  const asked = tasksEnabled ? inbox.openFor(ws.id) : 0;
+  if (asked > 0) {
+    const tasks = document.createElement("span");
+    tasks.className = "task-badge";
+    tasks.textContent = `${asked}`;
+    tasks.title = `${asked} open task${asked === 1 ? "" : "s"} in the Tasks panel`;
+    row.append(tasks);
+  }
   if (viewer.unread(ws.id)) {
     const shown = document.createElement("span");
     shown.className = "artifact-badge";
@@ -1242,6 +1275,43 @@ function workspaceRow(ws: Workspace, draggable: boolean): HTMLElement {
 
 /// The CSS color for a workspace's `color`: a palette name's fixed color, or the hex as given.
 const workspaceColor = (color: string) => WORKSPACE_PALETTE[color] ?? color;
+
+const inbox = new Inbox<Workspace>(document.createElement("div"), {
+  workspaces: () => workspaces,
+  name: displayName,
+  color: (ws) => (ws.color ? workspaceColor(ws.color) : null),
+  dot: statusDot,
+  select: (id) => {
+    if (!workspaces.some((w) => w.id === id)) return;
+    viewer.showTasks(id);
+    selected = id;
+    render();
+  },
+  request,
+  openUrl: (url) => invoke("open_url", { url }).catch(console.error),
+  changed: () => {
+    viewer.tasksChanged();
+    renderSidebar();
+  },
+});
+const taskAlerts = new TaskAlerts();
+
+/// A new decision is announced like an agent needing input; a flag gets the notification without the sound.
+async function onTasks(tasks: Task[]) {
+  inbox.setTasks(tasks);
+  const fresh = taskAlerts.update(tasks);
+  if (!fresh.length || !tasksEnabled) return;
+  if (fresh.some((t) => t.kind === "decision")) playSound(soundSettings.needs_input);
+  if (!notificationsEnabled) return;
+  let granted = await isPermissionGranted();
+  if (!granted) granted = (await requestPermission()) === "granted";
+  if (!granted) return;
+  for (const t of fresh) {
+    const ws = workspaces.find((w) => w.id === t.workspace);
+    const who = ws ? displayName(ws) : "An agent";
+    sendNotification({ title: `${who} ${t.kind === "flag" ? "flagged" : "asks"}`, body: t.title });
+  }
+}
 
 function setColor(ws: Workspace, color: string | null) {
   request({ op: "set_color", id: ws.id, color }).catch((err) => {
@@ -1564,6 +1634,11 @@ const viewer = new Viewer(
   },
   () => home,
   isMac ? "⌘B" : "Ctrl+Shift+B",
+  {
+    el: inbox.root,
+    counts: () => (tasksEnabled ? inbox.counts() : { open: 0, decisions: 0 }),
+    enabled: () => tasksEnabled,
+  },
 );
 homeDir().then((h) => (home = h.replace(/\/$/, ""))).catch(() => {});
 
@@ -1709,6 +1784,7 @@ function onStatusChanges(list: Workspace[]) {
 }
 
 async function notifyNeedsInput(fresh: Workspace[]) {
+  if (!notificationsEnabled) return;
   let granted = await isPermissionGranted();
   if (!granted) granted = (await requestPermission()) === "granted";
   if (!granted) return;
@@ -1788,7 +1864,10 @@ function renderPanes() {
   setFocus(focused);
   requestAnimationFrame(() => {
     fitVisible();
-    if (!editing && focused) views.get(focused)?.term.focus();
+    // A reply being typed in the Tasks panel keeps its focus through the redraw every status change brings.
+    const active = document.activeElement;
+    const typing = active instanceof HTMLTextAreaElement && !$("panes").contains(active);
+    if (!editing && !typing && focused) views.get(focused)?.term.focus();
   });
 }
 
@@ -2142,6 +2221,8 @@ invoke<{
   sounds: SoundSettings;
   updates: Partial<UpdateSettings>;
   workspaces?: Partial<WorkspaceSettings>;
+  notifications?: { enabled?: boolean };
+  tasks?: { enabled?: boolean };
 }>("get_settings")
   .then((loaded) => {
     updateSettings = { check: loaded.updates.check ?? null, channel: loaded.updates.channel ?? null };
@@ -2149,6 +2230,10 @@ invoke<{
     themeSettings = loaded.theme;
     soundSettings = loaded.sounds;
     workspaceSettings = { folder_color: loaded.workspaces?.folder_color ?? "" };
+    notificationsEnabled = loaded.notifications?.enabled ?? true;
+    tasksEnabled = loaded.tasks?.enabled ?? true;
+    viewer.tasksChanged();
+    renderSidebar();
     applyThemeNamed(wantedTheme(themeSettings)).catch(console.error);
     return applySettings();
   })
@@ -2165,6 +2250,8 @@ function onEvent(payload: FtmEvent) {
     folderOrder = payload.order ?? [];
     refreshGit(folders.map((f) => f.path).filter((p) => !gitInfo.has(p))).catch(console.error);
     renderSidebar();
+  } else if (payload.event === "tasks") {
+    onTasks(payload.tasks).catch(console.error);
   } else if (payload.event === "show") {
     viewer.open(payload.workspace, payload.path, { focus: false });
     renderSidebar();
