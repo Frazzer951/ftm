@@ -7,7 +7,7 @@ use ftm_core::model::{
     WorkspaceId, Worktree, color_hex, folder_color, workspace_color,
 };
 use ftm_core::protocol::{
-    Event, FEATURE_CLAUDE_ARGS, FEATURE_FOLDER_COLORS, FEATURE_MOVE, FEATURE_SPAWN_COLOR, FEATURE_WORKSPACE_COLORS,
+    Event, FEATURE_CLAUDE_ARGS, FEATURE_FOLDER_COLORS, FEATURE_MOVE, FEATURE_SHOW, FEATURE_SPAWN_COLOR, FEATURE_WORKSPACE_COLORS,
     FEATURE_WORKSPACE_ORDER, Request, Response, SpawnRequest,
 };
 use ftm_core::{ENV_AGENT_CMD, ENV_NAME, ENV_PANE_ID, ENV_SOCKET, ENV_WORKSPACE_ID, color, paths};
@@ -1044,6 +1044,18 @@ fn screen_text(parser: &mut vt100::Parser<TitleWatch>) -> String {
 }
 
 /// `peer` is the pid of the process that sent `request`, when known.
+fn show(shared: &Shared, id: WorkspaceId, path: PathBuf) -> Result<Response> {
+    if !path.is_absolute() {
+        bail!("{} is not an absolute path", path.display());
+    }
+    let state = lock(shared);
+    if !state.workspaces.contains_key(&id) {
+        bail!("no workspace {id}");
+    }
+    let _ = state.events.send(Event::Show { workspace: id, path });
+    Ok(Response::Ok)
+}
+
 pub fn handle(shared: &Shared, request: Request, peer: Option<i32>) -> Response {
     let result = match request {
         Request::Ping => Ok(Response::Pong {
@@ -1055,6 +1067,7 @@ pub fn handle(shared: &Shared, request: Request, peer: Option<i32>) -> Response 
                 FEATURE_SPAWN_COLOR,
                 FEATURE_FOLDER_COLORS,
                 FEATURE_MOVE,
+                FEATURE_SHOW,
             ]
             .map(String::from)
             .to_vec(),
@@ -1134,6 +1147,7 @@ pub fn handle(shared: &Shared, request: Request, peer: Option<i32>) -> Response 
             Ok(Response::Ok)
         },
         Request::Input { pane, data } => input(shared, pane, &data),
+        Request::Show { id, path } => show(shared, id, path),
         Request::Capture { pane, raw } => capture(shared, pane, raw),
         Request::Resize { pane, cols, rows } => resize(shared, pane, cols, rows, peer),
         Request::SetStatus { .. } => Err(eyre!("unknown status")),

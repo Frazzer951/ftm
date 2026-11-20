@@ -98,6 +98,12 @@ pub enum Request {
         raw: bool,
     },
     Subscribe,
+    /// Asks the app to show a file in the workspace's viewer panel, without switching to the workspace. `path` must be
+    /// absolute; ftmd passes it on as `Event::Show` and reads nothing.
+    Show {
+        id: WorkspaceId,
+        path: PathBuf,
+    },
     /// For `ftm attach`: after `Ok`, the connection carries only `Event::Output` for this pane, starting with a redraw
     /// of its current screen (`reset` set), and ends when the pane does.
     Attach {
@@ -154,6 +160,8 @@ pub const FEATURE_FOLDER_COLORS: &str = "folder_colors";
 pub const FEATURE_WORKSPACE_ORDER: &str = "workspace_order";
 /// `Request::Move`.
 pub const FEATURE_MOVE: &str = "move";
+/// `Request::Show` and `Event::Show`.
+pub const FEATURE_SHOW: &str = "show";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
@@ -214,6 +222,8 @@ pub enum Event {
     /// speaks another holder protocol, or does not start). Sent on subscribe until ftmd restarts. `version` is the
     /// new build's, when it could say.
     UpdateBlocked { version: Option<String>, reason: String },
+    /// `ftm show`: a file for the workspace's viewer panel. Sent only to clients subscribed at the time.
+    Show { workspace: WorkspaceId, path: PathBuf },
     /// An event from a newer ftmd. Never sent.
     #[serde(other)]
     Unknown,

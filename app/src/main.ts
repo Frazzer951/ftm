@@ -79,7 +79,8 @@ type FtmEvent =
   | { event: "workspaces"; workspaces: Workspace[] }
   | { event: "folders"; folders: Folder[]; order?: string[] }
   | { event: "output"; pane: Id; data: string; reset: boolean }
-  | { event: "update_blocked"; version: string | null; reason: string };
+  | { event: "update_blocked"; version: string | null; reason: string }
+  | { event: "show"; workspace: Id; path: string };
 
 interface PaneView {
   term: Terminal;
@@ -949,10 +950,11 @@ function markSelectedSeen() {
 function render() {
   saveUi();
   markSelectedSeen();
+  // Before the sidebar: looking at a workspace clears its viewer badge.
+  viewer.show(selected);
   renderSidebar();
   renderTabs();
   renderPanes();
-  viewer.show(selected);
 }
 
 const displayName = (ws: Workspace) => ws.title ?? ws.auto_title ?? ws.name;
@@ -1189,6 +1191,13 @@ function workspaceRow(ws: Workspace, draggable: boolean): HTMLElement {
     badge.textContent = `${waiting}`;
     badge.title = `${waiting} agent${waiting === 1 ? "" : "s"} below need input`;
     row.append(badge);
+  }
+  if (viewer.unread(ws.id)) {
+    const shown = document.createElement("span");
+    shown.className = "artifact-badge";
+    shown.textContent = "◧";
+    shown.title = "A file was shown in this workspace's viewer";
+    row.append(shown);
   }
   const close = document.createElement("button");
   close.className = "close";
@@ -2149,6 +2158,9 @@ function onEvent(payload: FtmEvent) {
     folders = payload.folders;
     folderOrder = payload.order ?? [];
     refreshGit(folders.map((f) => f.path).filter((p) => !gitInfo.has(p))).catch(console.error);
+    renderSidebar();
+  } else if (payload.event === "show") {
+    viewer.open(payload.workspace, payload.path, { focus: false });
     renderSidebar();
   } else if (payload.event === "update_blocked") {
     const build = payload.version ? `FTM ${payload.version}` : "A new FTM build";

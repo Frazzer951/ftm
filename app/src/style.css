@@ -99,6 +99,7 @@ body.resizing-viewer iframe { pointer-events: none; }
 .dot.failed { background: transparent; border: 1.5px solid var(--status-needs-input); }
 .dot.unseen { background: var(--status-unseen); border: none; }
 .badge { flex: none; min-width: 16px; padding: 0 4px; border-radius: 8px; font-size: 10px; line-height: 16px; text-align: center; color: #fff; background: var(--status-needs-input); }
+.artifact-badge { flex: none; font-size: 12px; line-height: 16px; color: var(--accent); }
 
 main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 #tabs { background: var(--sidebar); display: flex; gap: 2px; padding: 4px; border-bottom: 1px solid var(--border); min-height: 32px; }
