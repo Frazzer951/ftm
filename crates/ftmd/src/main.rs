@@ -2,6 +2,7 @@ mod frame;
 mod holder;
 mod hooks;
 mod state;
+mod trim;
 mod upgrade;
 mod worktree;
 

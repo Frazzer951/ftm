@@ -6,6 +6,7 @@ import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { open } from "@tauri-apps/plugin-dialog";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { FitAddon } from "@xterm/addon-fit";
+import { ImageAddon } from "@xterm/addon-image";
 import { LigaturesAddon } from "@xterm/addon-ligatures";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
@@ -274,6 +275,9 @@ function view(pane: Id): PaneView {
       console.warn("webgl unavailable, using the DOM renderer", e);
     }
   }
+  // Sixel and iTerm2 inline images (imgcat, chafa, timg, viu). A replay redraws them, and the storage keeps every copy
+  // until it is full, so each pane gets a small share rather than the addon's 128 MB.
+  term.loadAddon(new ImageAddon({ storageLimit: 16, pixelLimit: 8 << 20 }));
   const input = (data: string) => send({ op: "input", pane, data });
   const replies = replyFilter(() => v.replaying > 0);
   term.onData((d) => {

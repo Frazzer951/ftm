@@ -794,7 +794,13 @@ fn show_reaches_subscribers_for_a_known_workspace() {
     let mut events = Conn::open(&daemon.socket);
     events.send(&Request::Subscribe);
     let path = dir.join("plan.md");
-    assert!(matches!(req.send(&Request::Show { id: ws, path: path.clone() }), Response::Ok));
+    assert!(matches!(
+        req.send(&Request::Show {
+            id: ws,
+            path: path.clone()
+        }),
+        Response::Ok
+    ));
     loop {
         if let Event::Show { workspace, path: shown } = events.line() {
             assert_eq!((workspace, shown), (ws, path));

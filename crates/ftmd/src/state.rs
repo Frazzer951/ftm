@@ -1,4 +1,5 @@
 use crate::frame::{self, Frame};
+use crate::trim::Tail;
 use crate::worktree;
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use eyre::{Result, WrapErr, bail, eyre};
@@ -7,8 +8,8 @@ use ftm_core::model::{
     WorkspaceId, Worktree, color_hex, folder_color, workspace_color,
 };
 use ftm_core::protocol::{
-    Event, FEATURE_CLAUDE_ARGS, FEATURE_FOLDER_COLORS, FEATURE_MOVE, FEATURE_SHOW, FEATURE_SPAWN_COLOR, FEATURE_WORKSPACE_COLORS,
-    FEATURE_WORKSPACE_ORDER, Request, Response, SpawnRequest,
+    Event, FEATURE_CLAUDE_ARGS, FEATURE_FOLDER_COLORS, FEATURE_MOVE, FEATURE_SHOW, FEATURE_SPAWN_COLOR,
+    FEATURE_WORKSPACE_COLORS, FEATURE_WORKSPACE_ORDER, Request, Response, SpawnRequest,
 };
 use ftm_core::{ENV_AGENT_CMD, ENV_NAME, ENV_PANE_ID, ENV_SOCKET, ENV_WORKSPACE_ID, color, paths};
 use serde::{Deserialize, Serialize};
@@ -66,7 +67,7 @@ struct Pane {
     /// Frames for the holder, written by the pane's own thread so a holder that is slow to read stalls nothing else.
     holder: mpsc::Sender<ToHolder>,
     holder_socket: PathBuf,
-    buffer: Vec<u8>,
+    buffer: Tail,
     /// Headless emulator fed the same output, so the current screen and scrollback can be read back as text.
     screen: vt100::Parser<TitleWatch>,
     /// Opened by `spawn` to run the workspace's setup and agent.
@@ -455,7 +456,7 @@ impl State {
                 workspace,
                 holder: holder_writer(id, stream)?,
                 holder_socket,
-                buffer: Vec::new(),
+                buffer: Tail::new(BUFFER_CAP, BUFFER_SLACK),
                 screen: vt100::Parser::new_with_callbacks(rows, cols, SCROLLBACK, TitleWatch::default()),
                 startup,
                 exited: false,
@@ -479,13 +480,9 @@ impl State {
     /// whether the emulator had to start the screen over, which leaves it blank until the pane repaints (`nudge`).
     fn pane_output(&mut self, id: PaneId, bytes: &[u8], live: bool) -> bool {
         let Some(pane) = self.panes.get_mut(&id) else { return false };
-        pane.buffer.extend_from_slice(bytes);
+        pane.buffer.push(bytes);
         let restarted = !process(id, &mut pane.screen, bytes);
         let (workspace, titles) = (pane.workspace, std::mem::take(&mut pane.screen.callbacks_mut().0));
-        if pane.buffer.len() > BUFFER_CAP + BUFFER_SLACK {
-            let excess = pane.buffer.len() - BUFFER_CAP;
-            pane.buffer.drain(..excess);
-        }
         if live {
             let _ = self.events.send(Event::Output {
                 pane: id,
@@ -898,7 +895,7 @@ fn pane_exited(shared: &Shared, id: PaneId, why: &str) {
             );
             const NOTE: &[u8] = b"\r\n\x1b[31m[ftm] the agent exited before it started\x1b[0m\r\n";
             pane.exited = true;
-            pane.buffer.extend_from_slice(NOTE);
+            pane.buffer.push(NOTE);
             let _ = process(id, &mut pane.screen, NOTE);
             set_status(ws, Status::Failed, 0);
             let _ = state.events.send(Event::Output {
