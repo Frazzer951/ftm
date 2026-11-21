@@ -772,7 +772,7 @@ fn claude_args_are_refused_by_an_older_ftmd() {
 }
 
 /// Posts a decision and a flag through `ftm`, then records every byte typed into its pane. `paste` agents turn on
-/// bracketed paste first, as Claude Code does.
+/// bracketed paste first, as Claude Code does. `live` agents record through `$FAKE_LIVE`, a `cat` named `claude`.
 const TASK_AGENT: &str = r###"#!/bin/sh
 PATH="$FTM_BIN_DIR:$PATH"
 out="$FAKE_OUT/$FTM_NAME"
@@ -784,6 +784,7 @@ case "$FTM_NAME" in paste*) printf '\033[?2004h' ;; esac
 trap '' HUP
 stty raw -echo
 touch "$out.ready"
+case "$FTM_NAME" in live*) exec "$FAKE_LIVE" > "$out.typed" ;; esac
 exec cat > "$out.typed"
 "###;
 
@@ -957,4 +958,57 @@ fn tasks_reach_the_agent_that_posted_them() {
     ftm(&bin, &socket, &["close", "--id", &plain.to_string()]);
     assert_eq!(tasks(&bin, &socket, true).iter().map(|t| t.id).collect::<Vec<_>>(), [ask]);
     assert!(ftm_err(&bin, &socket, &["ask", " ", "--id", &paste.to_string()]).contains("blank"));
+}
+
+#[test]
+fn a_claude_running_without_hooks_still_gets_answers() {
+    let bin = ftm_bin();
+    let root = temp_root("tasks-live");
+    let out = root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let fake = root.join("fake-claude");
+    write_executable(&fake, TASK_AGENT.as_bytes());
+    let live_claude = root.join("claude");
+    let cat = ["/bin/cat", "/usr/bin/cat"]
+        .into_iter()
+        .find(|p| Path::new(p).exists())
+        .unwrap();
+    std::fs::copy(cat, &live_claude).unwrap();
+    let daemon = start_daemon("tasks-live", |c| {
+        c.env("FTM_AGENT_CMD", &fake)
+            .env("FTM_BIN_DIR", bin.parent().unwrap())
+            .env("FAKE_OUT", &out)
+            .env("FAKE_LIVE", &live_claude);
+    });
+    let socket = daemon.socket.clone();
+    let spawn = |name: &str| -> String {
+        let id = ftm(
+            &bin,
+            &socket,
+            &["spawn", "agent", "--name", name, "--path", root.to_str().unwrap()],
+        );
+        wait_for(&format!("{name} to post"), Duration::from_secs(20), || {
+            out.join(format!("{name}.ready")).exists()
+        });
+        id
+    };
+    let (live, gone) = (spawn("live"), spawn("gone"));
+    let ask = |name: &str| {
+        std::fs::read_to_string(out.join(format!("{name}.ask")))
+            .unwrap()
+            .trim()
+            .to_string()
+    };
+
+    // Both look ended, as after a crash and a hand-typed `claude --resume`, which runs no hooks.
+    for id in [&live, &gone] {
+        ftm(&bin, &socket, &["status", "done", "--id", id]);
+    }
+    let ended = ftm_err(&bin, &socket, &["task", "answer", &ask("gone"), "x"]);
+    assert!(ended.contains("Claude session has ended"), "{ended}");
+    ftm(&bin, &socket, &["task", "answer", &ask("live"), "yes"]);
+    let want = format!("[FTM task #{} answered] Q: Pick a database — A: yes\r", ask("live"));
+    wait_for("the answer to reach the running claude", Duration::from_secs(10), || {
+        std::fs::read(out.join("live.typed")).unwrap_or_default() == want.as_bytes()
+    });
 }

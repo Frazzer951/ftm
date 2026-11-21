@@ -272,77 +272,15 @@ fn signal_groups(shell: libc::pid_t, fg: Option<libc::pid_t>, signal: libc::c_in
 }
 
 /// The process groups of the session `session` leads that still have a live process.
-#[cfg(target_os = "linux")]
 fn session_groups(session: libc::pid_t) -> Vec<libc::pid_t> {
-    let Ok(procs) = std::fs::read_dir("/proc") else {
-        return Vec::new();
-    };
-    let mut groups: Vec<libc::pid_t> = procs
-        .flatten()
-        .filter(|e| e.file_name().to_string_lossy().bytes().all(|b| b.is_ascii_digit()))
-        .filter_map(|e| {
-            let stat = std::fs::read_to_string(e.path().join("stat")).ok()?;
-            // pid (comm) state ppid pgrp session ...; comm may contain anything, including ") ".
-            let mut fields = stat.rsplit_once(')')?.1.split_whitespace();
-            let state = fields.next()?;
-            let (pgrp, sid) = (fields.nth(1)?.parse().ok()?, fields.next()?.parse::<libc::pid_t>().ok()?);
-            (sid == session && state != "Z").then_some(pgrp)
-        })
-        .collect();
-    groups.sort_unstable();
-    groups.dedup();
-    groups
-}
-
-/// The process groups of the session `session` leads that still have a live process.
-#[cfg(target_os = "macos")]
-fn session_groups(session: libc::pid_t) -> Vec<libc::pid_t> {
-    let pid_size = size_of::<libc::pid_t>();
-    // SAFETY: with no buffer, proc_listallpids only reports how many pids there are.
-    let Ok(count) = usize::try_from(unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) }) else {
-        return Vec::new();
-    };
-    // Room for processes started since.
-    let mut pids: Vec<libc::pid_t> = vec![0; count + 64];
-    let Ok(bytes) = libc::c_int::try_from(pids.len() * pid_size) else {
-        return Vec::new();
-    };
-    // SAFETY: the buffer holds `bytes` bytes of pid_t, and proc_listallpids writes at most that many.
-    let listed = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
-    pids.truncate(usize::try_from(listed).unwrap_or(0).min(pids.len()));
-    let Ok(info_bytes) = libc::c_int::try_from(size_of::<libc::proc_bsdinfo>()) else {
-        return Vec::new();
-    };
-    let mut groups: Vec<libc::pid_t> = pids
+    let mut groups: Vec<libc::pid_t> = crate::procs::list()
         .into_iter()
-        // SAFETY: getsid only reads the process table.
-        .filter(|&pid| pid > 0 && unsafe { libc::getsid(pid) } == session)
-        .filter_map(|pid| {
-            // SAFETY: proc_bsdinfo is plain integers, for which all zeroes is a valid value.
-            let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
-            // SAFETY: `info` is a proc_bsdinfo, the size PROC_PIDTBSDINFO writes and the size passed.
-            let got = unsafe {
-                libc::proc_pidinfo(
-                    pid,
-                    libc::PROC_PIDTBSDINFO,
-                    0,
-                    std::ptr::from_mut(&mut info).cast(),
-                    info_bytes,
-                )
-            };
-            (got == info_bytes && info.pbi_status != libc::SZOMB)
-                .then(|| libc::pid_t::try_from(info.pbi_pgid).ok())
-                .flatten()
-        })
+        .filter(|p| p.sid == session)
+        .map(|p| p.pgrp)
         .collect();
     groups.sort_unstable();
     groups.dedup();
     groups
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn session_groups(_session: libc::pid_t) -> Vec<libc::pid_t> {
-    Vec::new()
 }
 
 /// Whether `group` is still a process group of the session `session` leads. A group whose leader has exited but whose
