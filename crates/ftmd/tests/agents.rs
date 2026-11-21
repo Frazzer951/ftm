@@ -772,7 +772,7 @@ fn claude_args_are_refused_by_an_older_ftmd() {
 }
 
 /// Posts a decision and a flag through `ftm`, then records every byte typed into its pane. `paste` agents turn on
-/// bracketed paste first, as Claude Code does. `live` agents record through `$FAKE_LIVE`, a `cat` named `claude`.
+/// bracketed paste first, as Claude Code does. `live` agents record under `$FAKE_LIVE`, a shell named `claude`.
 const TASK_AGENT: &str = r###"#!/bin/sh
 PATH="$FTM_BIN_DIR:$PATH"
 out="$FAKE_OUT/$FTM_NAME"
@@ -783,8 +783,8 @@ printf 'Tests are flaky\n' | ftm flag "CI is red" --body-file - > "$out.flag" 2>
 case "$FTM_NAME" in paste*) printf '\033[?2004h' ;; esac
 trap '' HUP
 stty raw -echo
+case "$FTM_NAME" in live*) exec "$FAKE_LIVE" -c 'touch "$1.ready"; cat; :' claude "$out" > "$out.typed" ;; esac
 touch "$out.ready"
-case "$FTM_NAME" in live*) exec "$FAKE_LIVE" > "$out.typed" ;; esac
 exec cat > "$out.typed"
 "###;
 
@@ -969,11 +969,8 @@ fn a_claude_running_without_hooks_still_gets_answers() {
     let fake = root.join("fake-claude");
     write_executable(&fake, TASK_AGENT.as_bytes());
     let live_claude = root.join("claude");
-    let cat = ["/bin/cat", "/usr/bin/cat"]
-        .into_iter()
-        .find(|p| Path::new(p).exists())
-        .unwrap();
-    std::fs::copy(cat, &live_claude).unwrap();
+    // Not a copy of cat: multi-call coreutils (uutils) refuse to run as `claude`.
+    std::fs::copy("/bin/bash", &live_claude).unwrap();
     let daemon = start_daemon("tasks-live", |c| {
         c.env("FTM_AGENT_CMD", &fake)
             .env("FTM_BIN_DIR", bin.parent().unwrap())

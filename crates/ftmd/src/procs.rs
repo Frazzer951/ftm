@@ -226,9 +226,13 @@ pub fn claude_in_pane(holder: libc::pid_t) -> bool {
         .filter(|p| p.ppid == holder && p.sid == p.pid)
         .map(|p| p.pid)
         .collect();
+    claude_in_sessions(&procs, &shells)
+}
+
+fn claude_in_sessions(procs: &[Proc], sessions: &[libc::pid_t]) -> bool {
     procs
         .iter()
-        .filter(|p| shells.contains(&p.sid))
+        .filter(|p| sessions.contains(&p.sid))
         .any(|p| p.comm == "claude" || argv(p.pid, 2).iter().any(|a| named_claude(a)))
 }
 
@@ -278,6 +282,14 @@ mod tests {
             .unwrap()
     }
 
+    /// A copy of bash, which runs under any name: multi-call coreutils (uutils) refuse to run as `claude`, and macOS's
+    /// /bin/sh only starts another shell.
+    fn fake_claude(dir: &Path) -> std::path::PathBuf {
+        let claude = dir.join("claude");
+        std::fs::copy("/bin/bash", &claude).unwrap();
+        claude
+    }
+
     fn wait_until(what: &str, mut ok: impl FnMut() -> bool) {
         let deadline = Instant::now() + Duration::from_secs(5);
         while !ok() {
@@ -297,10 +309,9 @@ mod tests {
     fn claude_counts_only_while_it_runs_in_a_shell_of_ours() {
         let _serial = CLAUDES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = scratch("native");
-        let claude = dir.join("claude");
-        std::fs::copy(sleep_bin(), &claude).unwrap();
+        let claude = fake_claude(&dir);
         // The shell runs claude as a child, like `claude --resume` typed at a prompt.
-        let script = format!("'{}' 30; exit 0", claude.display());
+        let script = format!("'{}' -c 'sleep 30; :'; exit 0", claude.display());
         let mut child = shell(Path::new("/bin/sh"), &["-c", &script]);
         wait_until("claude to start", || claude_in_pane(this()));
         assert!(!claude_in_pane(child.id().cast_signed()), "only the holder's shells count");
@@ -333,13 +344,8 @@ mod tests {
         let mut child = shell(&sleep_bin(), &["30"]);
         let pid = child.id().cast_signed();
         wait_until("the shell to start", || list().iter().any(|p| p.pid == pid && p.sid == pid));
-        // Other tests may have their own claude running under this process.
-        assert!(
-            !list()
-                .iter()
-                .filter(|p| p.sid == pid)
-                .any(|p| p.comm == "claude" || argv(p.pid, 2).iter().any(|a| named_claude(a)))
-        );
+        // Other tests may have their own claude running under this process, so only this shell's session is checked.
+        assert!(!claude_in_sessions(&list(), &[pid]));
         // SAFETY: kill takes no pointers; `pid` is our unreaped child.
         unsafe { libc::kill(pid, libc::SIGKILL) };
         child.wait().unwrap();
