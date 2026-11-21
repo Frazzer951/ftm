@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.24] - 2026-11-21
+
+### Daemon
+
+- fix(ftmd): answer a task when a Claude is running in the agent's pane despite a stale Done/Failed status (ftm#133)
+- test(ftmd): fake claude with a copy of bash, not a coreutils tool that uutils refuses to run as claude (ftm#133)
+
 ## [0.1.23] - 2026-11-20
 
 ### App
