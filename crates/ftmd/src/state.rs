@@ -76,6 +76,8 @@ struct Pane {
     /// Frames for the holder, written by the pane's own thread so a holder that is slow to read stalls nothing else.
     holder: mpsc::Sender<ToHolder>,
     holder_socket: PathBuf,
+    /// Found from the socket's peer, so it is known for holders that outlived an earlier ftmd too.
+    holder_pid: Option<libc::pid_t>,
     buffer: Tail,
     /// Headless emulator fed the same output, so the current screen and scrollback can be read back as text.
     screen: vt100::Parser<TitleWatch>,
@@ -480,6 +482,7 @@ impl State {
         startup: bool,
     ) -> Result<()> {
         let (read, (rows, cols), replay) = handshake(&stream)?;
+        let holder_pid = crate::procs::peer_pid(&stream);
         // The replay goes in before anyone can see the pane, so a capture or attach right after a restart has the screen.
         self.panes.insert(
             id,
@@ -487,6 +490,7 @@ impl State {
                 workspace,
                 holder: holder_writer(id, stream)?,
                 holder_socket,
+                holder_pid,
                 buffer: Tail::new(BUFFER_CAP, BUFFER_SLACK),
                 screen: vt100::Parser::new_with_callbacks(rows, cols, SCROLLBACK, TitleWatch::default()),
                 startup,
@@ -1312,19 +1316,25 @@ fn answer_target(state: &State, workspace: WorkspaceId) -> Result<(PaneId, bool)
     if ws.kind != Kind::Agent {
         bail!("{name} is not an agent workspace, so there is nothing to answer; dismiss it instead");
     }
-    match ws.status {
-        Status::NeedsInput => bail!("{name} is waiting on a prompt in its pane; answer that first"),
-        Status::Done | Status::Failed => bail!("{name}'s Claude session has ended"),
-        _ => {},
+    if ws.status == Status::NeedsInput {
+        bail!("{name} is waiting on a prompt in its pane; answer that first");
     }
     let pane = ws
         .agent_pane
         .filter(|p| ws.tabs.iter().any(|t| t.layout.contains(*p)))
-        .or_else(|| ws.tabs.first().map(|t| t.layout.panes()[0]))
-        .ok_or_else(|| eyre!("{name} has no open pane"))?;
-    match state.panes.get(&pane) {
-        Some(p) if !p.exited => Ok((pane, p.screen.screen().bracketed_paste())),
-        _ => bail!("{name} has no live pane"),
+        .or_else(|| ws.tabs.first().map(|t| t.layout.panes()[0]));
+    let live = pane.and_then(|id| state.panes.get(&id).filter(|p| !p.exited).map(|p| (id, p)));
+    // A Claude started by hand (`claude --resume` after a crash) has no hooks, so the status can say it ended while it
+    // runs.
+    if matches!(ws.status, Status::Done | Status::Failed)
+        && !live.and_then(|(_, p)| p.holder_pid).is_some_and(crate::procs::claude_in_pane)
+    {
+        bail!("{name}'s Claude session has ended");
+    }
+    match (pane, live) {
+        (None, _) => bail!("{name} has no open pane"),
+        (_, None) => bail!("{name} has no live pane"),
+        (_, Some((id, p))) => Ok((id, p.screen.screen().bracketed_paste())),
     }
 }
 

@@ -1,6 +1,7 @@
 mod frame;
 mod holder;
 mod hooks;
+mod procs;
 mod state;
 mod trim;
 mod upgrade;
