@@ -319,8 +319,13 @@ impl Events {
         let still = current.clone();
         // Runs on the main thread (from the `subscribe` command), where a panic takes the whole app down.
         let spawned = std::thread::Builder::new().name("ftmd-batches".into()).spawn(move || {
+            let mut stats = crate::perf::BatchStats::default();
             forward_batches(&batches, BATCH_INTERVAL, |batch| {
                 if still.load(Ordering::SeqCst) == generation {
+                    if let Some(line) = stats.record(&batch, Instant::now()) {
+                        eprintln!("{line}");
+                        crate::crash_log::append(&crate::crash_log::path(), &line);
+                    }
                     emit(batch);
                 }
             });
@@ -367,7 +372,7 @@ impl Events {
 /// Hands `emit` every event that has arrived, at most once per `interval`; the first event after a quiet spell goes
 /// out at once. Each emit is a script the webview compiles and runs on its main thread, so emitting every event on
 /// its own freezes all panes while one pane floods output. Ends once the sender is gone and the queue is drained.
-fn forward_batches(events: &mpsc::Receiver<Event>, interval: Duration, emit: impl Fn(Vec<Event>)) {
+fn forward_batches(events: &mpsc::Receiver<Event>, interval: Duration, mut emit: impl FnMut(Vec<Event>)) {
     let mut last: Option<Instant> = None;
     while let Ok(first) = events.recv() {
         let mut batch = vec![first];

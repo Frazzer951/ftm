@@ -42,7 +42,7 @@ pub fn rotate(log: &Path, max_bytes: u64) {
     }
 }
 
-fn append(log: &Path, entry: &str) {
+pub fn append(log: &Path, entry: &str) {
     if let Some(dir) = log.parent() {
         let _ = paths::private_dir(dir, paths::socket_dir_is_ours(dir));
     }
