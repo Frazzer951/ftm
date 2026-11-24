@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.25] - 2026-11-24
+
+### App
+
+- fix(app): keep sidebar and tab clicks from being lost to status rebuilds, and log perf numbers (ftm#135)
+
 ## [0.1.24] - 2026-11-21
 
 ### Daemon
