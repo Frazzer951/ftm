@@ -6,6 +6,7 @@ mod daemon;
 mod fonts;
 mod links;
 mod open_in;
+mod perf;
 mod sounds;
 mod themes;
 mod tray;
@@ -350,6 +351,13 @@ fn log(message: String) {
     eprintln!("[frontend] {message}");
 }
 
+/// The page's performance summaries, kept in ftm-app.log since an installed app's stderr goes nowhere.
+#[tauri::command]
+fn log_perf(message: String) {
+    eprintln!("[frontend] {message}");
+    crash_log::append(&crash_log::path(), &message);
+}
+
 fn main() {
     crash_log::install();
     // FTM_BACKGROUND=1 (for scripted launches): never take focus from whatever the user is doing.
@@ -402,6 +410,7 @@ fn main() {
             artifact_stat,
             read_artifact,
             log,
+            log_perf,
             ensure_on_screen,
             check_update
         ])

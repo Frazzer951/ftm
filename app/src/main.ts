@@ -37,6 +37,7 @@ import {
   sortRows,
 } from "./order.ts";
 import { Inbox } from "./inbox.ts";
+import { PerfMeter } from "./perf.ts";
 import { replyFilter } from "./replies.ts";
 import { clampSidebarWidth, SIDEBAR_DEFAULT } from "./sidebar.ts";
 import { loadSounds, play, type SoundEntry, type SoundSettings } from "./sounds.ts";
@@ -107,6 +108,19 @@ const isMac = navigator.userAgent.includes("Mac");
 const report = (message: string) => {
   invoke("log", { message }).catch(() => {});
 };
+const perf = new PerfMeter(performance.now());
+const HEARTBEAT_MS = 250;
+let beat = performance.now();
+setInterval(() => {
+  const now = performance.now();
+  // A hidden or occluded window's timers are throttled, and a sleeping Mac stops them; neither is the page stalling.
+  const late = now - beat - HEARTBEAT_MS;
+  if (document.visibilityState === "visible" && late < 60_000) perf.stall(late);
+  beat = now;
+  const line = perf.take(now);
+  if (line) invoke("log_perf", { message: line }).catch(() => {});
+}, HEARTBEAT_MS);
+
 const consoleError = console.error.bind(console);
 console.error = (...args: unknown[]) => {
   consoleError(...args);
@@ -274,7 +288,10 @@ function view(pane: Id): PaneView {
   if (!navigator.userAgent.includes("Linux")) {
     try {
       const gl = new WebglAddon();
-      gl.onContextLoss(() => gl.dispose());
+      gl.onContextLoss(() => {
+        perf.contextLost();
+        gl.dispose();
+      });
       term.loadAddon(gl);
     } catch (e) {
       console.warn("webgl unavailable, using the DOM renderer", e);
@@ -907,6 +924,7 @@ function setFocus(pane: Id) {
 let live = new Set<Id>();
 
 function onWorkspaces(list: Workspace[]) {
+  perf.workspaces();
   onStatusChanges(list);
   workspaces = list;
   live = new Set(list.flatMap((w) => w.tabs.flatMap((t) => panesOf(t.layout))));
@@ -1113,9 +1131,42 @@ function setupSidebarResize() {
   };
 }
 
+/// Agents' hooks change statuses often, and a rebuild between a press and its release replaces the element under the
+/// pointer, so the browser drops the click. While a press in the sidebar or tab bar is down, rebuilds wait for its
+/// release (and the click it brings).
+let pressed = false;
+let pressStale = false;
+for (const id of ["sections", "tabs"]) $(id).addEventListener("pointerdown", () => (pressed = true), true);
+function release() {
+  if (!pressed) return;
+  pressed = false;
+  if (!pressStale) return;
+  setTimeout(() => {
+    if (!pressStale || pressed) return;
+    pressStale = false;
+    renderSidebar();
+    renderTabs();
+  });
+}
+window.addEventListener("pointerup", release, true);
+window.addEventListener("pointercancel", release, true);
+window.addEventListener("blur", release);
+// A release outside the window never arrives; the next move without a button held stands in for it.
+window.addEventListener("pointermove", (e) => e.buttons === 0 && release(), true);
+
 /// Top to bottom: Pinned, Active Terminals, Active Agents, Folders. Children stay under their parent, wherever the
 /// parent is, sorted the way the parent's section is.
 function renderSidebar() {
+  if (pressed) {
+    pressStale = true;
+    return;
+  }
+  const start = performance.now();
+  buildSidebar();
+  perf.sidebar(performance.now() - start);
+}
+
+function buildSidebar() {
   if (editing && workspaces.some((w) => w.id === editing)) return;
   editing = null;
   if (rowDrag?.moved) return;
@@ -1793,6 +1844,10 @@ async function notifyNeedsInput(fresh: Workspace[]) {
 }
 
 function renderTabs() {
+  if (pressed) {
+    pressStale = true;
+    return;
+  }
   const nav = $("tabs");
   nav.replaceChildren();
   const ws = selectedWorkspace();
@@ -1843,6 +1898,9 @@ function openInControl(path: string): HTMLElement | null {
   return group;
 }
 
+/// The panes in the tab on screen.
+let shownPanes = new Set<Id>();
+
 function renderPanes() {
   const root = $("panes");
   const tab = currentTab();
@@ -1859,6 +1917,7 @@ function renderPanes() {
       root.replaceChildren(build(tab.layout));
     }
   }
+  shownPanes = new Set(tab ? panesOf(tab.layout) : []);
   if (!tab) return;
   const panes = panesOf(tab.layout);
   if (!focused || !panes.includes(focused)) focused = panes[0];
@@ -2264,15 +2323,23 @@ function onEvent(payload: FtmEvent) {
     );
   } else if (payload.event === "output" && live.has(payload.pane)) {
     const v = view(payload.pane);
+    const shown = shownPanes.has(payload.pane);
+    const start = performance.now();
+    const parsed = (bytes: number) => perf.write(bytes, shown, shown ? performance.now() - start : undefined);
     if (payload.reset) {
       v.term.reset();
       v.kitty.reset();
       v.wheel.reset();
       v.images.reset();
       v.replaying++;
-      v.term.write(v.images.feed(decode(payload.data)), () => v.replaying--);
+      const data = v.images.feed(decode(payload.data));
+      v.term.write(data, () => {
+        v.replaying--;
+        parsed(data.length);
+      });
     } else {
-      v.term.write(v.images.feed(decode(payload.data)));
+      const data = v.images.feed(decode(payload.data));
+      v.term.write(data, () => parsed(data.length));
     }
   }
 }
